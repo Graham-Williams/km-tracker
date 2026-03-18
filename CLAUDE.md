@@ -13,6 +13,14 @@ This is a public GitHub repo — keep all committed content professional and gen
 - **Never commit or push** — Graham handles all commits and pushes
 - **Other git ops:** Confirm before anything that touches working state (reset, checkout, stash, etc.)
 
+## Tech Stack
+
+- **Backend:** Python + Flask (server-rendered HTML via Jinja templates)
+- **Database:** SQLite (via Python stdlib)
+- **Testing:** pytest (with Flask test client)
+- **Port:** 8080 (5000 conflicts with macOS AirPlay Receiver)
+- **Network access:** Binds to `0.0.0.0` so other devices on the local network can reach it
+
 ## Code Style & Conventions
 
 - Keep it simple — don't over-engineer
