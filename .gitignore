@@ -26,6 +26,8 @@ venv/
 .pytest_cache/
 
 # Database (local dev instances — committed migrations/schema are fine)
+db/
+*.db
 *.db-journal
 *.db-wal
 *.db-shm

@@ -40,6 +40,23 @@ ifconfig | grep "inet " | grep -v 127.0.0.1
 
 Your phone must be on the same WiFi network as your laptop.
 
+### Database
+
+The app uses SQLite. By default the database file is created at `db/km_tracker.db` in the project root. To store it elsewhere (e.g., a synced folder like Google Drive), create a `.env` file:
+
+```
+DB_PATH=/path/to/your/km_tracker.db
+```
+
+A timestamped backup (UTC) is created in a `backups/` directory alongside the database each time the app starts, organized by date:
+
+```
+backups/
+  2026-03-21/
+    km_tracker_20260321T031522456Z.db
+    km_tracker_20260321T194837012Z.db
+```
+
 ### Running Tests
 
 ```bash
