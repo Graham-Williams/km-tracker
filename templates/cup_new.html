@@ -3,18 +3,18 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Edit Cup — KM Tracker</title>
+    <title>New Cup — KM Tracker</title>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body { font-family: system-ui, sans-serif; padding: 1rem; max-width: 480px; margin: 0 auto; }
         h1, h2 { margin-bottom: 1rem; }
         h2 { margin-top: 1.5rem; font-size: 1.2rem; }
         .flash { background: #fee; color: #900; padding: 0.5rem; border-radius: 4px; margin-bottom: 1rem; }
-        .edit-form { display: flex; flex-direction: column; gap: 0.75rem; }
-        .edit-form > label { font-weight: 600; }
-        .edit-form input[type="datetime-local"],
-        .edit-form textarea { width: 100%; padding: 0.5rem; font-size: 1rem; border: 1px solid #ccc; border-radius: 4px; }
-        .edit-form textarea { resize: vertical; }
+        .cup-form { display: flex; flex-direction: column; gap: 0.75rem; }
+        .cup-form > label { font-weight: 600; }
+        .cup-form input[type="datetime-local"],
+        .cup-form textarea { width: 100%; padding: 0.5rem; font-size: 1rem; border: 1px solid #ccc; border-radius: 4px; }
+        .cup-form textarea { resize: vertical; }
         .score-row { display: flex; align-items: center; gap: 0.5rem; padding: 0.4rem 0; border-bottom: 1px solid #f0f0f0; }
         .score-row.removed { display: none; }
         .score-name { flex: 1; }
@@ -36,10 +36,11 @@
             padding: 0.5rem 1rem; font-size: 1rem; border-radius: 4px;
             text-decoration: none; border: 1px solid #ccc; background: #f8f8f8; color: #333; cursor: pointer;
         }
+        .no-players { color: #666; font-style: italic; }
     </style>
 </head>
 <body>
-    <h1>Edit Cup</h1>
+    <h1>New Cup</h1>
 
     {% with messages = get_flashed_messages() %}
     {% if messages %}
@@ -49,25 +50,22 @@
     {% endif %}
     {% endwith %}
 
-    <form class="edit-form" method="post" action="{{ url_for('update_cup', cup_id=cup.id) }}" id="cup-form">
+    <form class="cup-form" method="post" action="{{ url_for('create_cup') }}" id="cup-form">
         <label for="cup-date">Date</label>
-        <input type="datetime-local" name="date" id="cup-date" required>
+        <input type="datetime-local" name="date" id="cup-date">
         <label for="cup-notes">Notes</label>
-        <textarea name="notes" id="cup-notes" rows="3">{{ cup.notes or '' }}</textarea>
+        <textarea name="notes" id="cup-notes" placeholder="Notes (optional)" rows="2"></textarea>
         <input type="hidden" name="tz_offset" id="tz-offset">
 
         <h2>Scores</h2>
         <div id="score-rows">
         {% for player in players %}
-        {% set s = scores_by_player.get(player.id) %}
         <div class="score-row" data-player-id="{{ player.id }}">
             <span class="score-name">{{ player.name }}</span>
             <span class="score-place"></span>
             <input type="hidden" name="player_ids[]" value="{{ player.id }}">
-            <input type="number" name="scores[]" placeholder="Pts" min="0" class="score-input"
-                   value="{{ s.score if s else '' }}">
-            <label class="tb-wrapper"><input type="checkbox" name="tiebreakers[]" value="{{ player.id }}"
-                   {{ 'checked' if s and s.won_tiebreaker else '' }}> TB</label>
+            <input type="number" name="scores[]" placeholder="Pts" min="0" class="score-input">
+            <label class="tb-wrapper"><input type="checkbox" name="tiebreakers[]" value="{{ player.id }}"> TB</label>
             <button type="button" class="remove-btn" title="Remove player">&times;</button>
         </div>
         {% endfor %}
@@ -81,19 +79,16 @@
         </div>
 
         <div class="buttons">
-            <button type="submit">Save</button>
+            <button type="submit">Create Cup</button>
             <a href="{{ url_for('cups') }}">Cancel</a>
         </div>
     </form>
 
     <script>
         document.getElementById("tz-offset").value = new Date().getTimezoneOffset();
-        var utcStr = "{{ cup.date }}";
-        var d = new Date(utcStr.replace(" ", "T") + "Z");
-        if (!isNaN(d)) {
-            d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
-            document.getElementById("cup-date").value = d.toISOString().slice(0, 16);
-        }
+        var now = new Date();
+        now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
+        document.getElementById("cup-date").value = now.toISOString().slice(0, 16);
 
         var allPlayers = [
             {% for p in all_players %}
@@ -144,11 +139,13 @@
             var data = getScoreGroups();
             var groups = data.groups;
 
+            // Build set of scores that are tied
             var tiedScores = {};
             Object.keys(groups).forEach(function(score) {
                 if (groups[score].length > 1) tiedScores[score] = true;
             });
 
+            // For each tie group, find if someone is already checked
             var checkedByGroup = {};
             document.querySelectorAll(".score-row:not(.removed)").forEach(function(row) {
                 var cb = row.querySelector("input[type=checkbox]");
@@ -159,6 +156,7 @@
                 }
             });
 
+            // Enable/disable checkboxes
             document.querySelectorAll(".score-row:not(.removed)").forEach(function(row) {
                 var cb = row.querySelector("input[type=checkbox]");
                 var wrapper = row.querySelector(".tb-wrapper");
@@ -167,10 +165,12 @@
                 var score = val === "" ? null : parseInt(val, 10);
 
                 if (score === null || !tiedScores[score]) {
+                    // Not in a tie — disable and uncheck
                     cb.disabled = true;
                     cb.checked = false;
                     wrapper.classList.add("disabled");
                 } else if (checkedByGroup[String(score)] && checkedByGroup[String(score)] !== row.dataset.playerId) {
+                    // Someone else in this tie group is checked — disable but don't uncheck
                     cb.disabled = true;
                     wrapper.classList.add("disabled");
                 } else {
@@ -184,13 +184,16 @@
             var data = getScoreGroups();
             var entries = data.entries;
             var scored = data.scored;
+            var groups = data.groups;
 
+            // Collect all tiebreaker winners
             var tbPids = new Set();
             document.querySelectorAll(".score-row:not(.removed)").forEach(function(row) {
                 var cb = row.querySelector("input[type=checkbox]");
                 if (cb.checked) tbPids.add(row.dataset.playerId);
             });
 
+            // Sort by score desc, then tiebreaker winners first within same score
             scored.sort(function(a, b) {
                 if (b.score !== a.score) return b.score - a.score;
                 if (tbPids.has(a.playerId) && !tbPids.has(b.playerId)) return -1;
@@ -198,12 +201,14 @@
                 return 0;
             });
 
+            // Assign ranks — tiebreaker winners get unique rank, others share
             for (var i = 0; i < scored.length; i++) {
                 if (i === 0) {
                     scored[i].rank = 1;
                 } else if (scored[i].score !== scored[i - 1].score) {
                     scored[i].rank = i + 1;
                 } else {
+                    // Same score — check if tiebreaker separates them
                     var prevIsTb = tbPids.has(scored[i - 1].playerId);
                     var curIsTb = tbPids.has(scored[i].playerId);
                     if (prevIsTb !== curIsTb) {

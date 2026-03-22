@@ -9,13 +9,9 @@
         body { font-family: system-ui, sans-serif; padding: 1rem; max-width: 480px; margin: 0 auto; }
         h1 { margin-bottom: 1rem; }
         .flash { background: #fee; color: #900; padding: 0.5rem; border-radius: 4px; margin-bottom: 1rem; }
-        .add-form { display: flex; flex-direction: column; gap: 0.5rem; margin-bottom: 1.5rem; }
-        .add-form .row { display: flex; gap: 0.5rem; }
-        .add-form input[type="datetime-local"] { flex: 1; padding: 0.5rem; font-size: 1rem; border: 1px solid #ccc; border-radius: 4px; }
-        .add-form textarea { width: 100%; padding: 0.5rem; font-size: 1rem; border: 1px solid #ccc; border-radius: 4px; resize: vertical; }
-        .add-form button { padding: 0.5rem 1rem; font-size: 1rem; }
         .cup-list { list-style: none; }
-        .cup-item { display: flex; justify-content: space-between; align-items: center; padding: 0.75rem 0; border-bottom: 1px solid #eee; }
+        .cup-item { padding: 0.75rem 0; border-bottom: 1px solid #eee; }
+        .cup-header { display: flex; justify-content: space-between; align-items: center; }
         .cup-info { display: flex; flex-direction: column; gap: 0.25rem; }
         .cup-date { font-size: 1.1rem; }
         .cup-notes { font-size: 0.9rem; color: #666; }
@@ -25,6 +21,10 @@
             text-decoration: none; border: 1px solid #ccc; background: #f8f8f8; color: #333; cursor: pointer;
         }
         .cup-actions button.delete { color: #900; border-color: #c99; }
+        .cup-results { margin-top: 0.5rem; padding-left: 0.25rem; }
+        .cup-results li { font-size: 0.9rem; color: #444; padding: 0.1rem 0; list-style: none; }
+        .cup-results .place { color: #888; min-width: 3.5rem; display: inline-block; }
+        .cup-results .pts { color: #888; font-size: 0.85rem; }
         .empty { color: #666; font-style: italic; }
     </style>
 </head>
@@ -39,32 +39,61 @@
     {% endif %}
     {% endwith %}
 
-    <form class="add-form" method="post" action="{{ url_for('create_cup') }}">
-        <div class="row">
-            <input type="datetime-local" name="date" id="cup-date">
-            <button type="submit">Add</button>
-        </div>
-        <textarea name="notes" placeholder="Notes (optional)" rows="2"></textarea>
-        <input type="hidden" name="tz_offset" id="tz-offset">
-    </form>
+    <p style="margin-bottom: 1.5rem;">
+        <a href="{{ url_for('new_cup') }}" style="padding: 0.5rem 1rem; font-size: 1rem; border-radius: 4px; text-decoration: none; border: 1px solid #ccc; background: #f8f8f8; color: #333;">Add Cup</a>
+    </p>
 
     {% if cups %}
     <ul class="cup-list">
         {% for cup in cups %}
         <li class="cup-item">
-            <div class="cup-info">
-                <span class="cup-date"><time datetime="{{ cup.date }}">{{ cup.date }}</time></span>
-                {% if cup.notes %}
-                <span class="cup-notes">{{ cup.notes }}</span>
-                {% endif %}
+            <div class="cup-header">
+                <div class="cup-info">
+                    <span class="cup-date"><time datetime="{{ cup.date }}">{{ cup.date }}</time></span>
+                    {% if cup.notes %}
+                    <span class="cup-notes">{{ cup.notes }}</span>
+                    {% endif %}
+                </div>
+                <div class="cup-actions">
+                    <a href="{{ url_for('edit_cup', cup_id=cup.id) }}">Edit</a>
+                    <form method="post" action="{{ url_for('delete_cup', cup_id=cup.id) }}" style="display:inline"
+                          onsubmit="return confirm('Delete this cup and its scores?')">
+                        <button type="submit" class="delete">Delete</button>
+                    </form>
+                </div>
             </div>
-            <div class="cup-actions">
-                <a href="{{ url_for('edit_cup', cup_id=cup.id) }}">Edit</a>
-                <form method="post" action="{{ url_for('delete_cup', cup_id=cup.id) }}" style="display:inline"
-                      onsubmit="return confirm('Delete this cup?')">
-                    <button type="submit" class="delete">Delete</button>
-                </form>
-            </div>
+            {% set cup_scores = results.get(cup.id, []) %}
+            {% if cup_scores %}
+            <ul class="cup-results">
+                {% for s in cup_scores %}
+                {% set ns = namespace(rank=1, tied=false, tie_count=0) %}
+                {% for other in cup_scores %}
+                    {% if other.score > s.score %}
+                        {% set ns.rank = ns.rank + 1 %}
+                    {% elif other.score == s.score and other.name != s.name %}
+                        {% if other.won_tiebreaker and not s.won_tiebreaker %}
+                            {% set ns.rank = ns.rank + 1 %}
+                        {% elif not other.won_tiebreaker and not s.won_tiebreaker %}
+                            {% set ns.tied = true %}
+                            {% set ns.tie_count = ns.tie_count + 1 %}
+                        {% elif other.won_tiebreaker and s.won_tiebreaker %}
+                            {% set ns.tied = true %}
+                            {% set ns.tie_count = ns.tie_count + 1 %}
+                        {% endif %}
+                    {% endif %}
+                {% endfor %}
+                {% set ns.place = ns.rank + ns.tie_count if ns.tied else ns.rank %}
+                {% set ordinals = {1: '1st', 2: '2nd', 3: '3rd'} %}
+                {% set place_str = ordinals.get(ns.place, ns.place ~ 'th') %}
+                {% if ns.tied %}{% set place_str = 'T-' ~ place_str %}{% endif %}
+                <li>
+                    <span class="place">{{ place_str }}</span>
+                    {{ s.name }}
+                    <span class="pts">({{ s.score }}{% if s.won_tiebreaker %}*{% endif %} pts)</span>
+                </li>
+                {% endfor %}
+            </ul>
+            {% endif %}
         </li>
         {% endfor %}
     </ul>
@@ -73,19 +102,10 @@
     {% endif %}
 
     <script>
-        // Set timezone offset for server-side UTC conversion
-        document.getElementById("tz-offset").value = new Date().getTimezoneOffset();
-
-        // Pre-fill datetime input with current local time
-        var now = new Date();
-        now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
-        document.getElementById("cup-date").value = now.toISOString().slice(0, 16);
-
         // Convert UTC times to local for display
         document.querySelectorAll("time").forEach(function(el) {
             var utc = el.getAttribute("datetime");
             if (!utc) return;
-            // Parse as UTC (append Z if not present)
             var d = new Date(utc.replace(" ", "T") + "Z");
             if (isNaN(d)) return;
             el.textContent = d.toLocaleString();
