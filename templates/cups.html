@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cups — KM Tracker</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: system-ui, sans-serif; padding: 1rem; max-width: 480px; margin: 0 auto; }
+        h1 { margin-bottom: 1rem; }
+        .flash { background: #fee; color: #900; padding: 0.5rem; border-radius: 4px; margin-bottom: 1rem; }
+        .add-form { display: flex; flex-direction: column; gap: 0.5rem; margin-bottom: 1.5rem; }
+        .add-form .row { display: flex; gap: 0.5rem; }
+        .add-form input[type="datetime-local"] { flex: 1; padding: 0.5rem; font-size: 1rem; border: 1px solid #ccc; border-radius: 4px; }
+        .add-form textarea { width: 100%; padding: 0.5rem; font-size: 1rem; border: 1px solid #ccc; border-radius: 4px; resize: vertical; }
+        .add-form button { padding: 0.5rem 1rem; font-size: 1rem; }
+        .cup-list { list-style: none; }
+        .cup-item { display: flex; justify-content: space-between; align-items: center; padding: 0.75rem 0; border-bottom: 1px solid #eee; }
+        .cup-info { display: flex; flex-direction: column; gap: 0.25rem; }
+        .cup-date { font-size: 1.1rem; }
+        .cup-notes { font-size: 0.9rem; color: #666; }
+        .cup-actions { display: flex; gap: 0.5rem; }
+        .cup-actions a, .cup-actions button {
+            padding: 0.25rem 0.75rem; font-size: 0.9rem; border-radius: 4px;
+            text-decoration: none; border: 1px solid #ccc; background: #f8f8f8; color: #333; cursor: pointer;
+        }
+        .cup-actions button.delete { color: #900; border-color: #c99; }
+        .empty { color: #666; font-style: italic; }
+    </style>
+</head>
+<body>
+    <h1>Cups</h1>
+
+    {% with messages = get_flashed_messages() %}
+    {% if messages %}
+    {% for message in messages %}
+    <div class="flash">{{ message }}</div>
+    {% endfor %}
+    {% endif %}
+    {% endwith %}
+
+    <form class="add-form" method="post" action="{{ url_for('create_cup') }}">
+        <div class="row">
+            <input type="datetime-local" name="date" id="cup-date">
+            <button type="submit">Add</button>
+        </div>
+        <textarea name="notes" placeholder="Notes (optional)" rows="2"></textarea>
+        <input type="hidden" name="tz_offset" id="tz-offset">
+    </form>
+
+    {% if cups %}
+    <ul class="cup-list">
+        {% for cup in cups %}
+        <li class="cup-item">
+            <div class="cup-info">
+                <span class="cup-date"><time datetime="{{ cup.date }}">{{ cup.date }}</time></span>
+                {% if cup.notes %}
+                <span class="cup-notes">{{ cup.notes }}</span>
+                {% endif %}
+            </div>
+            <div class="cup-actions">
+                <a href="{{ url_for('edit_cup', cup_id=cup.id) }}">Edit</a>
+                <form method="post" action="{{ url_for('delete_cup', cup_id=cup.id) }}" style="display:inline"
+                      onsubmit="return confirm('Delete this cup?')">
+                    <button type="submit" class="delete">Delete</button>
+                </form>
+            </div>
+        </li>
+        {% endfor %}
+    </ul>
+    {% else %}
+    <p class="empty">No cups yet. Add one above!</p>
+    {% endif %}
+
+    <script>
+        // Set timezone offset for server-side UTC conversion
+        document.getElementById("tz-offset").value = new Date().getTimezoneOffset();
+
+        // Pre-fill datetime input with current local time
+        var now = new Date();
+        now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
+        document.getElementById("cup-date").value = now.toISOString().slice(0, 16);
+
+        // Convert UTC times to local for display
+        document.querySelectorAll("time").forEach(function(el) {
+            var utc = el.getAttribute("datetime");
+            if (!utc) return;
+            // Parse as UTC (append Z if not present)
+            var d = new Date(utc.replace(" ", "T") + "Z");
+            if (isNaN(d)) return;
+            el.textContent = d.toLocaleString();
+        });
+    </script>
+</body>
+</html>

@@ -16,7 +16,7 @@ This is a public GitHub repo — keep all committed content professional and gen
 ## Tech Stack
 
 - **Backend:** Python + Flask (server-rendered HTML via Jinja templates)
-- **Database:** SQLite (via Python stdlib)
+- **Database:** SQLite (via Python stdlib) — DB path is configured via `DB_PATH` in `.env` (defaults to `db/km_tracker.db`)
 - **Testing:** pytest (with Flask test client)
 - **Port:** 8080 (5000 conflicts with macOS AirPlay Receiver)
 - **Network access:** Binds to `0.0.0.0` so other devices on the local network can reach it

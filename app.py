@@ -1,5 +1,6 @@
 import os
 import sqlite3
+from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
 from flask import Flask, abort, flash, redirect, render_template, request, url_for
@@ -86,6 +87,114 @@ def delete_player(player_id):
     conn.commit()
     conn.close()
     return redirect(url_for("players"))
+
+
+@app.route("/cups")
+def cups():
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT id, date, notes FROM cups ORDER BY date DESC"
+    ).fetchall()
+    conn.close()
+    return render_template("cups.html", cups=rows)
+
+
+@app.route("/cups", methods=["POST"])
+def create_cup():
+    date_str = request.form.get("date", "").strip()
+    notes = request.form.get("notes", "").strip() or None
+    tz_offset = request.form.get("tz_offset", "")
+
+    if date_str:
+        try:
+            local_dt = datetime.strptime(date_str, "%Y-%m-%dT%H:%M")
+            if tz_offset:
+                offset_minutes = int(tz_offset)
+                utc_dt = local_dt + timedelta(minutes=offset_minutes)
+            else:
+                utc_dt = local_dt
+            date_utc = utc_dt.strftime("%Y-%m-%d %H:%M:%S")
+        except (ValueError, OverflowError):
+            flash("Invalid date format.")
+            return redirect(url_for("cups"))
+    else:
+        date_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:00")
+
+    conn = get_connection()
+    try:
+        conn.execute("INSERT INTO cups (date, notes) VALUES (?, ?)", (date_utc, notes))
+        conn.commit()
+    except sqlite3.IntegrityError:
+        flash("A cup already exists at that time.")
+    finally:
+        conn.close()
+    return redirect(url_for("cups"))
+
+
+@app.route("/cups/<int:cup_id>/edit")
+def edit_cup(cup_id):
+    conn = get_connection()
+    cup = conn.execute(
+        "SELECT id, date, notes FROM cups WHERE id = ?", (cup_id,)
+    ).fetchone()
+    conn.close()
+    if cup is None:
+        abort(404)
+    return render_template("cup_edit.html", cup=cup)
+
+
+@app.route("/cups/<int:cup_id>/edit", methods=["POST"])
+def update_cup(cup_id):
+    conn = get_connection()
+    cup = conn.execute(
+        "SELECT id FROM cups WHERE id = ?", (cup_id,)
+    ).fetchone()
+    if cup is None:
+        conn.close()
+        abort(404)
+
+    date_str = request.form.get("date", "").strip()
+    notes = request.form.get("notes", "").strip() or None
+    tz_offset = request.form.get("tz_offset", "")
+
+    if not date_str:
+        flash("Date cannot be empty.")
+        return redirect(url_for("edit_cup", cup_id=cup_id))
+
+    try:
+        local_dt = datetime.strptime(date_str, "%Y-%m-%dT%H:%M")
+        if tz_offset:
+            offset_minutes = int(tz_offset)
+            utc_dt = local_dt + timedelta(minutes=offset_minutes)
+        else:
+            utc_dt = local_dt
+        date_utc = utc_dt.strftime("%Y-%m-%d %H:%M:%S")
+    except (ValueError, OverflowError):
+        flash("Invalid date format.")
+        return redirect(url_for("edit_cup", cup_id=cup_id))
+
+    try:
+        conn.execute(
+            "UPDATE cups SET date = ?, notes = ? WHERE id = ?",
+            (date_utc, notes, cup_id),
+        )
+        conn.commit()
+    except sqlite3.IntegrityError:
+        flash("A cup already exists at that time.")
+        return redirect(url_for("edit_cup", cup_id=cup_id))
+    finally:
+        conn.close()
+    return redirect(url_for("cups"))
+
+
+@app.route("/cups/<int:cup_id>/delete", methods=["POST"])
+def delete_cup(cup_id):
+    # TODO: When scores CRUD exists, prevent deleting cups that have scores.
+    conn = get_connection()
+    conn.execute("DELETE FROM cups WHERE id = ?", (cup_id,))
+    conn.commit()
+    conn.close()
+    return redirect(url_for("cups"))
 
 
 if __name__ == "__main__":
