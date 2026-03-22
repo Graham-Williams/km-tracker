@@ -2,6 +2,8 @@ import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
+from collections import Counter
+
 from dotenv import load_dotenv
 from flask import Flask, abort, flash, redirect, render_template, request, url_for
 
@@ -21,7 +23,9 @@ def index():
 @app.route("/players")
 def players():
     conn = get_connection()
-    rows = conn.execute("SELECT id, name FROM players ORDER BY name").fetchall()
+    rows = conn.execute(
+        "SELECT id, name, default_cup FROM players ORDER BY name"
+    ).fetchall()
     conn.close()
     return render_template("players.html", players=rows)
 
@@ -32,9 +36,13 @@ def create_player():
     if not name:
         flash("Name cannot be empty.")
         return redirect(url_for("players"))
+    default_cup = request.form.get("default_cup") == "on"
     conn = get_connection()
     try:
-        conn.execute("INSERT INTO players (name) VALUES (?)", (name,))
+        conn.execute(
+            "INSERT INTO players (name, default_cup) VALUES (?, ?)",
+            (name, default_cup),
+        )
         conn.commit()
     except sqlite3.IntegrityError:
         flash(f"A player named \"{name}\" already exists.")
@@ -47,7 +55,7 @@ def create_player():
 def edit_player(player_id):
     conn = get_connection()
     player = conn.execute(
-        "SELECT id, name FROM players WHERE id = ?", (player_id,)
+        "SELECT id, name, default_cup FROM players WHERE id = ?", (player_id,)
     ).fetchone()
     conn.close()
     if player is None:
@@ -68,8 +76,12 @@ def update_player(player_id):
     if not name:
         flash("Name cannot be empty.")
         return redirect(url_for("edit_player", player_id=player_id))
+    default_cup = request.form.get("default_cup") == "on"
     try:
-        conn.execute("UPDATE players SET name = ? WHERE id = ?", (name, player_id))
+        conn.execute(
+            "UPDATE players SET name = ?, default_cup = ? WHERE id = ?",
+            (name, default_cup, player_id),
+        )
         conn.commit()
     except sqlite3.IntegrityError:
         flash(f"A player named \"{name}\" already exists.")
@@ -81,8 +93,14 @@ def update_player(player_id):
 
 @app.route("/players/<int:player_id>/delete", methods=["POST"])
 def delete_player(player_id):
-    # TODO: When scores CRUD exists, prevent deleting players who have scores.
     conn = get_connection()
+    has_scores = conn.execute(
+        "SELECT 1 FROM scores WHERE player_id = ? LIMIT 1", (player_id,)
+    ).fetchone()
+    if has_scores:
+        conn.close()
+        flash("Cannot delete a player who has scores recorded.")
+        return redirect(url_for("players"))
     conn.execute("DELETE FROM players WHERE id = ?", (player_id,))
     conn.commit()
     conn.close()
@@ -93,10 +111,23 @@ def delete_player(player_id):
 def cups():
     conn = get_connection()
     rows = conn.execute(
-        "SELECT id, date, notes FROM cups ORDER BY date DESC"
+        "SELECT id, date, notes FROM cups WHERE deleted_at IS NULL ORDER BY date DESC"
     ).fetchall()
+    cup_ids = [r["id"] for r in rows]
+    results = {}
+    if cup_ids:
+        placeholders = ",".join("?" * len(cup_ids))
+        score_rows = conn.execute(
+            f"SELECT s.cup_id, s.score, s.won_tiebreaker, p.name "
+            f"FROM scores s JOIN players p ON s.player_id = p.id "
+            f"WHERE s.cup_id IN ({placeholders}) "
+            f"ORDER BY s.score DESC, p.name",
+            cup_ids,
+        ).fetchall()
+        for s in score_rows:
+            results.setdefault(s["cup_id"], []).append(s)
     conn.close()
-    return render_template("cups.html", cups=rows)
+    return render_template("cups.html", cups=rows, results=results)
 
 
 @app.route("/cups", methods=["POST"])
@@ -120,9 +151,22 @@ def create_cup():
     else:
         date_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:00")
 
+    scores_data = parse_scores_from_form(request.form)
+    if not scores_data:
+        flash("A cup must have at least one player with a score.")
+        return redirect(url_for("new_cup"))
+    error = validate_scores(scores_data)
+    if error:
+        flash(error)
+        return redirect(url_for("new_cup"))
+
     conn = get_connection()
     try:
-        conn.execute("INSERT INTO cups (date, notes) VALUES (?, ?)", (date_utc, notes))
+        cursor = conn.execute(
+            "INSERT INTO cups (date, notes) VALUES (?, ?)", (date_utc, notes)
+        )
+        cup_id = cursor.lastrowid
+        save_scores(conn, cup_id, scores_data)
         conn.commit()
     except sqlite3.IntegrityError:
         flash("A cup already exists at that time.")
@@ -135,19 +179,38 @@ def create_cup():
 def edit_cup(cup_id):
     conn = get_connection()
     cup = conn.execute(
-        "SELECT id, date, notes FROM cups WHERE id = ?", (cup_id,)
+        "SELECT id, date, notes FROM cups WHERE id = ? AND deleted_at IS NULL",
+        (cup_id,),
     ).fetchone()
-    conn.close()
     if cup is None:
+        conn.close()
         abort(404)
-    return render_template("cup_edit.html", cup=cup)
+    existing_scores = conn.execute(
+        "SELECT s.player_id, s.score, s.won_tiebreaker, p.name "
+        "FROM scores s JOIN players p ON s.player_id = p.id "
+        "WHERE s.cup_id = ? ORDER BY p.name",
+        (cup_id,),
+    ).fetchall()
+    all_players = conn.execute(
+        "SELECT id, name FROM players ORDER BY name"
+    ).fetchall()
+    conn.close()
+    scores_by_player = {s["player_id"]: s for s in existing_scores}
+    cup_players = [{"id": s["player_id"], "name": s["name"]} for s in existing_scores]
+    return render_template(
+        "cup_edit.html",
+        cup=cup,
+        players=cup_players,
+        all_players=all_players,
+        scores_by_player=scores_by_player,
+    )
 
 
 @app.route("/cups/<int:cup_id>/edit", methods=["POST"])
 def update_cup(cup_id):
     conn = get_connection()
     cup = conn.execute(
-        "SELECT id FROM cups WHERE id = ?", (cup_id,)
+        "SELECT id FROM cups WHERE id = ? AND deleted_at IS NULL", (cup_id,)
     ).fetchone()
     if cup is None:
         conn.close()
@@ -173,11 +236,19 @@ def update_cup(cup_id):
         flash("Invalid date format.")
         return redirect(url_for("edit_cup", cup_id=cup_id))
 
+    scores_data = parse_scores_from_form(request.form)
+    if scores_data:
+        error = validate_scores(scores_data)
+        if error:
+            flash(error)
+            return redirect(url_for("edit_cup", cup_id=cup_id))
+
     try:
         conn.execute(
             "UPDATE cups SET date = ?, notes = ? WHERE id = ?",
             (date_utc, notes, cup_id),
         )
+        save_scores(conn, cup_id, scores_data)
         conn.commit()
     except sqlite3.IntegrityError:
         flash("A cup already exists at that time.")
@@ -189,12 +260,182 @@ def update_cup(cup_id):
 
 @app.route("/cups/<int:cup_id>/delete", methods=["POST"])
 def delete_cup(cup_id):
-    # TODO: When scores CRUD exists, prevent deleting cups that have scores.
+    now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     conn = get_connection()
-    conn.execute("DELETE FROM cups WHERE id = ?", (cup_id,))
+    conn.execute(
+        "UPDATE cups SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL",
+        (now_utc, cup_id),
+    )
     conn.commit()
     conn.close()
     return redirect(url_for("cups"))
+
+
+def validate_scores(scores_data):
+    """Validate tiebreaker rules for a set of scores.
+
+    scores_data is a list of dicts with keys: score, won_tiebreaker.
+    Returns an error message string or None.
+    """
+    score_counts = Counter(s["score"] for s in scores_data)
+    tiebreaker_winners = [s for s in scores_data if s["won_tiebreaker"]]
+    # Each winner must be in a tie group
+    for w in tiebreaker_winners:
+        if score_counts[w["score"]] < 2:
+            return "Tiebreaker winner must share their score with at least one other player."
+    # At most one winner per score value
+    winner_scores = Counter(w["score"] for w in tiebreaker_winners)
+    for score, count in winner_scores.items():
+        if count > 1:
+            return "Only one player can win the tiebreaker per tie group."
+    return None
+
+
+def parse_scores_from_form(form):
+    """Extract score data from form submission.
+
+    Expects form fields: player_ids[], scores[], tiebreakers[] (list of player_ids).
+    Returns list of dicts with keys: player_id, score, won_tiebreaker.
+    Skips players with empty score fields.
+    """
+    player_ids = form.getlist("player_ids[]")
+    raw_scores = form.getlist("scores[]")
+    tiebreaker_ids = set(form.getlist("tiebreakers[]"))
+    scores_data = []
+    for pid, raw in zip(player_ids, raw_scores):
+        raw = raw.strip()
+        if raw == "":
+            continue
+        scores_data.append({
+            "player_id": int(pid),
+            "score": int(raw),
+            "won_tiebreaker": str(pid) in tiebreaker_ids,
+        })
+    return scores_data
+
+
+def save_scores(conn, cup_id, scores_data):
+    """Insert or replace scores for a cup."""
+    conn.execute("DELETE FROM scores WHERE cup_id = ?", (cup_id,))
+    for s in scores_data:
+        conn.execute(
+            "INSERT INTO scores (cup_id, player_id, score, won_tiebreaker) VALUES (?, ?, ?, ?)",
+            (cup_id, s["player_id"], s["score"], s["won_tiebreaker"] or None),
+        )
+
+
+# --- Cup create with scores ---
+
+
+@app.route("/cups/new")
+def new_cup():
+    conn = get_connection()
+    default_players = conn.execute(
+        "SELECT id, name FROM players WHERE default_cup = 1 ORDER BY name"
+    ).fetchall()
+    all_players = conn.execute(
+        "SELECT id, name FROM players ORDER BY name"
+    ).fetchall()
+    conn.close()
+    return render_template(
+        "cup_new.html", players=default_players, all_players=all_players
+    )
+
+
+# --- Cup edit with scores (extended) ---
+# edit_cup and update_cup are above; we replace them here to add score handling.
+
+
+# --- Standalone score routes ---
+
+
+@app.route("/scores")
+def scores():
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT s.id, s.score, s.won_tiebreaker, p.name AS player_name, c.date AS cup_date "
+        "FROM scores s "
+        "JOIN players p ON s.player_id = p.id "
+        "JOIN cups c ON s.cup_id = c.id "
+        "ORDER BY c.date DESC, p.name"
+    ).fetchall()
+    conn.close()
+    return render_template("scores.html", scores=rows)
+
+
+@app.route("/scores", methods=["POST"])
+def create_score():
+    cup_id = request.form.get("cup_id", "").strip()
+    player_id = request.form.get("player_id", "").strip()
+    score = request.form.get("score", "").strip()
+    won_tiebreaker = request.form.get("won_tiebreaker") == "on"
+
+    if not cup_id or not player_id or not score:
+        flash("Cup, player, and score are required.")
+        return redirect(url_for("scores"))
+
+    conn = get_connection()
+    try:
+        conn.execute(
+            "INSERT INTO scores (cup_id, player_id, score, won_tiebreaker) VALUES (?, ?, ?, ?)",
+            (int(cup_id), int(player_id), int(score), won_tiebreaker or None),
+        )
+        conn.commit()
+    except sqlite3.IntegrityError:
+        flash("A score for that player in that cup already exists.")
+    finally:
+        conn.close()
+    return redirect(url_for("scores"))
+
+
+@app.route("/scores/<int:score_id>/edit")
+def edit_score(score_id):
+    conn = get_connection()
+    score = conn.execute(
+        "SELECT id, cup_id, player_id, score, won_tiebreaker FROM scores WHERE id = ?",
+        (score_id,),
+    ).fetchone()
+    conn.close()
+    if score is None:
+        abort(404)
+    return render_template("score_edit.html", score=score)
+
+
+@app.route("/scores/<int:score_id>/edit", methods=["POST"])
+def update_score(score_id):
+    conn = get_connection()
+    existing = conn.execute(
+        "SELECT id FROM scores WHERE id = ?", (score_id,)
+    ).fetchone()
+    if existing is None:
+        conn.close()
+        abort(404)
+
+    score_val = request.form.get("score", "").strip()
+    won_tiebreaker = request.form.get("won_tiebreaker") == "on"
+
+    if not score_val:
+        flash("Score cannot be empty.")
+        return redirect(url_for("edit_score", score_id=score_id))
+
+    try:
+        conn.execute(
+            "UPDATE scores SET score = ?, won_tiebreaker = ? WHERE id = ?",
+            (int(score_val), won_tiebreaker or None, score_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return redirect(url_for("scores"))
+
+
+@app.route("/scores/<int:score_id>/delete", methods=["POST"])
+def delete_score(score_id):
+    conn = get_connection()
+    conn.execute("DELETE FROM scores WHERE id = ?", (score_id,))
+    conn.commit()
+    conn.close()
+    return redirect(url_for("scores"))
 
 
 if __name__ == "__main__":

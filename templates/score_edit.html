@@ -3,15 +3,14 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Edit Player — KM Tracker</title>
+    <title>Edit Score — KM Tracker</title>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body { font-family: system-ui, sans-serif; padding: 1rem; max-width: 480px; margin: 0 auto; }
         h1 { margin-bottom: 1rem; }
         .flash { background: #fee; color: #900; padding: 0.5rem; border-radius: 4px; margin-bottom: 1rem; }
         .edit-form { display: flex; flex-direction: column; gap: 0.75rem; }
-        .edit-form input[type="text"] { padding: 0.5rem; font-size: 1rem; border: 1px solid #ccc; border-radius: 4px; }
-        .edit-form label { font-size: 0.9rem; display: flex; align-items: center; gap: 0.25rem; }
+        .edit-form input[type="number"] { padding: 0.5rem; font-size: 1rem; border: 1px solid #ccc; border-radius: 4px; }
         .edit-form .buttons { display: flex; gap: 0.5rem; }
         .edit-form button, .edit-form a {
             padding: 0.5rem 1rem; font-size: 1rem; border-radius: 4px;
@@ -20,7 +19,7 @@
     </style>
 </head>
 <body>
-    <h1>Edit Player</h1>
+    <h1>Edit Score</h1>
 
     {% with messages = get_flashed_messages() %}
     {% if messages %}
@@ -30,12 +29,13 @@
     {% endif %}
     {% endwith %}
 
-    <form class="edit-form" method="post" action="{{ url_for('update_player', player_id=player.id) }}">
-        <input type="text" name="name" value="{{ player.name }}" maxlength="30" required>
-        <label><input type="checkbox" name="default_cup" {{ 'checked' if player.default_cup else '' }}> Default on new cups</label>
+    <form class="edit-form" method="post" action="{{ url_for('update_score', score_id=score.id) }}">
+        <p>Cup ID: {{ score.cup_id }} | Player ID: {{ score.player_id }}</p>
+        <input type="number" name="score" value="{{ score.score }}" required>
+        <label><input type="checkbox" name="won_tiebreaker" {{ 'checked' if score.won_tiebreaker else '' }}> Won tiebreaker</label>
         <div class="buttons">
             <button type="submit">Save</button>
-            <a href="{{ url_for('players') }}">Cancel</a>
+            <a href="{{ url_for('scores') }}">Cancel</a>
         </div>
     </form>
 </body>
