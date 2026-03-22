@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Edit Player — KM Tracker</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: system-ui, sans-serif; padding: 1rem; max-width: 480px; margin: 0 auto; }
+        h1 { margin-bottom: 1rem; }
+        .flash { background: #fee; color: #900; padding: 0.5rem; border-radius: 4px; margin-bottom: 1rem; }
+        .edit-form { display: flex; flex-direction: column; gap: 0.75rem; }
+        .edit-form input[type="text"] { padding: 0.5rem; font-size: 1rem; border: 1px solid #ccc; border-radius: 4px; }
+        .edit-form .buttons { display: flex; gap: 0.5rem; }
+        .edit-form button, .edit-form a {
+            padding: 0.5rem 1rem; font-size: 1rem; border-radius: 4px;
+            text-decoration: none; border: 1px solid #ccc; background: #f8f8f8; color: #333; cursor: pointer;
+        }
+    </style>
+</head>
+<body>
+    <h1>Edit Player</h1>
+
+    {% with messages = get_flashed_messages() %}
+    {% if messages %}
+    {% for message in messages %}
+    <div class="flash">{{ message }}</div>
+    {% endfor %}
+    {% endif %}
+    {% endwith %}
+
+    <form class="edit-form" method="post" action="{{ url_for('update_player', player_id=player.id) }}">
+        <input type="text" name="name" value="{{ player.name }}" maxlength="30" required>
+        <div class="buttons">
+            <button type="submit">Save</button>
+            <a href="{{ url_for('players') }}">Cancel</a>
+        </div>
+    </form>
+</body>
+</html>

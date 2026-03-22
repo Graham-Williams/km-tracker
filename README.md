@@ -4,6 +4,7 @@ A tracker and suite of tools for Kario Mart game nights.
 
 ## Features
 
+- **Player Management** — add, edit, and remove players
 - **Session Tracking** — record and review game sessions over time
 - **Stats & Leaderboards** — track standings, wins, and trends across sessions
 - **Game Night Utilities** — tools to assist with running sessions smoothly
