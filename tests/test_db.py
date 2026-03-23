@@ -84,7 +84,7 @@ def test_foreign_key_enforcement(db_path):
     conn = get_connection(db_path)
     with pytest.raises(sqlite3.IntegrityError):
         conn.execute(
-            "INSERT INTO scores (cup_id, player_id, score) VALUES (999, 999, 100)"
+            "INSERT INTO scores (cup_id, player_id, score, line_score) VALUES (999, 999, 100, 100)"
         )
     conn.close()
 
@@ -139,10 +139,10 @@ def test_unique_player_per_cup(db_path):
     conn.execute("INSERT INTO players (name) VALUES ('Alice')")
     conn.execute("INSERT INTO cups (date) VALUES ('2026-03-17')")
     conn.execute(
-        "INSERT INTO scores (cup_id, player_id, score) VALUES (1, 1, 50)"
+        "INSERT INTO scores (cup_id, player_id, score, line_score) VALUES (1, 1, 50, 50)"
     )
     with pytest.raises(sqlite3.IntegrityError):
         conn.execute(
-            "INSERT INTO scores (cup_id, player_id, score) VALUES (1, 1, 60)"
+            "INSERT INTO scores (cup_id, player_id, score, line_score) VALUES (1, 1, 60, 60)"
         )
     conn.close()

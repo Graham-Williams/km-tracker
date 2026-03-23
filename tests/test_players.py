@@ -3,7 +3,7 @@ import os
 import pytest
 
 from app import app
-from db import init_db
+from db import get_connection, init_db
 
 
 @pytest.fixture
@@ -184,3 +184,97 @@ def test_delete_player_with_scores_blocked(client):
     response = client.post("/players/1/delete", follow_redirects=True)
     assert b"Cannot delete" in response.data
     assert b"Alice" in response.data
+
+
+# --- Line ---
+
+
+def test_player_line_not_shown_without_has_line(client):
+    create_player(client, "Alice")
+    response = client.get("/players")
+    assert b"(+0)" not in response.data
+
+
+def test_player_line_shown_on_list(client):
+    create_player(client, "Alice")
+    conn = get_connection()
+    conn.execute("UPDATE players SET line = 5, has_line = 1 WHERE id = 1")
+    conn.commit()
+    conn.close()
+    response = client.get("/players")
+    assert b"(+5)" in response.data
+
+
+def test_player_line_negative_shown(client):
+    create_player(client, "Alice")
+    conn = get_connection()
+    conn.execute("UPDATE players SET line = -3, has_line = 1 WHERE id = 1")
+    conn.commit()
+    conn.close()
+    response = client.get("/players")
+    assert b"(-3)" in response.data
+
+
+def test_edit_player_line(client):
+    create_player(client, "Alice")
+    client.post(
+        "/players/1/edit",
+        data={"name": "Alice", "default_cup": "on", "has_line": "on", "line": "6"},
+        follow_redirects=True,
+    )
+    conn = get_connection()
+    player = conn.execute("SELECT line FROM players WHERE id = 1").fetchone()
+    conn.close()
+    assert player["line"] == 6
+
+
+def test_edit_player_negative_line(client):
+    create_player(client, "Alice")
+    client.post(
+        "/players/1/edit",
+        data={"name": "Alice", "default_cup": "on", "has_line": "on", "line": "-5"},
+        follow_redirects=True,
+    )
+    conn = get_connection()
+    player = conn.execute("SELECT line FROM players WHERE id = 1").fetchone()
+    conn.close()
+    assert player["line"] == -5
+
+
+def test_edit_player_line_resets_without_has_line(client):
+    """Unchecking has_line resets line to 0."""
+    create_player(client, "Alice")
+    conn = get_connection()
+    conn.execute("UPDATE players SET line = 5, has_line = 1 WHERE id = 1")
+    conn.commit()
+    conn.close()
+    client.post(
+        "/players/1/edit",
+        data={"name": "Alice", "default_cup": "on", "line": "5"},
+        follow_redirects=True,
+    )
+    conn = get_connection()
+    player = conn.execute("SELECT line, has_line FROM players WHERE id = 1").fetchone()
+    conn.close()
+    assert player["line"] == 0
+    assert player["has_line"] == 0
+
+
+def test_edit_player_invalid_line(client):
+    create_player(client, "Alice")
+    response = client.post(
+        "/players/1/edit",
+        data={"name": "Alice", "has_line": "on", "line": "abc"},
+        follow_redirects=True,
+    )
+    assert b"must be a number" in response.data
+
+
+def test_edit_player_line_shown_on_form(client):
+    create_player(client, "Alice")
+    conn = get_connection()
+    conn.execute("UPDATE players SET line = 9, has_line = 1 WHERE id = 1")
+    conn.commit()
+    conn.close()
+    response = client.get("/players/1/edit")
+    assert b'value="9"' in response.data

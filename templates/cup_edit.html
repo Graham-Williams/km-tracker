@@ -20,6 +20,7 @@
         .score-name { flex: 1; }
         .score-place { font-size: 0.85rem; color: #666; min-width: 3rem; text-align: right; }
         .score-row input[type="number"] { width: 5rem; padding: 0.5rem; font-size: 1rem; border: 1px solid #ccc; border-radius: 4px; }
+        .line-input { width: 4rem; padding: 0.5rem; font-size: 1rem; border: 1px solid #ccc; border-radius: 4px; text-align: center; color: #666; }
         .tb-wrapper { display: flex; align-items: center; gap: 0.25rem; font-size: 0.85rem; color: #666; }
         .tb-wrapper input[type="checkbox"] { margin: 0; }
         .tb-wrapper.disabled { opacity: 0.3; }
@@ -36,6 +37,7 @@
             padding: 0.5rem 1rem; font-size: 1rem; border-radius: 4px;
             text-decoration: none; border: 1px solid #ccc; background: #f8f8f8; color: #333; cursor: pointer;
         }
+        .info-note { font-size: 0.85rem; color: #888; background: #f8f8f0; padding: 0.5rem; border-radius: 4px; margin-bottom: 0.5rem; }
     </style>
 </head>
 <body>
@@ -49,6 +51,8 @@
     {% endif %}
     {% endwith %}
 
+    <p class="info-note">Editing scores will not recalculate line adjustments.</p>
+
     <form class="edit-form" method="post" action="{{ url_for('update_cup', cup_id=cup.id) }}" id="cup-form">
         <label for="cup-date">Date</label>
         <input type="datetime-local" name="date" id="cup-date" required>
@@ -60,12 +64,19 @@
         <div id="score-rows">
         {% for player in players %}
         {% set s = scores_by_player.get(player.id) %}
-        <div class="score-row" data-player-id="{{ player.id }}">
+        <div class="score-row" data-player-id="{{ player.id }}" data-player-line="{{ player.line }}" data-has-line="{{ player.has_line|int }}">
             <span class="score-name">{{ player.name }}</span>
             <span class="score-place"></span>
             <input type="hidden" name="player_ids[]" value="{{ player.id }}">
-            <input type="number" name="scores[]" placeholder="Pts" min="0" class="score-input"
+            <input type="number" name="scores[]" placeholder="{% if player.has_line %}Raw{% else %}Pts{% endif %}" min="0" class="score-input"
                    value="{{ s.score if s else '' }}">
+            {% if player.has_line %}
+            <input type="number" name="lines[]" value="{{ s.score_line if s else player.line }}" class="line-input">
+            <input type="number" name="line_scores[]" placeholder="Line" class="line-score-input"
+                   value="{{ s.score + (s.score_line if s else player.line) if s else '' }}">
+            {% else %}
+            <input type="hidden" name="lines[]" value="0">
+            {% endif %}
             <label class="tb-wrapper"><input type="checkbox" name="tiebreakers[]" value="{{ player.id }}"
                    {{ 'checked' if s and s.won_tiebreaker else '' }}> TB</label>
             <button type="button" class="remove-btn" title="Remove player">&times;</button>
@@ -97,7 +108,7 @@
 
         var allPlayers = [
             {% for p in all_players %}
-            { id: {{ p.id }}, name: "{{ p.name }}" }{% if not loop.last %},{% endif %}
+            { id: {{ p.id }}, name: "{{ p.name }}", line: {{ p.line }}, hasLine: {{ p.has_line|int }} }{% if not loop.last %},{% endif %}
             {% endfor %}
         ];
 
@@ -123,13 +134,23 @@
             document.getElementById("add-player-btn").disabled = available.length === 0;
         }
 
+        function getLineValue(row) {
+            var lineInput = row.querySelector(".line-input");
+            if (!lineInput) return 0;
+            var val = lineInput.value.trim();
+            return val === "" ? 0 : parseInt(val, 10);
+        }
+
         function getScoreGroups() {
             var rows = document.querySelectorAll(".score-row:not(.removed)");
             var entries = [];
             rows.forEach(function(row) {
                 var input = row.querySelector(".score-input");
                 var val = input.value.trim();
-                entries.push({ row: row, score: val === "" ? null : parseInt(val, 10), playerId: row.dataset.playerId });
+                var lineVal = getLineValue(row);
+                var rawScore = val === "" ? null : parseInt(val, 10);
+                var lineScore = rawScore !== null ? rawScore + lineVal : null;
+                entries.push({ row: row, score: lineScore, rawScore: rawScore, playerId: row.dataset.playerId });
             });
             var scored = entries.filter(function(e) { return e.score !== null && !isNaN(e.score); });
             var groups = {};
@@ -154,8 +175,10 @@
                 var cb = row.querySelector("input[type=checkbox]");
                 var input = row.querySelector(".score-input");
                 var val = input.value.trim();
-                if (cb.checked && val !== "" && tiedScores[parseInt(val, 10)]) {
-                    checkedByGroup[val] = row.dataset.playerId;
+                var lineVal = getLineValue(row);
+                var lineScore = val === "" ? null : parseInt(val, 10) + lineVal;
+                if (cb.checked && lineScore !== null && tiedScores[lineScore]) {
+                    checkedByGroup[String(lineScore)] = row.dataset.playerId;
                 }
             });
 
@@ -164,7 +187,8 @@
                 var wrapper = row.querySelector(".tb-wrapper");
                 var input = row.querySelector(".score-input");
                 var val = input.value.trim();
-                var score = val === "" ? null : parseInt(val, 10);
+                var lineVal = getLineValue(row);
+                var score = val === "" ? null : parseInt(val, 10) + lineVal;
 
                 if (score === null || !tiedScores[score]) {
                     cb.disabled = true;
@@ -239,14 +263,62 @@
             updateTiebreakers();
         }
 
+        function syncLineScore(row) {
+            var rawInput = row.querySelector(".score-input");
+            var lineScoreInput = row.querySelector(".line-score-input");
+            if (!lineScoreInput) return;
+            var rawVal = rawInput.value.trim();
+            if (rawVal === "") {
+                lineScoreInput.value = "";
+            } else {
+                lineScoreInput.value = parseInt(rawVal, 10) + getLineValue(row);
+            }
+        }
+
+        function syncRawScore(row) {
+            var rawInput = row.querySelector(".score-input");
+            var lineScoreInput = row.querySelector(".line-score-input");
+            if (!lineScoreInput) return;
+            var lineScoreVal = lineScoreInput.value.trim();
+            if (lineScoreVal === "") {
+                rawInput.value = "";
+            } else {
+                rawInput.value = parseInt(lineScoreVal, 10) - getLineValue(row);
+            }
+        }
+
         function attachRowHandlers(row) {
-            row.querySelector(".score-input").addEventListener("input", updatePlacements);
+            var lineScoreInput = row.querySelector(".line-score-input");
+            var lineValInput = row.querySelector(".line-input");
+            row.querySelector(".score-input").addEventListener("input", function() {
+                syncLineScore(row);
+                updatePlacements();
+            });
+            if (lineScoreInput) {
+                lineScoreInput.addEventListener("input", function() {
+                    syncRawScore(row);
+                    updatePlacements();
+                });
+            }
+            if (lineValInput) {
+                lineValInput.addEventListener("input", function() {
+                    syncLineScore(row);
+                    updatePlacements();
+                });
+            }
             row.querySelector("input[type=checkbox]").addEventListener("change", updatePlacements);
             row.querySelector(".remove-btn").addEventListener("click", function() {
                 row.classList.add("removed");
                 var input = row.querySelector(".score-input");
                 input.value = "";
                 input.disabled = true;
+                if (lineScoreInput) {
+                    lineScoreInput.value = "";
+                    lineScoreInput.disabled = true;
+                }
+                if (lineValInput) {
+                    lineValInput.disabled = true;
+                }
                 var cb = row.querySelector("input[type=checkbox]");
                 cb.checked = false;
                 cb.disabled = true;
@@ -268,16 +340,27 @@
             if (existing) {
                 existing.classList.remove("removed");
                 existing.querySelector(".score-input").disabled = false;
+                var existingLineInput = existing.querySelector(".line-score-input");
+                if (existingLineInput) existingLineInput.disabled = false;
+                var existingLineValInput = existing.querySelector(".line-input");
+                if (existingLineValInput) existingLineValInput.disabled = false;
             } else {
                 var container = document.getElementById("score-rows");
                 var div = document.createElement("div");
                 div.className = "score-row";
                 div.dataset.playerId = pid;
+                div.dataset.playerLine = player.line;
+                div.dataset.hasLine = player.hasLine;
+                var lineStr = player.line >= 0 ? "+" + player.line : "" + player.line;
+                var lineHtml = player.hasLine
+                    ? '<input type="number" name="lines[]" value="' + player.line + '" class="line-input"><input type="number" name="line_scores[]" placeholder="Line" class="line-score-input">'
+                    : '<input type="hidden" name="lines[]" value="0">';
                 div.innerHTML =
                     '<span class="score-name">' + player.name + '</span>' +
                     '<span class="score-place"></span>' +
                     '<input type="hidden" name="player_ids[]" value="' + pid + '">' +
-                    '<input type="number" name="scores[]" placeholder="Pts" min="0" class="score-input">' +
+                    '<input type="number" name="scores[]" placeholder="' + (player.hasLine ? 'Raw' : 'Pts') + '" min="0" class="score-input">' +
+                    lineHtml +
                     '<label class="tb-wrapper disabled"><input type="checkbox" name="tiebreakers[]" value="' + pid + '" disabled> TB</label>' +
                     '<button type="button" class="remove-btn" title="Remove player">&times;</button>';
                 container.appendChild(div);

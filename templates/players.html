@@ -18,6 +18,7 @@
         .player-item { display: flex; justify-content: space-between; align-items: center; padding: 0.75rem 0; border-bottom: 1px solid #eee; }
         .player-info { display: flex; align-items: center; gap: 0.5rem; }
         .player-name { font-size: 1.1rem; }
+        .player-line { font-size: 0.8rem; color: #666; }
         .player-default { font-size: 0.8rem; color: #888; }
         .player-actions { display: flex; gap: 0.5rem; }
         .player-actions a, .player-actions button {
@@ -44,6 +45,7 @@
             <input type="text" name="name" placeholder="New player name" maxlength="30" required>
             <button type="submit">Add</button>
         </div>
+        <label><input type="checkbox" name="has_line"> Plays with a line</label>
         <label><input type="checkbox" name="default_cup" checked> Default on new cups</label>
     </form>
 
@@ -53,6 +55,9 @@
         <li class="player-item">
             <div class="player-info">
                 <span class="player-name">{{ player.name }}</span>
+                {% if player.has_line %}
+                <span class="player-line">({{ player.line|format_line }})</span>
+                {% endif %}
                 {% if player.default_cup %}
                 <span class="player-default">(default)</span>
                 {% endif %}
