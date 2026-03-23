@@ -15,6 +15,13 @@ app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "dev")
 
 
+@app.template_filter("format_line")
+def format_line(value):
+    """Format a line value with a sign: +0, +3, -5."""
+    n = int(value)
+    return f"+{n}" if n >= 0 else str(n)
+
+
 @app.route("/")
 def index():
     return render_template("index.html")
@@ -24,7 +31,7 @@ def index():
 def players():
     conn = get_connection()
     rows = conn.execute(
-        "SELECT id, name, default_cup FROM players ORDER BY name"
+        "SELECT id, name, default_cup, line, has_line FROM players ORDER BY name"
     ).fetchall()
     conn.close()
     return render_template("players.html", players=rows)
@@ -37,11 +44,12 @@ def create_player():
         flash("Name cannot be empty.")
         return redirect(url_for("players"))
     default_cup = request.form.get("default_cup") == "on"
+    has_line = request.form.get("has_line") == "on"
     conn = get_connection()
     try:
         conn.execute(
-            "INSERT INTO players (name, default_cup) VALUES (?, ?)",
-            (name, default_cup),
+            "INSERT INTO players (name, default_cup, has_line) VALUES (?, ?, ?)",
+            (name, default_cup, has_line),
         )
         conn.commit()
     except sqlite3.IntegrityError:
@@ -55,7 +63,7 @@ def create_player():
 def edit_player(player_id):
     conn = get_connection()
     player = conn.execute(
-        "SELECT id, name, default_cup FROM players WHERE id = ?", (player_id,)
+        "SELECT id, name, default_cup, line, has_line FROM players WHERE id = ?", (player_id,)
     ).fetchone()
     conn.close()
     if player is None:
@@ -77,10 +85,19 @@ def update_player(player_id):
         flash("Name cannot be empty.")
         return redirect(url_for("edit_player", player_id=player_id))
     default_cup = request.form.get("default_cup") == "on"
+    has_line = request.form.get("has_line") == "on"
+    line = request.form.get("line", "0").strip()
+    try:
+        line = int(line)
+    except ValueError:
+        flash("Line must be a number.")
+        return redirect(url_for("edit_player", player_id=player_id))
+    if not has_line:
+        line = 0
     try:
         conn.execute(
-            "UPDATE players SET name = ?, default_cup = ? WHERE id = ?",
-            (name, default_cup, player_id),
+            "UPDATE players SET name = ?, default_cup = ?, line = ?, has_line = ? WHERE id = ?",
+            (name, default_cup, line, has_line, player_id),
         )
         conn.commit()
     except sqlite3.IntegrityError:
@@ -118,16 +135,28 @@ def cups():
     if cup_ids:
         placeholders = ",".join("?" * len(cup_ids))
         score_rows = conn.execute(
-            f"SELECT s.cup_id, s.score, s.won_tiebreaker, p.name "
+            f"SELECT s.cup_id, s.score, s.line_score, s.won_tiebreaker, p.name "
             f"FROM scores s JOIN players p ON s.player_id = p.id "
             f"WHERE s.cup_id IN ({placeholders}) "
-            f"ORDER BY s.score DESC, p.name",
+            f"ORDER BY s.line_score DESC, p.name",
             cup_ids,
         ).fetchall()
         for s in score_rows:
             results.setdefault(s["cup_id"], []).append(s)
+        lc_rows = conn.execute(
+            f"SELECT lc.cup_id, lc.line_before, lc.line_after, p.name "
+            f"FROM line_changes lc JOIN players p ON lc.player_id = p.id "
+            f"WHERE lc.cup_id IN ({placeholders}) "
+            f"ORDER BY p.name",
+            cup_ids,
+        ).fetchall()
+    else:
+        lc_rows = []
+    line_changes = {}
+    for lc in lc_rows:
+        line_changes.setdefault(lc["cup_id"], []).append(lc)
     conn.close()
-    return render_template("cups.html", cups=rows, results=results)
+    return render_template("cups.html", cups=rows, results=results, line_changes=line_changes)
 
 
 @app.route("/cups", methods=["POST"])
@@ -155,7 +184,11 @@ def create_cup():
     if not scores_data:
         flash("A cup must have at least one player with a score.")
         return redirect(url_for("new_cup"))
-    error = validate_scores(scores_data)
+
+    for s in scores_data:
+        s["line_score"] = s["score"] + s["line"]
+    lines_by_id = {s["player_id"]: s["line"] for s in scores_data}
+    error = validate_scores(scores_data, lines_by_id)
     if error:
         flash(error)
         return redirect(url_for("new_cup"))
@@ -167,7 +200,22 @@ def create_cup():
         )
         cup_id = cursor.lastrowid
         save_scores(conn, cup_id, scores_data)
+        changes = apply_line_adjustments(conn, cup_id, scores_data)
         conn.commit()
+        if changes:
+            player_names = {
+                r["id"]: r["name"]
+                for r in conn.execute("SELECT id, name FROM players").fetchall()
+            }
+            parts = []
+            for c in changes:
+                if c["line_before"] != c["line_after"]:
+                    name = player_names[c["player_id"]]
+                    parts.append(
+                        f"{name}: {format_line(c['line_before'])} → {format_line(c['line_after'])}"
+                    )
+            if parts:
+                flash("Lines adjusted: " + ", ".join(parts), "info")
     except sqlite3.IntegrityError:
         flash("A cup already exists at that time.")
     finally:
@@ -186,23 +234,25 @@ def edit_cup(cup_id):
         conn.close()
         abort(404)
     existing_scores = conn.execute(
-        "SELECT s.player_id, s.score, s.won_tiebreaker, p.name "
+        "SELECT s.player_id, s.score, s.line AS score_line, s.won_tiebreaker, p.name, p.line, p.has_line "
         "FROM scores s JOIN players p ON s.player_id = p.id "
         "WHERE s.cup_id = ? ORDER BY p.name",
         (cup_id,),
     ).fetchall()
     all_players = conn.execute(
-        "SELECT id, name FROM players ORDER BY name"
+        "SELECT id, name, line, has_line FROM players ORDER BY name"
     ).fetchall()
     conn.close()
     scores_by_player = {s["player_id"]: s for s in existing_scores}
-    cup_players = [{"id": s["player_id"], "name": s["name"]} for s in existing_scores]
+    cup_players = [{"id": s["player_id"], "name": s["name"], "line": s["line"], "has_line": s["has_line"]} for s in existing_scores]
+    lines_by_id = {p["id"]: p["line"] for p in all_players}
     return render_template(
         "cup_edit.html",
         cup=cup,
         players=cup_players,
         all_players=all_players,
         scores_by_player=scores_by_player,
+        lines_by_id=lines_by_id,
     )
 
 
@@ -238,7 +288,10 @@ def update_cup(cup_id):
 
     scores_data = parse_scores_from_form(request.form)
     if scores_data:
-        error = validate_scores(scores_data)
+        for s in scores_data:
+            s["line_score"] = s["score"] + s["line"]
+        lines_by_id = {s["player_id"]: s["line"] for s in scores_data}
+        error = validate_scores(scores_data, lines_by_id)
         if error:
             flash(error)
             return redirect(url_for("edit_cup", cup_id=cup_id))
@@ -271,20 +324,27 @@ def delete_cup(cup_id):
     return redirect(url_for("cups"))
 
 
-def validate_scores(scores_data):
+def validate_scores(scores_data, lines_by_id=None):
     """Validate tiebreaker rules for a set of scores.
 
-    scores_data is a list of dicts with keys: score, won_tiebreaker.
+    scores_data is a list of dicts with keys: player_id, score, won_tiebreaker.
+    lines_by_id is an optional dict of player_id -> line value. When provided,
+    ties are checked against line-adjusted scores (raw + line) instead of raw scores.
     Returns an error message string or None.
     """
-    score_counts = Counter(s["score"] for s in scores_data)
+    def effective_score(s):
+        if lines_by_id is not None:
+            return s["score"] + lines_by_id.get(s["player_id"], 0)
+        return s["score"]
+
+    score_counts = Counter(effective_score(s) for s in scores_data)
     tiebreaker_winners = [s for s in scores_data if s["won_tiebreaker"]]
     # Each winner must be in a tie group
     for w in tiebreaker_winners:
-        if score_counts[w["score"]] < 2:
+        if score_counts[effective_score(w)] < 2:
             return "Tiebreaker winner must share their score with at least one other player."
     # At most one winner per score value
-    winner_scores = Counter(w["score"] for w in tiebreaker_winners)
+    winner_scores = Counter(effective_score(w) for w in tiebreaker_winners)
     for score, count in winner_scores.items():
         if count > 1:
             return "Only one player can win the tiebreaker per tie group."
@@ -294,21 +354,29 @@ def validate_scores(scores_data):
 def parse_scores_from_form(form):
     """Extract score data from form submission.
 
-    Expects form fields: player_ids[], scores[], tiebreakers[] (list of player_ids).
-    Returns list of dicts with keys: player_id, score, won_tiebreaker.
+    Expects form fields: player_ids[], scores[], lines[] (optional), tiebreakers[] (list of player_ids).
+    Returns list of dicts with keys: player_id, score, line, won_tiebreaker.
     Skips players with empty score fields.
     """
     player_ids = form.getlist("player_ids[]")
     raw_scores = form.getlist("scores[]")
+    lines = form.getlist("lines[]")
     tiebreaker_ids = set(form.getlist("tiebreakers[]"))
     scores_data = []
-    for pid, raw in zip(player_ids, raw_scores):
+    for i, (pid, raw) in enumerate(zip(player_ids, raw_scores)):
         raw = raw.strip()
         if raw == "":
             continue
+        line_val = 0
+        if i < len(lines) and lines[i].strip() != "":
+            try:
+                line_val = int(lines[i].strip())
+            except ValueError:
+                pass
         scores_data.append({
             "player_id": int(pid),
             "score": int(raw),
+            "line": line_val,
             "won_tiebreaker": str(pid) in tiebreaker_ids,
         })
     return scores_data
@@ -319,9 +387,101 @@ def save_scores(conn, cup_id, scores_data):
     conn.execute("DELETE FROM scores WHERE cup_id = ?", (cup_id,))
     for s in scores_data:
         conn.execute(
-            "INSERT INTO scores (cup_id, player_id, score, won_tiebreaker) VALUES (?, ?, ?, ?)",
-            (cup_id, s["player_id"], s["score"], s["won_tiebreaker"] or None),
+            "INSERT INTO scores (cup_id, player_id, score, line, line_score, won_tiebreaker) VALUES (?, ?, ?, ?, ?, ?)",
+            (cup_id, s["player_id"], s["score"], s["line"], s["line_score"], s["won_tiebreaker"] or None),
         )
+
+
+def calculate_placements(scores_with_lines):
+    """Calculate placements from line-adjusted scores.
+
+    scores_with_lines: list of dicts with keys: player_id, score, line, won_tiebreaker.
+    Returns the list sorted by placement, with line_score and placement added to each dict.
+    """
+    for s in scores_with_lines:
+        s["line_score"] = s["score"] + s["line"]
+
+    sorted_scores = sorted(
+        scores_with_lines,
+        key=lambda s: (-s["line_score"], -(1 if s["won_tiebreaker"] else 0)),
+    )
+
+    for i, s in enumerate(sorted_scores):
+        if i == 0:
+            s["placement"] = 1
+        elif s["line_score"] != sorted_scores[i - 1]["line_score"]:
+            s["placement"] = i + 1
+        elif sorted_scores[i - 1]["won_tiebreaker"] and not s["won_tiebreaker"]:
+            s["placement"] = i + 1
+        else:
+            s["placement"] = sorted_scores[i - 1]["placement"]
+
+    return sorted_scores
+
+
+def apply_line_adjustments(conn, cup_id, scores_data):
+    """Apply line adjustments for a 3-player cup.
+
+    Only applies if exactly 3 players. Returns list of changes for display,
+    or empty list if no adjustments were made.
+    """
+    if len(scores_data) != 3:
+        return []
+
+    # Fetch has_line flag and current player line for each player
+    player_ids = [s["player_id"] for s in scores_data]
+    placeholders = ",".join("?" * len(player_ids))
+    rows = conn.execute(
+        f"SELECT id, line, has_line FROM players WHERE id IN ({placeholders})", player_ids
+    ).fetchall()
+    player_line_by_id = {r["id"]: r["line"] for r in rows}
+    has_line_by_id = {r["id"]: r["has_line"] for r in rows}
+
+    # Use the per-score line (from the form) for placement calculation
+    scores_with_lines = [
+        {
+            "player_id": s["player_id"],
+            "score": s["score"],
+            "line": s["line"],
+            "won_tiebreaker": s["won_tiebreaker"],
+        }
+        for s in scores_data
+    ]
+
+    placements = calculate_placements(scores_with_lines)
+
+    # Skip adjustments if any unresolved ties exist
+    placement_counts = Counter(s["placement"] for s in placements)
+    if any(count > 1 for count in placement_counts.values()):
+        return []
+
+    changes = []
+    for s in placements:
+        # Only adjust lines for players who play with a line
+        if not has_line_by_id[s["player_id"]]:
+            continue
+
+        if s["placement"] == 1:
+            delta = -3
+        elif s["placement"] == 2:
+            delta = 0
+        else:
+            delta = 3
+
+        line_before = player_line_by_id[s["player_id"]]
+        line_after = line_before + delta
+        conn.execute("UPDATE players SET line = ? WHERE id = ?", (line_after, s["player_id"]))
+        conn.execute(
+            "INSERT INTO line_changes (cup_id, player_id, line_before, line_after) VALUES (?, ?, ?, ?)",
+            (cup_id, s["player_id"], line_before, line_after),
+        )
+        changes.append({
+            "player_id": s["player_id"],
+            "line_before": line_before,
+            "line_after": line_after,
+        })
+
+    return changes
 
 
 # --- Cup create with scores ---
@@ -331,10 +491,10 @@ def save_scores(conn, cup_id, scores_data):
 def new_cup():
     conn = get_connection()
     default_players = conn.execute(
-        "SELECT id, name FROM players WHERE default_cup = 1 ORDER BY name"
+        "SELECT id, name, line, has_line FROM players WHERE default_cup = 1 ORDER BY name"
     ).fetchall()
     all_players = conn.execute(
-        "SELECT id, name FROM players ORDER BY name"
+        "SELECT id, name, line, has_line FROM players ORDER BY name"
     ).fetchall()
     conn.close()
     return render_template(
@@ -353,7 +513,7 @@ def new_cup():
 def scores():
     conn = get_connection()
     rows = conn.execute(
-        "SELECT s.id, s.score, s.won_tiebreaker, p.name AS player_name, c.date AS cup_date "
+        "SELECT s.id, s.score, s.line_score, s.won_tiebreaker, p.name AS player_name, c.date AS cup_date "
         "FROM scores s "
         "JOIN players p ON s.player_id = p.id "
         "JOIN cups c ON s.cup_id = c.id "
@@ -376,9 +536,14 @@ def create_score():
 
     conn = get_connection()
     try:
+        player = conn.execute(
+            "SELECT line FROM players WHERE id = ?", (int(player_id),)
+        ).fetchone()
+        player_line = player["line"] if player else 0
+        line_score_val = int(score) + player_line
         conn.execute(
-            "INSERT INTO scores (cup_id, player_id, score, won_tiebreaker) VALUES (?, ?, ?, ?)",
-            (int(cup_id), int(player_id), int(score), won_tiebreaker or None),
+            "INSERT INTO scores (cup_id, player_id, score, line, line_score, won_tiebreaker) VALUES (?, ?, ?, ?, ?, ?)",
+            (int(cup_id), int(player_id), int(score), player_line, line_score_val, won_tiebreaker or None),
         )
         conn.commit()
     except sqlite3.IntegrityError:
@@ -405,7 +570,7 @@ def edit_score(score_id):
 def update_score(score_id):
     conn = get_connection()
     existing = conn.execute(
-        "SELECT id FROM scores WHERE id = ?", (score_id,)
+        "SELECT id, player_id FROM scores WHERE id = ?", (score_id,)
     ).fetchone()
     if existing is None:
         conn.close()
@@ -419,9 +584,14 @@ def update_score(score_id):
         return redirect(url_for("edit_score", score_id=score_id))
 
     try:
+        player = conn.execute(
+            "SELECT line FROM players WHERE id = ?", (existing["player_id"],)
+        ).fetchone()
+        player_line = player["line"] if player else 0
+        line_score_val = int(score_val) + player_line
         conn.execute(
-            "UPDATE scores SET score = ?, won_tiebreaker = ? WHERE id = ?",
-            (int(score_val), won_tiebreaker or None, score_id),
+            "UPDATE scores SET score = ?, line = ?, line_score = ?, won_tiebreaker = ? WHERE id = ?",
+            (int(score_val), player_line, line_score_val, won_tiebreaker or None, score_id),
         )
         conn.commit()
     finally:

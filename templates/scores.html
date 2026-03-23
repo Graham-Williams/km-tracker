@@ -53,7 +53,7 @@
         {% for s in scores %}
         <li class="score-item">
             <div class="score-info">
-                <span>{{ s.player_name }} — {{ s.score }} pts{% if s.won_tiebreaker %} (TB){% endif %}</span>
+                <span>{{ s.player_name }} — {{ s.line_score }} pts{% if s.won_tiebreaker %} (TB){% endif %}{% if s.score != s.line_score %} <span style="color:#888;">(raw {{ s.score }})</span>{% endif %}</span>
                 <span style="font-size: 0.85rem; color: #666;">Cup: {{ s.cup_date }}</span>
             </div>
             <div class="score-actions">

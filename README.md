@@ -6,6 +6,7 @@ A tracker and suite of tools for Kario Mart game nights.
 
 - **Player Management** — add, edit, and remove players; mark defaults for quick cup setup
 - **Cup & Score Tracking** — record cups with per-player scores, placements, and tiebreaker results
+- **Lines (Handicaps)** — optional per-player handicap that adjusts scores and auto-adjusts after 3-player cups based on placement
 - **Stats & Leaderboards** — track standings, wins, and trends across cups
 - **Game Night Utilities** — tools to assist with running sessions smoothly
 

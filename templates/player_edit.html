@@ -10,7 +10,9 @@
         h1 { margin-bottom: 1rem; }
         .flash { background: #fee; color: #900; padding: 0.5rem; border-radius: 4px; margin-bottom: 1rem; }
         .edit-form { display: flex; flex-direction: column; gap: 0.75rem; }
-        .edit-form input[type="text"] { padding: 0.5rem; font-size: 1rem; border: 1px solid #ccc; border-radius: 4px; }
+        .edit-form input[type="text"],
+        .edit-form input[type="number"] { padding: 0.5rem; font-size: 1rem; border: 1px solid #ccc; border-radius: 4px; }
+        .edit-form .hint { font-size: 0.8rem; color: #888; margin-top: -0.25rem; }
         .edit-form label { font-size: 0.9rem; display: flex; align-items: center; gap: 0.25rem; }
         .edit-form .buttons { display: flex; gap: 0.5rem; }
         .edit-form button, .edit-form a {
@@ -32,11 +34,23 @@
 
     <form class="edit-form" method="post" action="{{ url_for('update_player', player_id=player.id) }}">
         <input type="text" name="name" value="{{ player.name }}" maxlength="30" required>
+        <label><input type="checkbox" name="has_line" id="has-line" {{ 'checked' if player.has_line else '' }}> Plays with a line</label>
+        <div id="line-fields" style="{{ '' if player.has_line else 'display:none;' }}">
+            <label for="line-input">Line</label>
+            <input type="number" name="line" id="line-input" value="{{ player.line }}" style="width: 6rem;">
+            <p class="hint">Lines auto-adjust after 3-player cups.</p>
+        </div>
         <label><input type="checkbox" name="default_cup" {{ 'checked' if player.default_cup else '' }}> Default on new cups</label>
         <div class="buttons">
             <button type="submit">Save</button>
             <a href="{{ url_for('players') }}">Cancel</a>
         </div>
     </form>
+
+    <script>
+        document.getElementById("has-line").addEventListener("change", function() {
+            document.getElementById("line-fields").style.display = this.checked ? "" : "none";
+        });
+    </script>
 </body>
 </html>

@@ -41,6 +41,7 @@ def create_cup(client, date="", notes="", tz_offset="", player_id="1", score="50
             "tz_offset": tz_offset,
             "player_ids[]": [player_id],
             "scores[]": [score],
+            "lines[]": ["0"],
         },
         follow_redirects=True,
     )
