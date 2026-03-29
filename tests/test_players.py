@@ -1,27 +1,5 @@
-import os
-
-import pytest
-
-from app import app
-from db import get_connection, init_db
-
-
-@pytest.fixture
-def client(tmp_path):
-    db_path = str(tmp_path / "test.db")
-    os.environ["DB_PATH"] = db_path
-    init_db(db_path)
-    app.config["TESTING"] = True
-    with app.test_client() as client:
-        yield client
-    del os.environ["DB_PATH"]
-
-
-def create_player(client, name, default_cup=True):
-    data = {"name": name}
-    if default_cup:
-        data["default_cup"] = "on"
-    return client.post("/players", data=data, follow_redirects=True)
+from db import get_connection
+from helpers import create_player
 
 
 # --- List ---
@@ -168,7 +146,7 @@ def test_edit_player_set_default_cup(client):
 
 
 def test_delete_player_with_scores_blocked(client):
-    """Cannot delete a player who has scores recorded."""
+    """Cannot delete a player who has scores recorded in an active cup."""
     create_player(client, "Alice")
     # Create a cup with a score for Alice
     client.post(
@@ -184,6 +162,27 @@ def test_delete_player_with_scores_blocked(client):
     response = client.post("/players/1/delete", follow_redirects=True)
     assert b"Cannot delete" in response.data
     assert b"Alice" in response.data
+
+
+def test_delete_player_allowed_after_cup_deleted(client):
+    """Deleting all cups for a player should allow deleting that player."""
+    create_player(client, "Alice")
+    client.post(
+        "/cups",
+        data={
+            "date": "2026-03-15T20:00",
+            "notes": "",
+            "tz_offset": "",
+            "player_ids[]": ["1"],
+            "scores[]": ["100"],
+        },
+    )
+    # Soft-delete the cup
+    client.post("/cups/1/delete")
+    # Should now be able to delete Alice
+    response = client.post("/players/1/delete", follow_redirects=True)
+    assert b"Cannot delete" not in response.data
+    assert b"No players yet" in response.data
 
 
 # --- Line ---
