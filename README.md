@@ -62,7 +62,22 @@ backups/
 ### Running Tests
 
 ```bash
-.venv/bin/pytest tests/ -v
+# Unit and integration tests (fast)
+.venv/bin/pytest tests/ --ignore=tests/e2e -v
+
+# End-to-end browser tests (requires Playwright)
+.venv/bin/pytest tests/e2e/ -v
+
+# All tests
+.venv/bin/pytest -v
+```
+
+#### Playwright Setup
+
+E2e tests use [Playwright](https://playwright.dev/python/) to drive a real browser. Install the browser binary once after setting up the venv:
+
+```bash
+.venv/bin/playwright install chromium
 ```
 
 ## License

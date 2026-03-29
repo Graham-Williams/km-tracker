@@ -1,52 +1,6 @@
-import os
-
-import pytest
-
-from app import app, validate_scores
-from db import get_connection, init_db
-
-
-@pytest.fixture
-def client(tmp_path):
-    db_path = str(tmp_path / "test.db")
-    os.environ["DB_PATH"] = db_path
-    init_db(db_path)
-    app.config["TESTING"] = True
-    with app.test_client() as client:
-        yield client
-    del os.environ["DB_PATH"]
-
-
-def create_player(client, name):
-    return client.post(
-        "/players", data={"name": name, "default_cup": "on"}, follow_redirects=True
-    )
-
-
-def create_cup(client, date="2026-03-15T20:00", player_id="1", score="50"):
-    """Create a cup with one score (required)."""
-    return client.post(
-        "/cups",
-        data={
-            "date": date,
-            "notes": "",
-            "tz_offset": "",
-            "player_ids[]": [player_id],
-            "scores[]": [score],
-        },
-        follow_redirects=True,
-    )
-
-
-def create_score(client, cup_id=1, player_id=2, score=100, won_tiebreaker=False):
-    data = {
-        "cup_id": str(cup_id),
-        "player_id": str(player_id),
-        "score": str(score),
-    }
-    if won_tiebreaker:
-        data["won_tiebreaker"] = "on"
-    return client.post("/scores", data=data, follow_redirects=True)
+from app import validate_scores
+from db import get_connection
+from helpers import create_cup, create_player, create_score
 
 
 def setup_cup_with_players(client):
@@ -210,3 +164,78 @@ def test_delete_score(client):
 def test_delete_nonexistent_score(client):
     response = client.post("/scores/999/delete", follow_redirects=True)
     assert response.status_code == 200
+
+
+# --- validate_scores with line-adjusted scores ---
+
+
+def test_validate_scores_line_adjusted_tie():
+    """Raw scores differ but line-adjusted scores tie — tiebreaker rules apply."""
+    scores = [
+        {"player_id": 1, "score": 100, "won_tiebreaker": False},
+        {"player_id": 2, "score": 80, "won_tiebreaker": True},
+    ]
+    # Player 2 has +20 line, so line-adjusted: 100 vs 100
+    lines_by_id = {1: 0, 2: 20}
+    # Tiebreaker winner is in a tie group (by line score) — should be valid
+    assert validate_scores(scores, lines_by_id) is None
+
+
+def test_validate_scores_line_adjusted_no_tie():
+    """Raw scores tie but line-adjusted scores differ — tiebreaker should be rejected."""
+    scores = [
+        {"player_id": 1, "score": 100, "won_tiebreaker": True},
+        {"player_id": 2, "score": 100, "won_tiebreaker": False},
+    ]
+    # Player 1 has +10 line, so line-adjusted: 110 vs 100 — no tie
+    lines_by_id = {1: 10, 2: 0}
+    assert "share their score" in validate_scores(scores, lines_by_id)
+
+
+def test_validate_scores_line_adjusted_multiple_groups():
+    """Multiple tie groups formed by line-adjusted scores."""
+    scores = [
+        {"player_id": 1, "score": 100, "won_tiebreaker": True},
+        {"player_id": 2, "score": 80, "won_tiebreaker": False},
+        {"player_id": 3, "score": 90, "won_tiebreaker": True},
+        {"player_id": 4, "score": 70, "won_tiebreaker": False},
+    ]
+    # Line-adjusted: 100, 100, 90, 90
+    lines_by_id = {1: 0, 2: 20, 3: 0, 4: 20}
+    assert validate_scores(scores, lines_by_id) is None
+
+
+# --- Standalone score line_score behavior ---
+
+
+def test_standalone_score_uses_player_current_line(client):
+    """Standalone score create uses the player's current line for line_score."""
+    create_player(client, "Alice")
+    create_player(client, "Bob")
+    # Set Bob's line to +10
+    client.post("/players/2/edit", data={"name": "Bob", "has_line": "on", "line": "10"})
+    create_cup(client, player_id="1", score="50")
+    create_score(client, cup_id=1, player_id=2, score=80)
+    conn = get_connection()
+    score = conn.execute("SELECT line, line_score FROM scores WHERE player_id = 2").fetchone()
+    conn.close()
+    assert score["line"] == 10
+    assert score["line_score"] == 90  # 80 + 10
+
+
+def test_standalone_score_edit_uses_current_line(client):
+    """Editing a standalone score recalculates line_score with player's current line."""
+    create_player(client, "Alice")
+    create_player(client, "Bob")
+    create_cup(client, player_id="1", score="50")
+    create_score(client, cup_id=1, player_id=2, score=80)
+    # Change Bob's line after score was created
+    client.post("/players/2/edit", data={"name": "Bob", "has_line": "on", "line": "15"})
+    # Edit the score (ID 2)
+    client.post("/scores/2/edit", data={"score": "80"}, follow_redirects=True)
+    conn = get_connection()
+    score = conn.execute("SELECT line, line_score FROM scores WHERE id = 2").fetchone()
+    conn.close()
+    # Line_score recalculated with current line (15), not original (0)
+    assert score["line"] == 15
+    assert score["line_score"] == 95  # 80 + 15

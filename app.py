@@ -112,12 +112,16 @@ def update_player(player_id):
 def delete_player(player_id):
     conn = get_connection()
     has_scores = conn.execute(
-        "SELECT 1 FROM scores WHERE player_id = ? LIMIT 1", (player_id,)
+        "SELECT 1 FROM scores s JOIN cups c ON s.cup_id = c.id "
+        "WHERE s.player_id = ? AND c.deleted_at IS NULL LIMIT 1",
+        (player_id,),
     ).fetchone()
     if has_scores:
         conn.close()
         flash("Cannot delete a player who has scores recorded.")
         return redirect(url_for("players"))
+    conn.execute("DELETE FROM line_changes WHERE player_id = ?", (player_id,))
+    conn.execute("DELETE FROM scores WHERE player_id = ?", (player_id,))
     conn.execute("DELETE FROM players WHERE id = ?", (player_id,))
     conn.commit()
     conn.close()

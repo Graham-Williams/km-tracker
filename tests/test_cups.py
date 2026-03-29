@@ -1,50 +1,13 @@
-import os
 from datetime import datetime, timezone
 from unittest.mock import patch
 
-import pytest
-
-from app import app
-from db import get_connection, init_db
-
-
-@pytest.fixture
-def client(tmp_path):
-    db_path = str(tmp_path / "test.db")
-    os.environ["DB_PATH"] = db_path
-    init_db(db_path)
-    app.config["TESTING"] = True
-    with app.test_client() as client:
-        yield client
-    del os.environ["DB_PATH"]
-
-
-def create_player(client, name, default_cup=True):
-    data = {"name": name}
-    if default_cup:
-        data["default_cup"] = "on"
-    return client.post("/players", data=data, follow_redirects=True)
+from db import get_connection
+from helpers import create_cup, create_player
 
 
 def ensure_player(client):
     """Create a default player if none exists, for tests that just need a valid cup."""
     create_player(client, "TestPlayer")
-
-
-def create_cup(client, date="", notes="", tz_offset="", player_id="1", score="50"):
-    """Create a cup with one score (required). Call ensure_player first if needed."""
-    return client.post(
-        "/cups",
-        data={
-            "date": date,
-            "notes": notes,
-            "tz_offset": tz_offset,
-            "player_ids[]": [player_id],
-            "scores[]": [score],
-            "lines[]": ["0"],
-        },
-        follow_redirects=True,
-    )
 
 
 # --- List ---
@@ -480,6 +443,36 @@ def test_update_cup_with_scores(client):
     conn.close()
     assert scores[0]["score"] == 200
     assert scores[1]["score"] == 150
+
+
+def test_update_cup_removes_all_scores(client):
+    """Updating a cup with no scores clears existing scores."""
+    create_player(client, "Alice")
+    create_player(client, "Bob")
+    client.post(
+        "/cups",
+        data={
+            "date": "2026-03-15T20:00",
+            "notes": "",
+            "tz_offset": "",
+            "player_ids[]": ["1", "2"],
+            "scores[]": ["100", "80"],
+        },
+    )
+    # Update with no score data
+    client.post(
+        "/cups/1/edit",
+        data={
+            "date": "2026-03-15T20:00",
+            "notes": "Updated",
+            "tz_offset": "",
+        },
+        follow_redirects=True,
+    )
+    conn = get_connection()
+    scores = conn.execute("SELECT * FROM scores WHERE cup_id = 1").fetchall()
+    conn.close()
+    assert len(scores) == 0
 
 
 def test_update_cup_tiebreaker_validation(client):
