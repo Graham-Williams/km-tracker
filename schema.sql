@@ -10,7 +10,28 @@ CREATE TABLE IF NOT EXISTS cups (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     date DATETIME NOT NULL UNIQUE,
     notes TEXT,
-    deleted_at DATETIME
+    deleted_at DATETIME,
+    status TEXT NOT NULL DEFAULT 'completed',
+    voto_count INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS cup_players (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cup_id INTEGER NOT NULL,
+    player_id INTEGER NOT NULL,
+    half_veto_count INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY (cup_id) REFERENCES cups(id),
+    FOREIGN KEY (player_id) REFERENCES players(id),
+    UNIQUE(cup_id, player_id)
+);
+
+CREATE TABLE IF NOT EXISTS races (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cup_id INTEGER NOT NULL,
+    race_number INTEGER NOT NULL,
+    map TEXT NOT NULL,
+    FOREIGN KEY (cup_id) REFERENCES cups(id),
+    UNIQUE(cup_id, race_number)
 );
 
 CREATE TABLE IF NOT EXISTS line_changes (

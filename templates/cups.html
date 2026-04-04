@@ -31,6 +31,7 @@
     </style>
 </head>
 <body>
+    <a href="/" style="font-size:0.85rem;color:#888;text-decoration:none;">← Home</a>
     <h1>Cups</h1>
 
     {% with messages = get_flashed_messages(with_categories=true) %}
@@ -41,7 +42,8 @@
     {% endif %}
     {% endwith %}
 
-    <p style="margin-bottom: 1.5rem;">
+    <p style="margin-bottom: 1.5rem; display: flex; gap: 0.5rem;">
+        <a href="{{ url_for('cup_session_new') }}" style="padding: 0.5rem 1rem; font-size: 1rem; border-radius: 4px; text-decoration: none; border: 1px solid #ccc; background: #f8f8f8; color: #333;">Begin New Cup</a>
         <a href="{{ url_for('new_cup') }}" style="padding: 0.5rem 1rem; font-size: 1rem; border-radius: 4px; text-decoration: none; border: 1px solid #ccc; background: #f8f8f8; color: #333;">Add Cup</a>
     </p>
 
