@@ -4,11 +4,35 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>KM Tracker</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: system-ui, sans-serif; padding: 1rem; max-width: 480px; margin: 0 auto; }
+        h1 { margin-bottom: 0.5rem; }
+        .subtitle { color: #666; margin-bottom: 1.5rem; }
+        .cup-action { display: block; margin-bottom: 1rem; }
+        .cup-action a {
+            display: block; padding: 0.75rem 1rem; font-size: 1.1rem; border-radius: 4px;
+            text-decoration: none; border: 1px solid #ccc; background: #f8f8f8; color: #333; text-align: center;
+        }
+        .nav-links { list-style: none; margin-top: 1rem; }
+        .nav-links li { margin-bottom: 0.5rem; }
+        .nav-links a { color: #333; text-decoration: none; font-size: 1rem; }
+        .nav-links a:hover { text-decoration: underline; }
+    </style>
 </head>
 <body>
     <h1>KM Tracker</h1>
-    <p>Welcome to Kario Mart game night tracker.</p>
-    <ul>
+    <p class="subtitle">Kario Mart game night tracker</p>
+
+    <div class="cup-action">
+        {% if in_progress_cup %}
+        <a href="{{ url_for('cup_session_race', cup_id=in_progress_cup.id) }}">Continue Cup</a>
+        {% else %}
+        <a href="{{ url_for('cup_session_new') }}">Begin New Cup</a>
+        {% endif %}
+    </div>
+
+    <ul class="nav-links">
         <li><a href="{{ url_for('players') }}">Players</a></li>
         <li><a href="{{ url_for('cups') }}">Cups</a></li>
     </ul>

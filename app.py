@@ -1,13 +1,15 @@
 import os
+import random
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
 from collections import Counter
 
 from dotenv import load_dotenv
-from flask import Flask, abort, flash, redirect, render_template, request, url_for
+from flask import Flask, abort, flash, jsonify, redirect, render_template, request, url_for
 
 from db import get_connection, init_db
+from maps import COURSES
 
 load_dotenv()
 
@@ -22,9 +24,19 @@ def format_line(value):
     return f"+{n}" if n >= 0 else str(n)
 
 
+def get_in_progress_cup():
+    conn = get_connection()
+    cup = conn.execute(
+        "SELECT id FROM cups WHERE status = 'in_progress' LIMIT 1"
+    ).fetchone()
+    conn.close()
+    return cup
+
+
 @app.route("/")
 def index():
-    return render_template("index.html")
+    in_progress = get_in_progress_cup()
+    return render_template("index.html", in_progress_cup=in_progress)
 
 
 @app.route("/players")
@@ -132,7 +144,7 @@ def delete_player(player_id):
 def cups():
     conn = get_connection()
     rows = conn.execute(
-        "SELECT id, date, notes FROM cups WHERE deleted_at IS NULL ORDER BY date DESC"
+        "SELECT id, date, notes FROM cups WHERE deleted_at IS NULL AND status = 'completed' ORDER BY date DESC"
     ).fetchall()
     cup_ids = [r["id"] for r in rows]
     results = {}
@@ -610,6 +622,387 @@ def delete_score(score_id):
     conn.commit()
     conn.close()
     return redirect(url_for("scores"))
+
+
+# --- Cup Session routes ---
+
+MAX_RACES = 4
+MAX_HALF_VETOES = 3
+MAX_VOTOES = 4
+
+
+@app.route("/cup-session/new")
+def cup_session_new():
+    in_progress = get_in_progress_cup()
+    if in_progress:
+        return redirect(url_for("cup_session_race", cup_id=in_progress["id"]))
+    conn = get_connection()
+    default_players = conn.execute(
+        "SELECT id, name, line, has_line FROM players WHERE default_cup = 1 ORDER BY name"
+    ).fetchall()
+    all_players = conn.execute(
+        "SELECT id, name, line, has_line FROM players ORDER BY name"
+    ).fetchall()
+    conn.close()
+    return render_template(
+        "cup_session_new.html", players=default_players, all_players=all_players
+    )
+
+
+@app.route("/cup-session/new", methods=["POST"])
+def cup_session_create():
+    in_progress = get_in_progress_cup()
+    if in_progress:
+        flash("A cup is already in progress.")
+        return redirect(url_for("cup_session_race", cup_id=in_progress["id"]))
+
+    player_ids = request.form.getlist("player_ids[]")
+    if not player_ids:
+        flash("Select at least one player.")
+        return redirect(url_for("cup_session_new"))
+
+    date_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:00")
+    conn = get_connection()
+    try:
+        cursor = conn.execute(
+            "INSERT INTO cups (date, status) VALUES (?, 'in_progress')", (date_utc,)
+        )
+        cup_id = cursor.lastrowid
+        for pid in player_ids:
+            conn.execute(
+                "INSERT INTO cup_players (cup_id, player_id) VALUES (?, ?)",
+                (cup_id, int(pid)),
+            )
+        conn.commit()
+    except sqlite3.IntegrityError:
+        flash("Could not create cup session.")
+        conn.close()
+        return redirect(url_for("cup_session_new"))
+    conn.close()
+    return redirect(url_for("cup_session_race", cup_id=cup_id))
+
+
+def _get_cup_session(cup_id):
+    """Fetch a cup session with its players, races, and veto state. Returns None if not found."""
+    conn = get_connection()
+    cup = conn.execute(
+        "SELECT id, date, notes, status, voto_count FROM cups WHERE id = ? AND status = 'in_progress'",
+        (cup_id,),
+    ).fetchone()
+    if cup is None:
+        conn.close()
+        return None
+
+    players = conn.execute(
+        "SELECT cp.player_id, cp.half_veto_count, p.name, p.line, p.has_line "
+        "FROM cup_players cp JOIN players p ON cp.player_id = p.id "
+        "WHERE cp.cup_id = ? ORDER BY p.name",
+        (cup_id,),
+    ).fetchall()
+
+    races = conn.execute(
+        "SELECT race_number, map FROM races WHERE cup_id = ? ORDER BY race_number",
+        (cup_id,),
+    ).fetchall()
+
+    conn.close()
+    return {"cup": cup, "players": players, "races": races}
+
+
+@app.route("/cup-session/<int:cup_id>")
+def cup_session_race(cup_id):
+    session = _get_cup_session(cup_id)
+    if session is None:
+        abort(404)
+    played_maps = [r["map"] for r in session["races"]]
+    current_race = len(session["races"]) + 1
+    return render_template(
+        "cup_session_race.html",
+        cup=session["cup"],
+        players=session["players"],
+        races=session["races"],
+        played_maps=played_maps,
+        current_race=current_race,
+        max_races=MAX_RACES,
+        max_half_vetoes=MAX_HALF_VETOES,
+        max_votoes=MAX_VOTOES,
+        all_courses=COURSES,
+    )
+
+
+@app.route("/cup-session/<int:cup_id>/spin", methods=["POST"])
+def cup_session_spin(cup_id):
+    conn = get_connection()
+    cup = conn.execute(
+        "SELECT id, status FROM cups WHERE id = ? AND status = 'in_progress'",
+        (cup_id,),
+    ).fetchone()
+    if cup is None:
+        conn.close()
+        return jsonify({"error": "Cup not found or not in progress"}), 404
+
+    races = conn.execute(
+        "SELECT map FROM races WHERE cup_id = ?", (cup_id,)
+    ).fetchall()
+    conn.close()
+
+    if len(races) >= MAX_RACES:
+        return jsonify({"error": "All races completed"}), 400
+
+    played_maps = {r["map"] for r in races}
+    valid = [c for c in COURSES if c not in played_maps]
+    if not valid:
+        return jsonify({"error": "No valid maps remaining"}), 400
+
+    chosen = random.choice(valid)
+    return jsonify({"map": chosen, "index": COURSES.index(chosen)})
+
+
+@app.route("/cup-session/<int:cup_id>/half-veto", methods=["POST"])
+def cup_session_half_veto(cup_id):
+    data = request.get_json()
+    player_id = data.get("player_id") if data else None
+
+    conn = get_connection()
+    cup = conn.execute(
+        "SELECT id FROM cups WHERE id = ? AND status = 'in_progress'", (cup_id,)
+    ).fetchone()
+    if cup is None:
+        conn.close()
+        return jsonify({"error": "Cup not found"}), 404
+
+    if player_id is not None:
+        cp = conn.execute(
+            "SELECT half_veto_count FROM cup_players WHERE cup_id = ? AND player_id = ?",
+            (cup_id, player_id),
+        ).fetchone()
+        if cp is None:
+            conn.close()
+            return jsonify({"error": "Player not in this cup"}), 400
+        if cp["half_veto_count"] >= MAX_HALF_VETOES:
+            conn.close()
+            return jsonify({"error": "No half vetoes remaining"}), 400
+        conn.execute(
+            "UPDATE cup_players SET half_veto_count = half_veto_count + 1 "
+            "WHERE cup_id = ? AND player_id = ?",
+            (cup_id, player_id),
+        )
+        conn.commit()
+        remaining = MAX_HALF_VETOES - cp["half_veto_count"] - 1
+    else:
+        remaining = None
+
+    conn.close()
+    success = random.choice([True, False])
+    return jsonify({"success": success, "remaining": remaining})
+
+
+@app.route("/cup-session/<int:cup_id>/voto", methods=["POST"])
+def cup_session_voto(cup_id):
+    conn = get_connection()
+    cup = conn.execute(
+        "SELECT id, voto_count FROM cups WHERE id = ? AND status = 'in_progress'",
+        (cup_id,),
+    ).fetchone()
+    if cup is None:
+        conn.close()
+        return jsonify({"error": "Cup not found"}), 404
+
+    if cup["voto_count"] >= MAX_VOTOES:
+        conn.close()
+        return jsonify({"error": "No votoes remaining"}), 400
+
+    conn.execute(
+        "UPDATE cups SET voto_count = voto_count + 1 WHERE id = ?", (cup_id,)
+    )
+    conn.commit()
+    remaining = MAX_VOTOES - cup["voto_count"] - 1
+    conn.close()
+    return jsonify({"remaining": remaining})
+
+
+@app.route("/cup-session/<int:cup_id>/next-race", methods=["POST"])
+def cup_session_next_race(cup_id):
+    data = request.get_json()
+    map_name = data.get("map") if data else None
+    if not map_name:
+        return jsonify({"error": "Map name required"}), 400
+
+    conn = get_connection()
+    cup = conn.execute(
+        "SELECT id FROM cups WHERE id = ? AND status = 'in_progress'", (cup_id,)
+    ).fetchone()
+    if cup is None:
+        conn.close()
+        return jsonify({"error": "Cup not found"}), 404
+
+    race_count = conn.execute(
+        "SELECT COUNT(*) as cnt FROM races WHERE cup_id = ?", (cup_id,)
+    ).fetchone()["cnt"]
+
+    if race_count >= MAX_RACES:
+        conn.close()
+        return jsonify({"error": "All races completed"}), 400
+
+    race_number = race_count + 1
+    try:
+        conn.execute(
+            "INSERT INTO races (cup_id, race_number, map) VALUES (?, ?, ?)",
+            (cup_id, race_number, map_name),
+        )
+        conn.commit()
+    except sqlite3.IntegrityError:
+        conn.close()
+        return jsonify({"error": "Race already recorded"}), 400
+
+    conn.close()
+    complete = race_number >= MAX_RACES
+    return jsonify({"race_number": race_number, "complete": complete})
+
+
+@app.route("/cup-session/<int:cup_id>/complete")
+def cup_session_complete(cup_id):
+    conn = get_connection()
+    cup = conn.execute(
+        "SELECT id, date, notes, status, voto_count FROM cups WHERE id = ?",
+        (cup_id,),
+    ).fetchone()
+    if cup is None:
+        abort(404)
+    if cup["status"] not in ("in_progress", "completed"):
+        abort(404)
+
+    players = conn.execute(
+        "SELECT cp.player_id, p.name, p.line, p.has_line "
+        "FROM cup_players cp JOIN players p ON cp.player_id = p.id "
+        "WHERE cp.cup_id = ? ORDER BY p.name",
+        (cup_id,),
+    ).fetchall()
+
+    races = conn.execute(
+        "SELECT race_number, map FROM races WHERE cup_id = ? ORDER BY race_number",
+        (cup_id,),
+    ).fetchall()
+
+    # If already completed, load existing scores for display
+    existing_scores = {}
+    if cup["status"] == "completed":
+        score_rows = conn.execute(
+            "SELECT player_id, score, line, won_tiebreaker FROM scores WHERE cup_id = ?",
+            (cup_id,),
+        ).fetchall()
+        existing_scores = {s["player_id"]: s for s in score_rows}
+
+    conn.close()
+    return render_template(
+        "cup_session_complete.html",
+        cup=cup,
+        players=players,
+        races=races,
+        all_courses=COURSES,
+        existing_scores=existing_scores,
+    )
+
+
+@app.route("/cup-session/<int:cup_id>/complete", methods=["POST"])
+def cup_session_submit(cup_id):
+    conn = get_connection()
+    cup = conn.execute(
+        "SELECT id, status FROM cups WHERE id = ? AND status = 'in_progress'",
+        (cup_id,),
+    ).fetchone()
+    if cup is None:
+        conn.close()
+        abort(404)
+
+    # Update races if edited
+    for i in range(1, MAX_RACES + 1):
+        new_map = request.form.get(f"race_{i}")
+        if new_map:
+            conn.execute(
+                "UPDATE races SET map = ? WHERE cup_id = ? AND race_number = ?",
+                (new_map, cup_id, i),
+            )
+
+    notes = request.form.get("notes", "").strip() or None
+    tz_offset = request.form.get("tz_offset", "")
+
+    # Parse date or keep existing
+    date_str = request.form.get("date", "").strip()
+    if date_str:
+        try:
+            local_dt = datetime.strptime(date_str, "%Y-%m-%dT%H:%M")
+            if tz_offset:
+                offset_minutes = int(tz_offset)
+                utc_dt = local_dt + timedelta(minutes=offset_minutes)
+            else:
+                utc_dt = local_dt
+            date_utc = utc_dt.strftime("%Y-%m-%d %H:%M:%S")
+        except (ValueError, OverflowError):
+            date_utc = None
+    else:
+        date_utc = None
+
+    scores_data = parse_scores_from_form(request.form)
+    if not scores_data:
+        flash("At least one player must have a score.")
+        conn.close()
+        return redirect(url_for("cup_session_complete", cup_id=cup_id))
+
+    for s in scores_data:
+        s["line_score"] = s["score"] + s["line"]
+    lines_by_id = {s["player_id"]: s["line"] for s in scores_data}
+    error = validate_scores(scores_data, lines_by_id)
+    if error:
+        flash(error)
+        conn.close()
+        return redirect(url_for("cup_session_complete", cup_id=cup_id))
+
+    try:
+        if date_utc:
+            conn.execute(
+                "UPDATE cups SET notes = ?, date = ?, status = 'completed' WHERE id = ?",
+                (notes, date_utc, cup_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE cups SET notes = ?, status = 'completed' WHERE id = ?",
+                (notes, cup_id),
+            )
+        save_scores(conn, cup_id, scores_data)
+        changes = apply_line_adjustments(conn, cup_id, scores_data)
+        conn.commit()
+        if changes:
+            player_names = {
+                r["id"]: r["name"]
+                for r in conn.execute("SELECT id, name FROM players").fetchall()
+            }
+            parts = []
+            for c in changes:
+                if c["line_before"] != c["line_after"]:
+                    name = player_names[c["player_id"]]
+                    parts.append(
+                        f"{name}: {format_line(c['line_before'])} → {format_line(c['line_after'])}"
+                    )
+            if parts:
+                flash("Lines adjusted: " + ", ".join(parts), "info")
+    except sqlite3.IntegrityError:
+        flash("Could not save cup.")
+    finally:
+        conn.close()
+    return redirect(url_for("cups"))
+
+
+@app.route("/cup-session/<int:cup_id>/cancel", methods=["POST"])
+def cup_session_cancel(cup_id):
+    conn = get_connection()
+    conn.execute(
+        "UPDATE cups SET status = 'cancelled' WHERE id = ? AND status = 'in_progress'",
+        (cup_id,),
+    )
+    conn.commit()
+    conn.close()
+    return redirect(url_for("index"))
 
 
 if __name__ == "__main__":

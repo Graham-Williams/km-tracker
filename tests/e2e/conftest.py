@@ -48,6 +48,8 @@ def _reset_db(_server):
     """Wipe all data between tests while keeping the schema."""
     yield
     conn = get_connection(_server["db_path"])
+    conn.execute("DELETE FROM races")
+    conn.execute("DELETE FROM cup_players")
     conn.execute("DELETE FROM scores")
     conn.execute("DELETE FROM line_changes")
     conn.execute("DELETE FROM cups")
