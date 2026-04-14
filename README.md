@@ -60,6 +60,22 @@ backups/
     km_tracker_20260321T194837012Z.db
 ```
 
+### Staging Database
+
+To run the app against a separate sandbox database (useful for testing new features without touching real data), add a second path to your `.env`:
+
+```
+STAGING_DB_PATH=/path/to/your/km_tracker.staging.db
+```
+
+Then run with the `--staging` flag:
+
+```bash
+.venv/bin/python app.py --staging
+```
+
+The startup log prints which database is active (`[STAGING]` or `[prod]`). The staging DB is auto-created on first run from `schema.sql`, and gets the same timestamped backups as prod (in a `backups/` directory next to the staging file).
+
 ### Running Tests
 
 ```bash
