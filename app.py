@@ -1,6 +1,7 @@
 import os
 import random
 import sqlite3
+import sys
 from datetime import datetime, timedelta, timezone
 
 from collections import Counter
@@ -8,13 +9,25 @@ from collections import Counter
 from dotenv import load_dotenv
 from flask import Flask, abort, flash, jsonify, redirect, render_template, request, url_for
 
-from db import get_connection, init_db
+from db import get_connection, get_db_path, init_db
 from maps import COURSES
 
 load_dotenv()
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", "dev")
+
+
+def resolve_db_path(staging, env):
+    if staging:
+        staging_path = env.get("STAGING_DB_PATH")
+        if not staging_path:
+            raise SystemExit(
+                "--staging was passed but STAGING_DB_PATH is not set. "
+                "Add STAGING_DB_PATH=/path/to/staging.db to your .env file."
+            )
+        return staging_path
+    return env.get("DB_PATH")
 
 
 @app.template_filter("format_line")
@@ -1006,11 +1019,17 @@ def cup_session_cancel(cup_id):
 
 
 if __name__ == "__main__":
+    staging = "--staging" in sys.argv
+    db_path_override = resolve_db_path(staging, os.environ)
+    if db_path_override is not None:
+        os.environ["DB_PATH"] = db_path_override
+    mode = "STAGING" if staging else "prod"
     debug = True
     # In debug mode, Flask's reloader runs this file twice — once in the
     # parent (watcher) and once in the child (actual server). Only init the
     # DB in the child to avoid double backups.
     is_reloader_parent = debug and os.environ.get("WERKZEUG_RUN_MAIN") is None
     if not is_reloader_parent:
+        print(f"[{mode}] Using DB at {get_db_path()}", flush=True)
         init_db()
     app.run(host="0.0.0.0", port=8080, debug=debug)
