@@ -10,8 +10,8 @@ This is a public GitHub repo — keep all committed content professional and gen
 
 - **Git:** Use conventional commits (`feat:`, `fix:`, `chore:`, etc.) with meaningful messages
 - **Branches:** `feature/<name>`, `fix/<name>`, `chore/<name>`
-- **Never commit or push** — Graham handles all commits and pushes
-- **Other git ops:** Confirm before anything that touches working state (reset, checkout, stash, etc.)
+- **Git operations are allowed** — branching, committing, pushing, and opening PRs
+- **CI:** GitHub Actions runs pytest (unit + e2e) on every push to main and on PRs
 
 ## Tech Stack
 
