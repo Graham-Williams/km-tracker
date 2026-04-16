@@ -53,6 +53,9 @@ jobs:
           docker compose logs
           exit 1
 
+      - name: Allow host access to DB volume
+        run: sudo chmod -R a+rw data
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
