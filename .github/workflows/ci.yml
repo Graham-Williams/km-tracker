@@ -28,3 +28,47 @@ jobs:
 
       - name: Run e2e tests
         run: pytest tests/e2e/ -v
+
+  docker-e2e:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and start container
+        run: |
+          mkdir -p data
+          docker compose up -d --build
+
+      - name: Wait for app readiness
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8080 > /dev/null 2>&1; then
+              echo "App is ready"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "App failed to start"
+          docker compose logs
+          exit 1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Install Playwright browsers
+        run: playwright install --with-deps chromium
+
+      - name: Run e2e tests against Docker container
+        run: pytest tests/e2e/ -v
+        env:
+          E2E_BASE_URL: http://localhost:8080
+          DB_PATH: ./data/km_tracker.db
+
+      - name: Tear down
+        if: always()
+        run: docker compose down
