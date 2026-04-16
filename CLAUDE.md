@@ -20,6 +20,8 @@ This is a public GitHub repo — keep all committed content professional and gen
 - **Testing:** pytest (Flask test client for unit/integration, Playwright for e2e)
 - **Port:** 8080 (5000 conflicts with macOS AirPlay Receiver)
 - **Network access:** Binds to `0.0.0.0` so other devices on the local network can reach it
+- **Deployment:** Docker container with gunicorn (see `Dockerfile`, `docker-compose.yml`). Local dev still uses `python app.py` directly
+- **Dependencies:** `requirements.txt` = prod (flask, python-dotenv, gunicorn); `requirements-dev.txt` = prod + test deps (pytest, playwright)
 
 ## Code Style & Conventions
 

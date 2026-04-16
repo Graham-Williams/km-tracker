@@ -17,7 +17,7 @@ A tracker and suite of tools for Kario Mart game nights.
 
 ```bash
 python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
+.venv/bin/pip install -r requirements-dev.txt
 ```
 
 ### Running the App
@@ -95,6 +95,30 @@ E2e tests use [Playwright](https://playwright.dev/python/) to drive a real brows
 
 ```bash
 .venv/bin/playwright install chromium
+```
+
+## Running with Docker
+
+Build and start the container:
+
+```bash
+docker compose up --build
+```
+
+The app is available at `http://localhost:8080`. The SQLite database is persisted to a `data/` directory via a volume mount.
+
+To set a production secret key, create a `.env` file or export `SECRET_KEY` before running:
+
+```bash
+SECRET_KEY=your-secret-key docker compose up --build
+```
+
+The `SECRET_KEY` defaults to `"dev"` — override it for any real deployment.
+
+To stop:
+
+```bash
+docker compose down
 ```
 
 ## License
