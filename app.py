@@ -1,5 +1,6 @@
 import os
 import random
+import secrets
 import sqlite3
 import sys
 from datetime import datetime, timedelta, timezone
@@ -15,7 +16,7 @@ from maps import COURSES
 load_dotenv()
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("SECRET_KEY", "dev")
+app.secret_key = os.environ.get("SECRET_KEY") or secrets.token_hex(32)
 
 
 def resolve_db_path(staging, env):
@@ -1024,7 +1025,7 @@ if __name__ == "__main__":
     if db_path_override is not None:
         os.environ["DB_PATH"] = db_path_override
     mode = "STAGING" if staging else "prod"
-    debug = True
+    debug = os.environ.get("FLASK_DEBUG") == "1"
     # In debug mode, Flask's reloader runs this file twice — once in the
     # parent (watcher) and once in the child (actual server). Only init the
     # DB in the child to avoid double backups.

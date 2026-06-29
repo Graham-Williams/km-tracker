@@ -3,4 +3,6 @@ set -e
 
 python -c "from db import init_db; init_db()"
 
-exec gunicorn app:app --bind 0.0.0.0:8080 --workers 2
+exec gunicorn app:app --bind 0.0.0.0:8080 --workers 2 \
+  --access-logfile - \
+  --max-requests 1000 --max-requests-jitter 50

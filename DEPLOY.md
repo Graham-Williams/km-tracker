@@ -86,6 +86,18 @@ Edit `.env` and fill in:
 
 `.env` is gitignored — never commit it.
 
+Then create the data directory and give it to the container user **before the first
+launch**:
+
+```bash
+mkdir -p data && sudo chown -R 10001:10001 data
+```
+
+The app container runs as a non-root user with UID `10001` (see the Dockerfile).
+Because `./data` is bind-mounted from the host, that host directory must be owned by
+UID `10001` or the container can't create/write the SQLite DB. If you skip this, the
+app will fail to start with a permission error on `km_tracker.db`.
+
 ## Step 4 — Create the Cloudflare named tunnel
 
 In the Cloudflare **Zero Trust** dashboard:
@@ -134,6 +146,20 @@ From a phone **on cellular** (off your home wifi, so you're really coming from t
 2. You should get the Cloudflare Access login.
 3. Sign in with an allowed email.
 4. You should land on the KM Tracker app.
+
+**Confirm the deny path before you trust Access.** Don't just verify that *you* can
+get in — verify that others can't:
+
+5. Open `https://km.yourdomain.com` in a **private/incognito window** (or with an
+   account that is **not** on your allowlist).
+6. You should be **blocked** at the Cloudflare Access login and never reach the app.
+   If you can reach the app without authenticating, your Access policy is wrong — fix
+   it before considering the deployment secure.
+
+> **Warning:** Access only protects the path through the tunnel. The compose file
+> intentionally publishes **no host port** for the app. If you ever add a host port
+> mapping (e.g. `8080:8080`), anyone on the LAN can hit the app directly at that port
+> and **completely bypass Cloudflare Access**. Don't add a public host port.
 
 ## Updating the deployment
 

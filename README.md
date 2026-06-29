@@ -105,15 +105,13 @@ Build and start the container:
 docker compose up --build
 ```
 
-The app is available at `http://localhost:8080`. The SQLite database is persisted to a `data/` directory via a volume mount.
+The SQLite database is persisted to a `data/` directory via a volume mount.
 
-To set a production secret key, create a `.env` file or export `SECRET_KEY` before running:
-
-```bash
-SECRET_KEY=your-secret-key docker compose up --build
-```
-
-The `SECRET_KEY` defaults to `"dev"` — override it for any real deployment.
+`SECRET_KEY` is **required** — compose will refuse to start without it. Put it
+(and `TUNNEL_TOKEN` for the tunnel) in a gitignored `.env` file rather than passing
+secrets inline on the command line (which leaks them into your shell history). Copy
+`.env.example` to `.env` and fill in the values; see [DEPLOY.md](DEPLOY.md) for how
+to generate them. `.env` is gitignored — never commit it.
 
 To stop:
 
