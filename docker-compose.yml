@@ -7,4 +7,12 @@ services:
       - ./data:/data
     environment:
       - DB_PATH=/data/km_tracker.db
-      - SECRET_KEY=${SECRET_KEY:-dev}
+      - SECRET_KEY=${SECRET_KEY:?SECRET_KEY must be set}
+    restart: unless-stopped
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    command: tunnel --no-autoupdate run --token ${TUNNEL_TOKEN}
+    restart: unless-stopped
+    depends_on:
+      - app

@@ -20,7 +20,7 @@ This is a public GitHub repo — keep all committed content professional and gen
 - **Testing:** pytest (Flask test client for unit/integration, Playwright for e2e)
 - **Port:** 8080 (5000 conflicts with macOS AirPlay Receiver)
 - **Network access:** Binds to `0.0.0.0` so other devices on the local network can reach it
-- **Deployment:** Docker container with gunicorn (see `Dockerfile`, `docker-compose.yml`). Local dev still uses `python app.py` directly
+- **Deployment:** Docker container with gunicorn (see `Dockerfile`, `docker-compose.yml`). Local dev still uses `python app.py` directly. Can be self-hosted on a headless Linux box via Docker + a Cloudflare named tunnel (`cloudflared` service in compose), gated behind Cloudflare Access. `SECRET_KEY` and `TUNNEL_TOKEN` come from a gitignored `.env` (see `.env.example`). Full runbook in `DEPLOY.md`
 - **Dependencies:** `requirements.txt` = prod (flask, python-dotenv, gunicorn); `requirements-dev.txt` = prod + test deps (pytest, playwright)
 
 ## Code Style & Conventions

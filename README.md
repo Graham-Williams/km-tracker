@@ -121,6 +121,12 @@ To stop:
 docker compose down
 ```
 
+### Hosting / Deployment
+
+To self-host on a headless Linux box and expose it to the internet via a Cloudflare
+named tunnel (gated behind Cloudflare Access), see [DEPLOY.md](DEPLOY.md). The compose
+file includes a `cloudflared` service for this; secrets come from a gitignored `.env`.
+
 ## License
 
 MIT
