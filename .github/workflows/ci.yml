@@ -32,13 +32,21 @@ jobs:
   docker-e2e:
     runs-on: ubuntu-latest
 
+    # Production requires these via the `:?` guard in docker-compose.yml. In CI
+    # they're throwaway values: SECRET_KEY just needs to be non-empty, and
+    # TUNNEL_TOKEN only has to satisfy compose interpolation — the cloudflared
+    # service is never started here (we bring up only `app`).
+    env:
+      SECRET_KEY: ci-test-secret
+      TUNNEL_TOKEN: ci-unused
+
     steps:
       - uses: actions/checkout@v4
 
       - name: Build and start container
         run: |
           mkdir -p data
-          docker compose up -d --build
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d --build app
 
       - name: Wait for app readiness
         run: |
