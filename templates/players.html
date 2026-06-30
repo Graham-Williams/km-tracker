@@ -22,10 +22,10 @@
             <span class="list-title">
                 {{ player.name }}
                 {% if player.has_line %}
-                <span class="badge badge-line">{{ player.line|format_line }}</span>
+                <span class="badge badge-line">({{ player.line|format_line }})</span>
                 {% endif %}
                 {% if player.default_cup %}
-                <span class="badge">default</span>
+                <span class="badge">(default)</span>
                 {% endif %}
             </span>
         </div>

@@ -54,7 +54,7 @@
             {% endfor %}
             {% if display_changes %}
             <div class="list-meta" style="display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-1);">
-                <span>Lines</span>
+                <span>Lines:</span>
                 {% for lc in display_changes %}
                 <span class="badge badge-line">{{ lc.name }}: {{ lc.line_before|format_line }} → {{ lc.line_after|format_line }}</span>
                 {% endfor %}

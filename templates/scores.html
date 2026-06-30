@@ -23,7 +23,7 @@
     <li class="list-item">
         <div class="list-content">
             <span class="list-title">
-                {{ s.player_name }} — {{ s.line_score }} pts{% if s.won_tiebreaker %} <span class="badge badge-status">TB</span>{% endif %}{% if s.score != s.line_score %} <span class="text-faint">(raw {{ s.score }})</span>{% endif %}
+                {{ s.player_name }} — {{ s.line_score }} pts{% if s.won_tiebreaker %} <span class="badge badge-status">(TB)</span>{% endif %}{% if s.score != s.line_score %} <span class="text-faint">(raw {{ s.score }})</span>{% endif %}
             </span>
             <span class="list-meta">Cup: {{ s.cup_date }}</span>
         </div>
