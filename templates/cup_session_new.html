@@ -1,47 +1,31 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>New Cup Session — KM Tracker</title>
-    <style>
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        body { font-family: system-ui, sans-serif; padding: 1rem; max-width: 480px; margin: 0 auto; }
-        h1 { margin-bottom: 0.5rem; }
-        .subtitle { color: #666; margin-bottom: 1.5rem; }
-        .flash { background: #fee; color: #900; padding: 0.5rem; border-radius: 4px; margin-bottom: 1rem; }
-        .player-list { list-style: none; margin-bottom: 1.5rem; }
-        .player-item { display: flex; align-items: center; gap: 0.75rem; padding: 0.5rem 0; border-bottom: 1px solid #f0f0f0; }
-        .player-item label { flex: 1; display: flex; align-items: center; gap: 0.5rem; font-size: 1rem; }
-        .player-line { font-size: 0.85rem; color: #666; }
-        .add-player { display: flex; gap: 0.5rem; margin-bottom: 1.5rem; align-items: center; }
-        .add-player select { flex: 1; padding: 0.4rem; font-size: 0.95rem; border: 1px solid #ccc; border-radius: 4px; }
-        .add-player button {
-            padding: 0.4rem 0.75rem; font-size: 0.9rem; border-radius: 4px;
-            border: 1px solid #ccc; background: #f8f8f8; color: #333; cursor: pointer;
-        }
-        .buttons { display: flex; gap: 0.5rem; }
-        .buttons button, .buttons a {
-            padding: 0.5rem 1rem; font-size: 1rem; border-radius: 4px;
-            text-decoration: none; border: 1px solid #ccc; background: #f8f8f8; color: #333; cursor: pointer;
-        }
-    </style>
-</head>
-<body>
-    <a href="/" style="font-size:0.85rem;color:#888;text-decoration:none;">← Home</a>
-    <h1>New Cup Session</h1>
-    <p class="subtitle">Select players and confirm lines before starting.</p>
+{% extends "base.html" %}
 
-    {% with messages = get_flashed_messages() %}
-    {% if messages %}
-    {% for message in messages %}
-    <div class="flash">{{ message }}</div>
-    {% endfor %}
-    {% endif %}
-    {% endwith %}
+{% block title %}New Cup Session — KM Tracker{% endblock %}
+{% block back %}<a class="back-link" href="/">← Home</a>{% endblock %}
+{% block heading %}New Cup Session{% endblock %}
+{% block subtitle %}<p class="page-subtitle">Select players and confirm lines before starting.</p>{% endblock %}
 
-    <form method="post" action="{{ url_for('cup_session_create') }}" id="session-form">
-        <h2 style="margin-bottom: 0.75rem;">Players</h2>
+{% block styles %}
+<style>
+    .player-list { list-style: none; }
+    .player-item {
+        display: flex; align-items: center; gap: var(--space-3);
+        padding: var(--space-2) 0; border-bottom: 1px solid var(--color-border);
+    }
+    .player-item:last-child { border-bottom: none; }
+    .player-item label {
+        flex: 1; display: flex; align-items: center; gap: var(--space-2); margin: 0;
+    }
+    .player-line { font-size: 0.85rem; color: var(--color-muted); }
+    .add-player { display: flex; gap: var(--space-2); align-items: center; }
+    .add-player select { flex: 1; }
+</style>
+{% endblock %}
+
+{% block content %}
+<form class="form card" method="post" action="{{ url_for('cup_session_create') }}" id="session-form">
+    <div>
+        <div class="section-heading">Players</div>
         <ul class="player-list" id="player-list">
             {% for player in players %}
             <li class="player-item" data-player-id="{{ player.id }}">
@@ -55,67 +39,67 @@
             </li>
             {% endfor %}
         </ul>
+    </div>
 
-        <div class="add-player">
-            <select id="add-player-select">
-                <option value="">Add a player...</option>
-            </select>
-            <button type="button" id="add-player-btn">Add</button>
-        </div>
+    <div class="add-player">
+        <select id="add-player-select">
+            <option value="">Add a player...</option>
+        </select>
+        <button type="button" id="add-player-btn" class="btn btn-secondary btn-sm">Add</button>
+    </div>
 
-        <div class="buttons">
-            <button type="submit">Start Cup</button>
-            <a href="{{ url_for('index') }}">Cancel</a>
-        </div>
-    </form>
+    <div class="field-row">
+        <button type="submit" class="btn btn-primary">Start Cup</button>
+        <a href="{{ url_for('index') }}" class="btn btn-secondary">Cancel</a>
+    </div>
+</form>
 
-    <script>
-        var allPlayers = [
-            {% for p in all_players %}
-            { id: {{ p.id }}, name: "{{ p.name }}", line: {{ p.line }}, hasLine: {{ p.has_line|int }} }{% if not loop.last %},{% endif %}
-            {% endfor %}
-        ];
+<script>
+    var allPlayers = [
+        {% for p in all_players %}
+        { id: {{ p.id }}, name: "{{ p.name }}", line: {{ p.line }}, hasLine: {{ p.has_line|int }} }{% if not loop.last %},{% endif %}
+        {% endfor %}
+    ];
 
-        function getSelectedIds() {
-            var ids = new Set();
-            document.querySelectorAll('#player-list .player-item').forEach(function(item) {
-                ids.add(parseInt(item.dataset.playerId, 10));
-            });
-            return ids;
-        }
-
-        function updateDropdown() {
-            var select = document.getElementById("add-player-select");
-            var selected = getSelectedIds();
-            select.innerHTML = '<option value="">Add a player...</option>';
-            allPlayers.filter(function(p) { return !selected.has(p.id); }).forEach(function(p) {
-                var opt = document.createElement("option");
-                opt.value = p.id;
-                opt.textContent = p.name;
-                select.appendChild(opt);
-            });
-        }
-
-        document.getElementById("add-player-btn").addEventListener("click", function() {
-            var select = document.getElementById("add-player-select");
-            var pid = select.value;
-            if (!pid) return;
-            var player = allPlayers.find(function(p) { return p.id === parseInt(pid, 10); });
-            if (!player) return;
-            var li = document.createElement("li");
-            li.className = "player-item";
-            li.dataset.playerId = pid;
-            var lineHtml = player.hasLine
-                ? '<span class="player-line">Line: ' + (player.line >= 0 ? '+' : '') + player.line + '</span>'
-                : '';
-            li.innerHTML =
-                '<label><input type="checkbox" name="player_ids[]" value="' + pid + '" checked> ' +
-                player.name + '</label>' + lineHtml;
-            document.getElementById("player-list").appendChild(li);
-            updateDropdown();
+    function getSelectedIds() {
+        var ids = new Set();
+        document.querySelectorAll('#player-list .player-item').forEach(function(item) {
+            ids.add(parseInt(item.dataset.playerId, 10));
         });
+        return ids;
+    }
 
+    function updateDropdown() {
+        var select = document.getElementById("add-player-select");
+        var selected = getSelectedIds();
+        select.innerHTML = '<option value="">Add a player...</option>';
+        allPlayers.filter(function(p) { return !selected.has(p.id); }).forEach(function(p) {
+            var opt = document.createElement("option");
+            opt.value = p.id;
+            opt.textContent = p.name;
+            select.appendChild(opt);
+        });
+    }
+
+    document.getElementById("add-player-btn").addEventListener("click", function() {
+        var select = document.getElementById("add-player-select");
+        var pid = select.value;
+        if (!pid) return;
+        var player = allPlayers.find(function(p) { return p.id === parseInt(pid, 10); });
+        if (!player) return;
+        var li = document.createElement("li");
+        li.className = "player-item";
+        li.dataset.playerId = pid;
+        var lineHtml = player.hasLine
+            ? '<span class="player-line">Line: ' + (player.line >= 0 ? '+' : '') + player.line + '</span>'
+            : '';
+        li.innerHTML =
+            '<label><input type="checkbox" name="player_ids[]" value="' + pid + '" checked> ' +
+            player.name + '</label>' + lineHtml;
+        document.getElementById("player-list").appendChild(li);
         updateDropdown();
-    </script>
-</body>
-</html>
+    });
+
+    updateDropdown();
+</script>
+{% endblock %}

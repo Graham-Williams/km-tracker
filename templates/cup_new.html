@@ -1,399 +1,404 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>New Cup — KM Tracker</title>
-    <style>
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        body { font-family: system-ui, sans-serif; padding: 1rem; max-width: 480px; margin: 0 auto; }
-        h1, h2 { margin-bottom: 1rem; }
-        h2 { margin-top: 1.5rem; font-size: 1.2rem; }
-        .flash { background: #fee; color: #900; padding: 0.5rem; border-radius: 4px; margin-bottom: 1rem; }
-        .cup-form { display: flex; flex-direction: column; gap: 0.75rem; }
-        .cup-form > label { font-weight: 600; }
-        .cup-form input[type="datetime-local"],
-        .cup-form textarea { width: 100%; padding: 0.5rem; font-size: 1rem; border: 1px solid #ccc; border-radius: 4px; }
-        .cup-form textarea { resize: vertical; }
-        .score-row { display: flex; align-items: center; gap: 0.5rem; padding: 0.4rem 0; border-bottom: 1px solid #f0f0f0; }
-        .score-row.removed { display: none; }
-        .score-name { flex: 1; }
-        .score-place { font-size: 0.85rem; color: #666; min-width: 3rem; text-align: right; }
-        .score-row input[type="number"] { width: 5rem; padding: 0.5rem; font-size: 1rem; border: 1px solid #ccc; border-radius: 4px; }
-        .line-input { width: 4rem; padding: 0.5rem; font-size: 1rem; border: 1px solid #ccc; border-radius: 4px; text-align: center; color: #666; }
-        .tb-wrapper { display: flex; align-items: center; gap: 0.25rem; font-size: 0.85rem; color: #666; }
-        .tb-wrapper input[type="checkbox"] { margin: 0; }
-        .tb-wrapper.disabled { opacity: 0.3; }
-        .remove-btn { background: none; border: none; color: #c99; font-size: 1.1rem; cursor: pointer; padding: 0 0.25rem; }
-        .remove-btn:hover { color: #900; }
-        .add-player { display: flex; gap: 0.5rem; margin-top: 0.5rem; align-items: center; }
-        .add-player select { flex: 1; padding: 0.4rem; font-size: 0.95rem; border: 1px solid #ccc; border-radius: 4px; }
-        .add-player button {
-            padding: 0.4rem 0.75rem; font-size: 0.9rem; border-radius: 4px;
-            border: 1px solid #ccc; background: #f8f8f8; color: #333; cursor: pointer;
-        }
-        .buttons { display: flex; gap: 0.5rem; margin-top: 0.5rem; }
-        .buttons button, .buttons a {
-            padding: 0.5rem 1rem; font-size: 1rem; border-radius: 4px;
-            text-decoration: none; border: 1px solid #ccc; background: #f8f8f8; color: #333; cursor: pointer;
-        }
-        .no-players { color: #666; font-style: italic; }
-    </style>
-</head>
-<body>
-    <a href="/" style="font-size:0.85rem;color:#888;text-decoration:none;">← Home</a>
-    <h1>New Cup</h1>
+{% extends "base.html" %}
 
-    {% with messages = get_flashed_messages() %}
-    {% if messages %}
-    {% for message in messages %}
-    <div class="flash">{{ message }}</div>
-    {% endfor %}
-    {% endif %}
-    {% endwith %}
+{% block title %}New Cup — KM Tracker{% endblock %}
+{% block back %}<a class="back-link" href="{{ url_for('cups') }}">← Cups</a>{% endblock %}
+{% block heading %}New Cup{% endblock %}
 
-    <form class="cup-form" method="post" action="{{ url_for('create_cup') }}" id="cup-form">
+{% block styles %}
+<style>
+    .score-row {
+        display: flex;
+        align-items: center;
+        gap: var(--space-2);
+        padding: var(--space-2) 0;
+        border-bottom: 1px solid var(--color-border);
+    }
+    .score-row.removed { display: none; }
+    .score-name { flex: 1; color: var(--color-text); }
+    .score-place {
+        font-size: 0.85rem;
+        color: var(--color-muted);
+        min-width: 3rem;
+        text-align: right;
+    }
+    .score-row input[type="number"] { width: 5rem; text-align: center; }
+    .line-input { width: 4rem; text-align: center; color: var(--color-muted); }
+    .tb-wrapper {
+        display: flex;
+        align-items: center;
+        gap: var(--space-1);
+        font-size: 0.85rem;
+        color: var(--color-muted);
+        white-space: nowrap;
+    }
+    .tb-wrapper input[type="checkbox"] { margin: 0; }
+    .tb-wrapper.disabled { opacity: 0.3; }
+    .remove-btn {
+        background: none;
+        border: none;
+        color: var(--color-danger);
+        font-size: 1.1rem;
+        line-height: 1;
+        cursor: pointer;
+        padding: 0 var(--space-1);
+    }
+    .remove-btn:hover { color: var(--color-accent-hover); }
+    .add-player {
+        display: flex;
+        gap: var(--space-2);
+        margin-top: var(--space-2);
+        align-items: center;
+    }
+    .add-player select { flex: 1; }
+</style>
+{% endblock %}
+
+{% block content %}
+<form class="form card" method="post" action="{{ url_for('create_cup') }}" id="cup-form">
+    <div class="field">
         <label for="cup-date">Date</label>
         <input type="datetime-local" name="date" id="cup-date">
+    </div>
+    <div class="field">
         <label for="cup-notes">Notes</label>
         <textarea name="notes" id="cup-notes" placeholder="Notes (optional)" rows="2"></textarea>
-        <input type="hidden" name="tz_offset" id="tz-offset">
+    </div>
+    <input type="hidden" name="tz_offset" id="tz-offset">
 
-        <h2>Scores</h2>
-        <div id="score-rows">
-        {% for player in players %}
-        <div class="score-row" data-player-id="{{ player.id }}" data-player-line="{{ player.line }}" data-has-line="{{ player.has_line|int }}">
-            <span class="score-name">{{ player.name }}</span>
-            <span class="score-place"></span>
-            <input type="hidden" name="player_ids[]" value="{{ player.id }}">
-            <input type="number" name="scores[]" placeholder="{% if player.has_line %}Raw{% else %}Pts{% endif %}" min="0" class="score-input">
-            {% if player.has_line %}
-            <input type="number" name="lines[]" value="{{ player.line }}" class="line-input">
-            <input type="number" name="line_scores[]" placeholder="Line" class="line-score-input">
-            {% else %}
-            <input type="hidden" name="lines[]" value="0">
-            {% endif %}
-            <label class="tb-wrapper"><input type="checkbox" name="tiebreakers[]" value="{{ player.id }}"> TB</label>
-            <button type="button" class="remove-btn" title="Remove player">&times;</button>
-        </div>
+    <h2 class="section-heading">Scores</h2>
+    <div id="score-rows">
+    {% for player in players %}
+    <div class="score-row" data-player-id="{{ player.id }}" data-player-line="{{ player.line }}" data-has-line="{{ player.has_line|int }}">
+        <span class="score-name">{{ player.name }}</span>
+        <span class="score-place"></span>
+        <input type="hidden" name="player_ids[]" value="{{ player.id }}">
+        <input type="number" name="scores[]" placeholder="{% if player.has_line %}Raw{% else %}Pts{% endif %}" min="0" class="score-input">
+        {% if player.has_line %}
+        <input type="number" name="lines[]" value="{{ player.line }}" class="line-input">
+        <input type="number" name="line_scores[]" placeholder="Line" class="line-score-input">
+        {% else %}
+        <input type="hidden" name="lines[]" value="0">
+        {% endif %}
+        <label class="tb-wrapper"><input type="checkbox" name="tiebreakers[]" value="{{ player.id }}"> TB</label>
+        <button type="button" class="remove-btn" title="Remove player">&times;</button>
+    </div>
+    {% endfor %}
+    </div>
+
+    <div class="add-player">
+        <select id="add-player-select">
+            <option value="">Add a player...</option>
+        </select>
+        <button type="button" id="add-player-btn" class="btn btn-secondary btn-sm">Add</button>
+    </div>
+
+    <div class="field-row">
+        <button type="submit" class="btn btn-primary">Create Cup</button>
+        <a href="{{ url_for('cups') }}" class="btn btn-ghost">Cancel</a>
+    </div>
+</form>
+
+<script>
+    document.getElementById("tz-offset").value = new Date().getTimezoneOffset();
+    var now = new Date();
+    now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
+    document.getElementById("cup-date").value = now.toISOString().slice(0, 16);
+
+    var allPlayers = [
+        {% for p in all_players %}
+        { id: {{ p.id }}, name: "{{ p.name }}", line: {{ p.line }}, hasLine: {{ p.has_line|int }} }{% if not loop.last %},{% endif %}
         {% endfor %}
-        </div>
+    ];
 
-        <div class="add-player">
-            <select id="add-player-select">
-                <option value="">Add a player...</option>
-            </select>
-            <button type="button" id="add-player-btn">Add</button>
-        </div>
+    function getActivePlayerIds() {
+        var ids = new Set();
+        document.querySelectorAll(".score-row:not(.removed)").forEach(function(row) {
+            ids.add(parseInt(row.dataset.playerId, 10));
+        });
+        return ids;
+    }
 
-        <div class="buttons">
-            <button type="submit">Create Cup</button>
-            <a href="{{ url_for('cups') }}">Cancel</a>
-        </div>
-    </form>
+    function updateDropdown() {
+        var select = document.getElementById("add-player-select");
+        var active = getActivePlayerIds();
+        select.innerHTML = '<option value="">Add a player...</option>';
+        var available = allPlayers.filter(function(p) { return !active.has(p.id); });
+        available.forEach(function(p) {
+            var opt = document.createElement("option");
+            opt.value = p.id;
+            opt.textContent = p.name;
+            select.appendChild(opt);
+        });
+        document.getElementById("add-player-btn").disabled = available.length === 0;
+    }
 
-    <script>
-        document.getElementById("tz-offset").value = new Date().getTimezoneOffset();
-        var now = new Date();
-        now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
-        document.getElementById("cup-date").value = now.toISOString().slice(0, 16);
+    function getScoreGroups() {
+        var rows = document.querySelectorAll(".score-row:not(.removed)");
+        var entries = [];
+        rows.forEach(function(row) {
+            var input = row.querySelector(".score-input");
+            var val = input.value.trim();
+            var lineVal = getLineValue(row);
+            var rawScore = val === "" ? null : parseInt(val, 10);
+            var lineScore = rawScore !== null ? rawScore + lineVal : null;
+            entries.push({ row: row, score: lineScore, rawScore: rawScore, playerId: row.dataset.playerId });
+        });
+        var scored = entries.filter(function(e) { return e.score !== null && !isNaN(e.score); });
+        var groups = {};
+        scored.forEach(function(e) {
+            if (!groups[e.score]) groups[e.score] = [];
+            groups[e.score].push(e);
+        });
+        return { entries: entries, scored: scored, groups: groups };
+    }
 
-        var allPlayers = [
-            {% for p in all_players %}
-            { id: {{ p.id }}, name: "{{ p.name }}", line: {{ p.line }}, hasLine: {{ p.has_line|int }} }{% if not loop.last %},{% endif %}
-            {% endfor %}
-        ];
+    function updateTiebreakers() {
+        var data = getScoreGroups();
+        var groups = data.groups;
 
-        function getActivePlayerIds() {
-            var ids = new Set();
-            document.querySelectorAll(".score-row:not(.removed)").forEach(function(row) {
-                ids.add(parseInt(row.dataset.playerId, 10));
-            });
-            return ids;
-        }
+        // Build set of scores that are tied
+        var tiedScores = {};
+        Object.keys(groups).forEach(function(score) {
+            if (groups[score].length > 1) tiedScores[score] = true;
+        });
 
-        function updateDropdown() {
-            var select = document.getElementById("add-player-select");
-            var active = getActivePlayerIds();
-            select.innerHTML = '<option value="">Add a player...</option>';
-            var available = allPlayers.filter(function(p) { return !active.has(p.id); });
-            available.forEach(function(p) {
-                var opt = document.createElement("option");
-                opt.value = p.id;
-                opt.textContent = p.name;
-                select.appendChild(opt);
-            });
-            document.getElementById("add-player-btn").disabled = available.length === 0;
-        }
+        // For each tie group, find if someone is already checked
+        var checkedByGroup = {};
+        document.querySelectorAll(".score-row:not(.removed)").forEach(function(row) {
+            var cb = row.querySelector("input[type=checkbox]");
+            var input = row.querySelector(".score-input");
+            var val = input.value.trim();
+            var lineVal = getLineValue(row);
+            var lineScore = val === "" ? null : parseInt(val, 10) + lineVal;
+            if (cb.checked && lineScore !== null && tiedScores[lineScore]) {
+                checkedByGroup[String(lineScore)] = row.dataset.playerId;
+            }
+        });
 
-        function getScoreGroups() {
-            var rows = document.querySelectorAll(".score-row:not(.removed)");
-            var entries = [];
-            rows.forEach(function(row) {
-                var input = row.querySelector(".score-input");
-                var val = input.value.trim();
-                var lineVal = getLineValue(row);
-                var rawScore = val === "" ? null : parseInt(val, 10);
-                var lineScore = rawScore !== null ? rawScore + lineVal : null;
-                entries.push({ row: row, score: lineScore, rawScore: rawScore, playerId: row.dataset.playerId });
-            });
-            var scored = entries.filter(function(e) { return e.score !== null && !isNaN(e.score); });
-            var groups = {};
-            scored.forEach(function(e) {
-                if (!groups[e.score]) groups[e.score] = [];
-                groups[e.score].push(e);
-            });
-            return { entries: entries, scored: scored, groups: groups };
-        }
+        // Enable/disable checkboxes
+        document.querySelectorAll(".score-row:not(.removed)").forEach(function(row) {
+            var cb = row.querySelector("input[type=checkbox]");
+            var wrapper = row.querySelector(".tb-wrapper");
+            var input = row.querySelector(".score-input");
+            var val = input.value.trim();
+            var lineVal = getLineValue(row);
+            var score = val === "" ? null : parseInt(val, 10) + lineVal;
 
-        function updateTiebreakers() {
-            var data = getScoreGroups();
-            var groups = data.groups;
+            if (score === null || !tiedScores[score]) {
+                // Not in a tie — disable and uncheck
+                cb.disabled = true;
+                cb.checked = false;
+                wrapper.classList.add("disabled");
+            } else if (checkedByGroup[String(score)] && checkedByGroup[String(score)] !== row.dataset.playerId) {
+                // Someone else in this tie group is checked — disable but don't uncheck
+                cb.disabled = true;
+                wrapper.classList.add("disabled");
+            } else {
+                cb.disabled = false;
+                wrapper.classList.remove("disabled");
+            }
+        });
+    }
 
-            // Build set of scores that are tied
-            var tiedScores = {};
-            Object.keys(groups).forEach(function(score) {
-                if (groups[score].length > 1) tiedScores[score] = true;
-            });
+    function updatePlacements() {
+        var data = getScoreGroups();
+        var entries = data.entries;
+        var scored = data.scored;
+        var groups = data.groups;
 
-            // For each tie group, find if someone is already checked
-            var checkedByGroup = {};
-            document.querySelectorAll(".score-row:not(.removed)").forEach(function(row) {
-                var cb = row.querySelector("input[type=checkbox]");
-                var input = row.querySelector(".score-input");
-                var val = input.value.trim();
-                var lineVal = getLineValue(row);
-                var lineScore = val === "" ? null : parseInt(val, 10) + lineVal;
-                if (cb.checked && lineScore !== null && tiedScores[lineScore]) {
-                    checkedByGroup[String(lineScore)] = row.dataset.playerId;
-                }
-            });
+        // Collect all tiebreaker winners
+        var tbPids = new Set();
+        document.querySelectorAll(".score-row:not(.removed)").forEach(function(row) {
+            var cb = row.querySelector("input[type=checkbox]");
+            if (cb.checked) tbPids.add(row.dataset.playerId);
+        });
 
-            // Enable/disable checkboxes
-            document.querySelectorAll(".score-row:not(.removed)").forEach(function(row) {
-                var cb = row.querySelector("input[type=checkbox]");
-                var wrapper = row.querySelector(".tb-wrapper");
-                var input = row.querySelector(".score-input");
-                var val = input.value.trim();
-                var lineVal = getLineValue(row);
-                var score = val === "" ? null : parseInt(val, 10) + lineVal;
+        // Sort by score desc, then tiebreaker winners first within same score
+        scored.sort(function(a, b) {
+            if (b.score !== a.score) return b.score - a.score;
+            if (tbPids.has(a.playerId) && !tbPids.has(b.playerId)) return -1;
+            if (tbPids.has(b.playerId) && !tbPids.has(a.playerId)) return 1;
+            return 0;
+        });
 
-                if (score === null || !tiedScores[score]) {
-                    // Not in a tie — disable and uncheck
-                    cb.disabled = true;
-                    cb.checked = false;
-                    wrapper.classList.add("disabled");
-                } else if (checkedByGroup[String(score)] && checkedByGroup[String(score)] !== row.dataset.playerId) {
-                    // Someone else in this tie group is checked — disable but don't uncheck
-                    cb.disabled = true;
-                    wrapper.classList.add("disabled");
-                } else {
-                    cb.disabled = false;
-                    wrapper.classList.remove("disabled");
-                }
-            });
-        }
-
-        function updatePlacements() {
-            var data = getScoreGroups();
-            var entries = data.entries;
-            var scored = data.scored;
-            var groups = data.groups;
-
-            // Collect all tiebreaker winners
-            var tbPids = new Set();
-            document.querySelectorAll(".score-row:not(.removed)").forEach(function(row) {
-                var cb = row.querySelector("input[type=checkbox]");
-                if (cb.checked) tbPids.add(row.dataset.playerId);
-            });
-
-            // Sort by score desc, then tiebreaker winners first within same score
-            scored.sort(function(a, b) {
-                if (b.score !== a.score) return b.score - a.score;
-                if (tbPids.has(a.playerId) && !tbPids.has(b.playerId)) return -1;
-                if (tbPids.has(b.playerId) && !tbPids.has(a.playerId)) return 1;
-                return 0;
-            });
-
-            // Assign ranks — tiebreaker winners get unique rank, others share
-            for (var i = 0; i < scored.length; i++) {
-                if (i === 0) {
-                    scored[i].rank = 1;
-                } else if (scored[i].score !== scored[i - 1].score) {
+        // Assign ranks — tiebreaker winners get unique rank, others share
+        for (var i = 0; i < scored.length; i++) {
+            if (i === 0) {
+                scored[i].rank = 1;
+            } else if (scored[i].score !== scored[i - 1].score) {
+                scored[i].rank = i + 1;
+            } else {
+                // Same score — check if tiebreaker separates them
+                var prevIsTb = tbPids.has(scored[i - 1].playerId);
+                var curIsTb = tbPids.has(scored[i].playerId);
+                if (prevIsTb !== curIsTb) {
                     scored[i].rank = i + 1;
                 } else {
-                    // Same score — check if tiebreaker separates them
-                    var prevIsTb = tbPids.has(scored[i - 1].playerId);
-                    var curIsTb = tbPids.has(scored[i].playerId);
-                    if (prevIsTb !== curIsTb) {
-                        scored[i].rank = i + 1;
-                    } else {
-                        scored[i].rank = scored[i - 1].rank;
-                    }
+                    scored[i].rank = scored[i - 1].rank;
                 }
             }
-
-            var placeCounts = {};
-            scored.forEach(function(e) {
-                placeCounts[e.rank] = (placeCounts[e.rank] || 0) + 1;
-            });
-            scored.forEach(function(e) {
-                e.tied = placeCounts[e.rank] > 1;
-                e.place = e.tied ? e.rank + placeCounts[e.rank] - 1 : e.rank;
-            });
-
-            function ordinal(n) {
-                var s = ["th", "st", "nd", "rd"];
-                var v = n % 100;
-                return n + (s[(v - 20) % 10] || s[v] || s[0]);
-            }
-            entries.forEach(function(e) {
-                e.row.querySelector(".score-place").textContent = "";
-            });
-            scored.forEach(function(e) {
-                var prefix = e.tied ? "T-" : "";
-                e.row.querySelector(".score-place").textContent = prefix + ordinal(e.place);
-            });
-
-            updateTiebreakers();
         }
 
-        function getLineValue(row) {
-            var lineInput = row.querySelector(".line-input");
-            if (!lineInput) return 0;
-            var val = lineInput.value.trim();
-            return val === "" ? 0 : parseInt(val, 10);
-        }
+        var placeCounts = {};
+        scored.forEach(function(e) {
+            placeCounts[e.rank] = (placeCounts[e.rank] || 0) + 1;
+        });
+        scored.forEach(function(e) {
+            e.tied = placeCounts[e.rank] > 1;
+            e.place = e.tied ? e.rank + placeCounts[e.rank] - 1 : e.rank;
+        });
 
-        function syncLineScore(row) {
-            var rawInput = row.querySelector(".score-input");
-            var lineScoreInput = row.querySelector(".line-score-input");
-            if (!lineScoreInput) return;
-            var rawVal = rawInput.value.trim();
-            if (rawVal === "") {
-                lineScoreInput.value = "";
-            } else {
-                lineScoreInput.value = parseInt(rawVal, 10) + getLineValue(row);
-            }
+        function ordinal(n) {
+            var s = ["th", "st", "nd", "rd"];
+            var v = n % 100;
+            return n + (s[(v - 20) % 10] || s[v] || s[0]);
         }
+        entries.forEach(function(e) {
+            e.row.querySelector(".score-place").textContent = "";
+        });
+        scored.forEach(function(e) {
+            var prefix = e.tied ? "T-" : "";
+            e.row.querySelector(".score-place").textContent = prefix + ordinal(e.place);
+        });
 
-        function syncRawScore(row) {
-            var rawInput = row.querySelector(".score-input");
-            var lineScoreInput = row.querySelector(".line-score-input");
-            if (!lineScoreInput) return;
-            var lineScoreVal = lineScoreInput.value.trim();
-            if (lineScoreVal === "") {
-                rawInput.value = "";
-            } else {
-                rawInput.value = parseInt(lineScoreVal, 10) - getLineValue(row);
-            }
+        updateTiebreakers();
+    }
+
+    function getLineValue(row) {
+        var lineInput = row.querySelector(".line-input");
+        if (!lineInput) return 0;
+        var val = lineInput.value.trim();
+        return val === "" ? 0 : parseInt(val, 10);
+    }
+
+    function syncLineScore(row) {
+        var rawInput = row.querySelector(".score-input");
+        var lineScoreInput = row.querySelector(".line-score-input");
+        if (!lineScoreInput) return;
+        var rawVal = rawInput.value.trim();
+        if (rawVal === "") {
+            lineScoreInput.value = "";
+        } else {
+            lineScoreInput.value = parseInt(rawVal, 10) + getLineValue(row);
         }
+    }
 
-        function attachRowHandlers(row) {
-            var lineScoreInput = row.querySelector(".line-score-input");
-            var lineValInput = row.querySelector(".line-input");
-            row.querySelector(".score-input").addEventListener("input", function() {
+    function syncRawScore(row) {
+        var rawInput = row.querySelector(".score-input");
+        var lineScoreInput = row.querySelector(".line-score-input");
+        if (!lineScoreInput) return;
+        var lineScoreVal = lineScoreInput.value.trim();
+        if (lineScoreVal === "") {
+            rawInput.value = "";
+        } else {
+            rawInput.value = parseInt(lineScoreVal, 10) - getLineValue(row);
+        }
+    }
+
+    function attachRowHandlers(row) {
+        var lineScoreInput = row.querySelector(".line-score-input");
+        var lineValInput = row.querySelector(".line-input");
+        row.querySelector(".score-input").addEventListener("input", function() {
+            syncLineScore(row);
+            updatePlacements();
+        });
+        if (lineScoreInput) {
+            lineScoreInput.addEventListener("input", function() {
+                syncRawScore(row);
+                updatePlacements();
+            });
+        }
+        if (lineValInput) {
+            lineValInput.addEventListener("input", function() {
                 syncLineScore(row);
                 updatePlacements();
             });
+        }
+        row.querySelector("input[type=checkbox]").addEventListener("change", updatePlacements);
+        row.querySelector(".remove-btn").addEventListener("click", function() {
+            row.classList.add("removed");
+            var input = row.querySelector(".score-input");
+            input.value = "";
+            input.disabled = true;
             if (lineScoreInput) {
-                lineScoreInput.addEventListener("input", function() {
-                    syncRawScore(row);
-                    updatePlacements();
-                });
+                lineScoreInput.value = "";
+                lineScoreInput.disabled = true;
             }
             if (lineValInput) {
-                lineValInput.addEventListener("input", function() {
-                    syncLineScore(row);
-                    updatePlacements();
-                });
+                lineValInput.disabled = true;
             }
-            row.querySelector("input[type=checkbox]").addEventListener("change", updatePlacements);
-            row.querySelector(".remove-btn").addEventListener("click", function() {
-                row.classList.add("removed");
-                var input = row.querySelector(".score-input");
-                input.value = "";
-                input.disabled = true;
-                if (lineScoreInput) {
-                    lineScoreInput.value = "";
-                    lineScoreInput.disabled = true;
-                }
-                if (lineValInput) {
-                    lineValInput.disabled = true;
-                }
-                var cb = row.querySelector("input[type=checkbox]");
-                cb.checked = false;
-                cb.disabled = true;
-                updatePlacements();
-                updateDropdown();
-            });
-        }
-
-        document.querySelectorAll(".score-row").forEach(attachRowHandlers);
-
-        document.getElementById("add-player-btn").addEventListener("click", function() {
-            var select = document.getElementById("add-player-select");
-            var pid = select.value;
-            if (!pid) return;
-            var player = allPlayers.find(function(p) { return p.id === parseInt(pid, 10); });
-            if (!player) return;
-
-            var existing = document.querySelector('.score-row.removed[data-player-id="' + pid + '"]');
-            if (existing) {
-                existing.classList.remove("removed");
-                existing.querySelector(".score-input").disabled = false;
-                var existingLineInput = existing.querySelector(".line-score-input");
-                if (existingLineInput) existingLineInput.disabled = false;
-                var existingLineValInput = existing.querySelector(".line-input");
-                if (existingLineValInput) existingLineValInput.disabled = false;
-            } else {
-                var container = document.getElementById("score-rows");
-                var div = document.createElement("div");
-                div.className = "score-row";
-                div.dataset.playerId = pid;
-                div.dataset.playerLine = player.line;
-                div.dataset.hasLine = player.hasLine;
-                var lineHtml = player.hasLine
-                    ? '<input type="number" name="lines[]" value="' + player.line + '" class="line-input"><input type="number" name="line_scores[]" placeholder="Line" class="line-score-input">'
-                    : '<input type="hidden" name="lines[]" value="0">';
-                div.innerHTML =
-                    '<span class="score-name">' + player.name + '</span>' +
-                    '<span class="score-place"></span>' +
-                    '<input type="hidden" name="player_ids[]" value="' + pid + '">' +
-                    '<input type="number" name="scores[]" placeholder="' + (player.hasLine ? 'Raw' : 'Pts') + '" min="0" class="score-input">' +
-                    lineHtml +
-                    '<label class="tb-wrapper disabled"><input type="checkbox" name="tiebreakers[]" value="' + pid + '" disabled> TB</label>' +
-                    '<button type="button" class="remove-btn" title="Remove player">&times;</button>';
-                container.appendChild(div);
-                attachRowHandlers(div);
-            }
-            updateDropdown();
+            var cb = row.querySelector("input[type=checkbox]");
+            cb.checked = false;
+            cb.disabled = true;
             updatePlacements();
+            updateDropdown();
         });
+    }
 
-        document.getElementById("cup-form").addEventListener("submit", function(e) {
-            var data = getScoreGroups();
-            var groups = data.groups;
-            var unresolvedTie = false;
-            var tbPids = new Set();
-            document.querySelectorAll("input[name='tiebreakers[]']:checked").forEach(function(cb) {
-                tbPids.add(cb.value);
-            });
-            Object.keys(groups).forEach(function(score) {
-                if (groups[score].length > 1) {
-                    var hasWinner = groups[score].some(function(e) { return tbPids.has(e.playerId); });
-                    if (!hasWinner) unresolvedTie = true;
-                }
-            });
-            if (unresolvedTie) {
-                if (!confirm("There are tied scores without a tiebreaker selected. Submit anyway?")) {
-                    e.preventDefault();
-                }
-            }
-        });
+    document.querySelectorAll(".score-row").forEach(attachRowHandlers);
 
+    document.getElementById("add-player-btn").addEventListener("click", function() {
+        var select = document.getElementById("add-player-select");
+        var pid = select.value;
+        if (!pid) return;
+        var player = allPlayers.find(function(p) { return p.id === parseInt(pid, 10); });
+        if (!player) return;
+
+        var existing = document.querySelector('.score-row.removed[data-player-id="' + pid + '"]');
+        if (existing) {
+            existing.classList.remove("removed");
+            existing.querySelector(".score-input").disabled = false;
+            var existingLineInput = existing.querySelector(".line-score-input");
+            if (existingLineInput) existingLineInput.disabled = false;
+            var existingLineValInput = existing.querySelector(".line-input");
+            if (existingLineValInput) existingLineValInput.disabled = false;
+        } else {
+            var container = document.getElementById("score-rows");
+            var div = document.createElement("div");
+            div.className = "score-row";
+            div.dataset.playerId = pid;
+            div.dataset.playerLine = player.line;
+            div.dataset.hasLine = player.hasLine;
+            var lineHtml = player.hasLine
+                ? '<input type="number" name="lines[]" value="' + player.line + '" class="line-input"><input type="number" name="line_scores[]" placeholder="Line" class="line-score-input">'
+                : '<input type="hidden" name="lines[]" value="0">';
+            div.innerHTML =
+                '<span class="score-name">' + player.name + '</span>' +
+                '<span class="score-place"></span>' +
+                '<input type="hidden" name="player_ids[]" value="' + pid + '">' +
+                '<input type="number" name="scores[]" placeholder="' + (player.hasLine ? 'Raw' : 'Pts') + '" min="0" class="score-input">' +
+                lineHtml +
+                '<label class="tb-wrapper disabled"><input type="checkbox" name="tiebreakers[]" value="' + pid + '" disabled> TB</label>' +
+                '<button type="button" class="remove-btn" title="Remove player">&times;</button>';
+            container.appendChild(div);
+            attachRowHandlers(div);
+        }
         updateDropdown();
         updatePlacements();
-    </script>
-</body>
-</html>
+    });
+
+    document.getElementById("cup-form").addEventListener("submit", function(e) {
+        var data = getScoreGroups();
+        var groups = data.groups;
+        var unresolvedTie = false;
+        var tbPids = new Set();
+        document.querySelectorAll("input[name='tiebreakers[]']:checked").forEach(function(cb) {
+            tbPids.add(cb.value);
+        });
+        Object.keys(groups).forEach(function(score) {
+            if (groups[score].length > 1) {
+                var hasWinner = groups[score].some(function(e) { return tbPids.has(e.playerId); });
+                if (!hasWinner) unresolvedTie = true;
+            }
+        });
+        if (unresolvedTie) {
+            if (!confirm("There are tied scores without a tiebreaker selected. Submit anyway?")) {
+                e.preventDefault();
+            }
+        }
+    });
+
+    updateDropdown();
+    updatePlacements();
+</script>
+{% endblock %}

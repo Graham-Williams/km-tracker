@@ -1,159 +1,143 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Cup Session — KM Tracker</title>
-    <style>
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        body { font-family: system-ui, sans-serif; padding: 1rem; max-width: 480px; margin: 0 auto; }
-        h1 { margin-bottom: 0.25rem; }
-        .race-label { font-size: 1.1rem; color: #666; margin-bottom: 1rem; }
+{% extends "base.html" %}
 
-        /* Dashboard */
-        .dashboard { margin-bottom: 1.5rem; }
-        .completed-races { list-style: none; margin-bottom: 0.75rem; }
-        .completed-races li { font-size: 0.9rem; color: #444; padding: 0.15rem 0; }
-        .completed-races .race-num { color: #888; min-width: 4rem; display: inline-block; }
-        .veto-status { font-size: 0.85rem; color: #666; margin-bottom: 0.25rem; }
+{% block title %}Cup Session — KM Tracker{% endblock %}
+{% block back %}<a class="back-link" href="/">← Home</a>{% endblock %}
+{% block heading %}Cup Session{% endblock %}
+{% block subtitle %}
+{% if current_race <= max_races %}
+<p class="page-subtitle">Race {{ current_race }} of {{ max_races }}</p>
+{% else %}
+<p class="page-subtitle">All races complete!</p>
+{% endif %}
+{% endblock %}
 
-        /* Wheel */
-        .wheel-container {
-            position: relative;
-            width: 100%;
-            height: 380px;
-            overflow: hidden;
-            margin-bottom: 1rem;
-            border: 1px solid #ddd;
-            border-radius: 8px;
-            background: #fafafa;
-        }
-        .wheel-viewport {
-            position: relative;
-            width: 100%;
-            height: 100%;
-            overflow: hidden;
-        }
-        .wheel {
-            position: absolute;
-            width: 1160px;
-            height: 1160px;
-            left: -30px;
-            top: 50%;
-            transform-origin: center center;
-            transform: translateY(-50%) rotate(0deg);
-            transition: none;
-        }
-        /* spin animation is JS-driven for variable timing and bounce-back */
-        .wheel-pointer {
-            position: absolute;
-            left: 0;
-            top: 50%;
-            transform: translateY(-50%);
-            width: 0;
-            height: 0;
-            border-top: 12px solid transparent;
-            border-bottom: 12px solid transparent;
-            border-left: 20px solid #333;
-            z-index: 10;
-        }
-        .wheel-label {
-            text-align: center;
-            font-size: 1.1rem;
-            font-weight: 600;
-            padding: 0.5rem 0;
-            opacity: 0;
-            transition: opacity 0.3s;
-        }
-        .wheel-label.visible { opacity: 1; }
+{% block styles %}
+<style>
+    /* Dashboard */
+    .completed-races { list-style: none; margin-bottom: var(--space-3); padding: 0; }
+    .completed-races li { font-size: 0.9rem; color: var(--color-text); padding: 0.15rem 0; }
+    .completed-races .race-num { color: var(--color-faint); min-width: 4rem; display: inline-block; }
+    .veto-status { font-size: 0.85rem; color: var(--color-muted); margin-bottom: var(--space-1); }
 
-        /* Controls */
-        .controls { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 1rem; }
-        .controls button, .controls select {
-            padding: 0.5rem 1rem; font-size: 1rem; border-radius: 4px;
-            border: 1px solid #ccc; background: #f8f8f8; color: #333; cursor: pointer;
-        }
-        .controls button:disabled { opacity: 0.4; cursor: default; }
-        .controls select { font-size: 0.9rem; }
-        #spin-btn { background: #333; color: #fff; border-color: #333; }
-        #next-race-btn { background: #2a7; color: #fff; border-color: #2a7; }
-        #complete-btn { background: #2a7; color: #fff; border-color: #2a7; }
+    /* Wheel */
+    .wheel-container {
+        position: relative;
+        width: 100%;
+        height: 380px;
+        overflow: hidden;
+        margin-bottom: var(--space-4);
+        border: 1px solid var(--color-border);
+        border-radius: var(--radius-md);
+        background: var(--color-surface-2);
+    }
+    .wheel-viewport {
+        position: relative;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+    }
+    .wheel {
+        position: absolute;
+        width: 1160px;
+        height: 1160px;
+        left: -30px;
+        top: 50%;
+        transform-origin: center center;
+        transform: translateY(-50%) rotate(0deg);
+        transition: none;
+    }
+    /* spin animation is JS-driven for variable timing and bounce-back */
+    .wheel-pointer {
+        position: absolute;
+        left: 0;
+        top: 50%;
+        transform: translateY(-50%);
+        width: 0;
+        height: 0;
+        border-top: 12px solid transparent;
+        border-bottom: 12px solid transparent;
+        border-left: 20px solid var(--color-text);
+        z-index: 10;
+    }
+    .wheel-label {
+        text-align: center;
+        font-size: 1.1rem;
+        font-weight: 600;
+        padding: var(--space-2) 0;
+        opacity: 0;
+        transition: opacity 0.3s;
+    }
+    .wheel-label.visible { opacity: 1; }
 
-        /* Modal */
-        .modal-overlay {
-            display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5);
-            z-index: 100; align-items: center; justify-content: center;
-        }
-        .modal-overlay.active { display: flex; }
-        .modal {
-            background: #fff; border-radius: 8px; padding: 1.5rem; max-width: 320px; width: 90%;
-            text-align: center;
-        }
-        .modal h3 { margin-bottom: 0.75rem; }
-        .modal p { margin-bottom: 1rem; color: #444; }
-        .modal-buttons { display: flex; gap: 0.5rem; justify-content: center; }
-        .modal-buttons button {
-            padding: 0.5rem 1rem; font-size: 1rem; border-radius: 4px;
-            border: 1px solid #ccc; background: #f8f8f8; color: #333; cursor: pointer;
-        }
-        .modal-buttons .confirm { background: #333; color: #fff; border-color: #333; }
-        .modal-buttons .danger { background: #c33; color: #fff; border-color: #c33; }
+    /* Controls */
+    .controls { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-bottom: var(--space-4); }
+    .controls .btn:disabled { opacity: 0.4; cursor: default; }
+    .controls select { font-size: 0.9rem; }
 
-        /* Player picker for half veto */
-        .player-picker { list-style: none; margin-bottom: 1rem; }
-        .player-picker li {
-            padding: 0.5rem; margin: 0.25rem 0; border: 1px solid #ddd; border-radius: 4px;
-            cursor: pointer; text-align: left;
-        }
-        .player-picker li:hover { background: #f0f0f0; }
-        .player-picker li.disabled { opacity: 0.4; cursor: default; pointer-events: none; }
-        .player-picker li .veto-remaining { float: right; font-size: 0.85rem; color: #888; }
+    /* Modal */
+    .modal-overlay {
+        display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5);
+        z-index: 100; align-items: center; justify-content: center;
+    }
+    .modal-overlay.active { display: flex; }
+    .modal {
+        background: var(--color-surface); border-radius: var(--radius-lg);
+        padding: var(--space-5); max-width: 320px; width: 90%;
+        text-align: center; box-shadow: var(--shadow-md);
+    }
+    .modal h3 { margin-bottom: var(--space-3); }
+    .modal p { margin-bottom: var(--space-4); color: var(--color-muted); }
+    .modal-buttons { display: flex; gap: var(--space-2); justify-content: center; }
 
-        /* Coin flip */
-        .coin {
-            width: 64px; height: 64px; border-radius: 50%; margin: 1rem auto;
-            display: flex; align-items: center; justify-content: center;
-            font-size: 2rem; font-weight: bold; background: #e0e0e0; color: #666;
-        }
-        .coin.success { background: #d4edda; color: #2a7; }
-        .coin.fail { background: #f8d7da; color: #c33; }
-        .coin.flipping {
-            animation: coinFlip 1.2s ease-out;
-        }
-        @keyframes coinFlip {
-            0%   { transform: scaleX(1); }
-            8%   { transform: scaleX(0); }
-            16%  { transform: scaleX(1); }
-            24%  { transform: scaleX(0); }
-            32%  { transform: scaleX(1); }
-            40%  { transform: scaleX(0); }
-            48%  { transform: scaleX(1); }
-            56%  { transform: scaleX(0); }
-            64%  { transform: scaleX(1); }
-            74%  { transform: scaleX(0); }
-            84%  { transform: scaleX(1); }
-            92%  { transform: scaleX(0); }
-            100% { transform: scaleX(1); }
-        }
-        .coin-result { font-size: 1rem; margin-top: 0.5rem; }
-        .coin-result.success { color: #2a7; }
-        .coin-result.fail { color: #c33; }
+    /* Player picker for half veto */
+    .player-picker { list-style: none; margin-bottom: var(--space-4); padding: 0; }
+    .player-picker li {
+        padding: var(--space-2); margin: var(--space-1) 0;
+        border: 1px solid var(--color-border); border-radius: var(--radius-sm);
+        cursor: pointer; text-align: left;
+    }
+    .player-picker li:hover { background: var(--color-surface-2); }
+    .player-picker li.disabled { opacity: 0.4; cursor: default; pointer-events: none; }
+    .player-picker li .veto-remaining { float: right; font-size: 0.85rem; color: var(--color-faint); }
 
-        /* Cancel link */
-        .cancel-link { display: block; margin-top: 1.5rem; text-align: center; color: #c33; font-size: 0.85rem; cursor: pointer; }
-    </style>
-</head>
-<body>
-    <a href="/" style="font-size:0.85rem;color:#888;text-decoration:none;">← Home</a>
-    <h1>Cup Session</h1>
-    {% if current_race <= max_races %}
-    <p class="race-label">Race {{ current_race }} of {{ max_races }}</p>
-    {% else %}
-    <p class="race-label">All races complete!</p>
-    {% endif %}
+    /* Coin flip */
+    .coin {
+        width: 64px; height: 64px; border-radius: 50%; margin: var(--space-4) auto;
+        display: flex; align-items: center; justify-content: center;
+        font-size: 2rem; font-weight: bold; background: var(--color-surface-2); color: var(--color-muted);
+    }
+    .coin.success { background: var(--color-success-soft); color: var(--color-success); }
+    .coin.fail { background: var(--color-danger-soft); color: var(--color-danger); }
+    .coin.flipping {
+        animation: coinFlip 1.2s ease-out;
+    }
+    @keyframes coinFlip {
+        0%   { transform: scaleX(1); }
+        8%   { transform: scaleX(0); }
+        16%  { transform: scaleX(1); }
+        24%  { transform: scaleX(0); }
+        32%  { transform: scaleX(1); }
+        40%  { transform: scaleX(0); }
+        48%  { transform: scaleX(1); }
+        56%  { transform: scaleX(0); }
+        64%  { transform: scaleX(1); }
+        74%  { transform: scaleX(0); }
+        84%  { transform: scaleX(1); }
+        92%  { transform: scaleX(0); }
+        100% { transform: scaleX(1); }
+    }
+    .coin-result { font-size: 1rem; margin-top: var(--space-2); }
+    .coin-result.success { color: var(--color-success); }
+    .coin-result.fail { color: var(--color-danger); }
 
+    /* Cancel link */
+    .cancel-link { display: block; margin-top: var(--space-5); text-align: center; color: var(--color-danger); font-size: 0.85rem; cursor: pointer; }
+</style>
+{% endblock %}
+
+{% block content %}
     <!-- Dashboard -->
-    <div class="dashboard">
+    <div class="dashboard card">
         {% if races %}
         <ul class="completed-races">
             {% for race in races %}
@@ -184,9 +168,9 @@
 
     <!-- Controls -->
     <div class="controls">
-        <button id="spin-btn">Spin</button>
-        <button id="half-veto-btn" disabled>Half Veto</button>
-        <button id="voto-btn" disabled>Voto</button>
+        <button id="spin-btn" class="btn btn-primary">Spin</button>
+        <button id="half-veto-btn" class="btn btn-secondary" disabled>Half Veto</button>
+        <button id="voto-btn" class="btn btn-secondary" disabled>Voto</button>
         <select id="manual-override">
             <option value="">Manual override...</option>
             {% for course in all_courses %}
@@ -196,14 +180,14 @@
     </div>
     <div class="controls">
         {% if current_race < max_races %}
-        <button id="next-race-btn" disabled>Next Race</button>
+        <button id="next-race-btn" class="btn btn-primary" disabled>Next Race</button>
         {% else %}
-        <button id="complete-btn" disabled>Complete Cup</button>
+        <button id="complete-btn" class="btn btn-primary" disabled>Complete Cup</button>
         {% endif %}
     </div>
     {% else %}
     <div class="controls">
-        <a href="{{ url_for('cup_session_complete', cup_id=cup.id) }}" style="padding: 0.5rem 1rem; font-size: 1rem; border-radius: 4px; text-decoration: none; border: 1px solid #2a7; background: #2a7; color: #fff;">Enter Scores</a>
+        <a href="{{ url_for('cup_session_complete', cup_id=cup.id) }}" class="btn btn-primary">Enter Scores</a>
     </div>
     {% endif %}
 
@@ -222,7 +206,7 @@
                 <li data-player-id="">Non-player <span class="veto-remaining">override</span></li>
             </ul>
             <div class="modal-buttons">
-                <button onclick="closeModal('half-veto-modal')">Cancel</button>
+                <button class="btn btn-secondary" onclick="closeModal('half-veto-modal')">Cancel</button>
             </div>
         </div>
     </div>
@@ -234,7 +218,7 @@
             <div class="coin" id="coin">?</div>
             <p class="coin-result" id="coin-message"></p>
             <div class="modal-buttons">
-                <button class="confirm" id="coin-ok-btn" style="display:none">OK</button>
+                <button class="btn btn-primary" id="coin-ok-btn" style="display:none">OK</button>
             </div>
         </div>
     </div>
@@ -245,8 +229,8 @@
             <h3>Voto</h3>
             <p id="voto-message"></p>
             <div class="modal-buttons">
-                <button onclick="closeModal('voto-modal')">Cancel</button>
-                <button class="confirm" id="voto-confirm-btn">Use Voto</button>
+                <button class="btn btn-secondary" onclick="closeModal('voto-modal')">Cancel</button>
+                <button class="btn btn-primary" id="voto-confirm-btn">Use Voto</button>
             </div>
         </div>
     </div>
@@ -257,8 +241,8 @@
             <h3 id="next-race-title">Next Race</h3>
             <p id="next-race-message"></p>
             <div class="modal-buttons">
-                <button onclick="closeModal('next-race-modal')">Cancel</button>
-                <button class="confirm" id="next-race-confirm-btn">Confirm</button>
+                <button class="btn btn-secondary" onclick="closeModal('next-race-modal')">Cancel</button>
+                <button class="btn btn-primary" id="next-race-confirm-btn">Confirm</button>
             </div>
         </div>
     </div>
@@ -269,9 +253,9 @@
             <h3>Cancel Cup</h3>
             <p>This will cancel the entire cup session. This cannot be undone. Are you sure?</p>
             <div class="modal-buttons">
-                <button onclick="closeModal('cancel-modal')">Keep Playing</button>
+                <button class="btn btn-secondary" onclick="closeModal('cancel-modal')">Keep Playing</button>
                 <form method="post" action="{{ url_for('cup_session_cancel', cup_id=cup.id) }}" style="display:inline">
-                    <button type="submit" class="danger">Cancel Cup</button>
+                    <button type="submit" class="btn btn-danger danger">Cancel Cup</button>
                 </form>
             </div>
         </div>
@@ -640,5 +624,4 @@
             });
         }
     </script>
-</body>
-</html>
+{% endblock %}

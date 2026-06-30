@@ -1,105 +1,51 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Cups — KM Tracker</title>
-    <style>
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        body { font-family: system-ui, sans-serif; padding: 1rem; max-width: 480px; margin: 0 auto; }
-        h1 { margin-bottom: 1rem; }
-        .flash { background: #fee; color: #900; padding: 0.5rem; border-radius: 4px; margin-bottom: 1rem; }
-        .flash.info { background: #e8f0fe; color: #1a56db; }
-        .cup-list { list-style: none; }
-        .cup-item { padding: 0.75rem 0; border-bottom: 1px solid #eee; }
-        .cup-header { display: flex; justify-content: space-between; align-items: center; }
-        .cup-info { display: flex; flex-direction: column; gap: 0.25rem; }
-        .cup-date { font-size: 1.1rem; }
-        .cup-notes { font-size: 0.9rem; color: #666; }
-        .cup-actions { display: flex; gap: 0.5rem; }
-        .cup-actions a, .cup-actions button {
-            padding: 0.25rem 0.75rem; font-size: 0.9rem; border-radius: 4px;
-            text-decoration: none; border: 1px solid #ccc; background: #f8f8f8; color: #333; cursor: pointer;
-        }
-        .cup-actions button.delete { color: #900; border-color: #c99; }
-        .cup-results { margin-top: 0.5rem; padding-left: 0.25rem; }
-        .cup-results li { font-size: 0.9rem; color: #444; padding: 0.1rem 0; list-style: none; }
-        .cup-results .place { color: #888; min-width: 3.5rem; display: inline-block; }
-        .cup-results .pts { color: #888; font-size: 0.85rem; }
-        .cup-line-changes { margin-top: 0.4rem; font-size: 0.85rem; color: #666; padding-left: 0.25rem; }
-        .empty { color: #666; font-style: italic; }
-    </style>
-</head>
-<body>
-    <a href="/" style="font-size:0.85rem;color:#888;text-decoration:none;">← Home</a>
-    <h1>Cups</h1>
+{% extends "base.html" %}
 
-    {% with messages = get_flashed_messages(with_categories=true) %}
-    {% if messages %}
-    {% for category, message in messages %}
-    <div class="flash {{ category }}">{{ message }}</div>
-    {% endfor %}
-    {% endif %}
-    {% endwith %}
+{% block title %}Cups — KM Tracker{% endblock %}
+{% block back %}<a class="back-link" href="/">← Home</a>{% endblock %}
+{% block heading %}Cups{% endblock %}
 
-    <p style="margin-bottom: 1.5rem; display: flex; gap: 0.5rem;">
-        <a href="{{ url_for('cup_session_new') }}" style="padding: 0.5rem 1rem; font-size: 1rem; border-radius: 4px; text-decoration: none; border: 1px solid #ccc; background: #f8f8f8; color: #333;">Begin New Cup</a>
-        <a href="{{ url_for('new_cup') }}" style="padding: 0.5rem 1rem; font-size: 1rem; border-radius: 4px; text-decoration: none; border: 1px solid #ccc; background: #f8f8f8; color: #333;">Add Cup</a>
-    </p>
+{% block content %}
+<div class="stack">
+    <a class="btn btn-primary btn-block" href="{{ url_for('cup_session_new') }}">Begin New Cup</a>
+    <a class="btn btn-secondary btn-block" href="{{ url_for('new_cup') }}">Add Cup</a>
+</div>
 
-    {% if cups %}
-    <ul class="cup-list">
-        {% for cup in cups %}
-        <li class="cup-item">
-            <div class="cup-header">
-                <div class="cup-info">
-                    <span class="cup-date"><time datetime="{{ cup.date }}">{{ cup.date }}</time></span>
-                    {% if cup.notes %}
-                    <span class="cup-notes">{{ cup.notes }}</span>
-                    {% endif %}
-                </div>
-                <div class="cup-actions">
-                    <a href="{{ url_for('edit_cup', cup_id=cup.id) }}">Edit</a>
-                    <form method="post" action="{{ url_for('delete_cup', cup_id=cup.id) }}" style="display:inline"
-                          onsubmit="return confirm('Delete this cup and its scores? Line adjustments from this cup will not be reverted.')">
-                        <button type="submit" class="delete">Delete</button>
-                    </form>
-                </div>
-            </div>
+{% if cups %}
+<ul class="list mt-4">
+    {% for cup in cups %}
+    <li class="list-item" style="align-items:flex-start;">
+        <div class="list-content">
+            <span class="list-title"><time datetime="{{ cup.date }}">{{ cup.date }}</time></span>
+            {% if cup.notes %}
+            <span class="list-meta">{{ cup.notes }}</span>
+            {% endif %}
             {% set cup_scores = results.get(cup.id, []) %}
             {% if cup_scores %}
-            <ul class="cup-results">
-                {% for s in cup_scores %}
-                {% set ns = namespace(rank=1, tied=false, tie_count=0) %}
-                {% for other in cup_scores %}
-                    {% if other.line_score > s.line_score %}
+            {% for s in cup_scores %}
+            {% set ns = namespace(rank=1, tied=false, tie_count=0) %}
+            {% for other in cup_scores %}
+                {% if other.line_score > s.line_score %}
+                    {% set ns.rank = ns.rank + 1 %}
+                {% elif other.line_score == s.line_score and other.name != s.name %}
+                    {% if other.won_tiebreaker and not s.won_tiebreaker %}
                         {% set ns.rank = ns.rank + 1 %}
-                    {% elif other.line_score == s.line_score and other.name != s.name %}
-                        {% if other.won_tiebreaker and not s.won_tiebreaker %}
-                            {% set ns.rank = ns.rank + 1 %}
-                        {% elif not other.won_tiebreaker and not s.won_tiebreaker %}
-                            {% set ns.tied = true %}
-                            {% set ns.tie_count = ns.tie_count + 1 %}
-                        {% elif other.won_tiebreaker and s.won_tiebreaker %}
-                            {% set ns.tied = true %}
-                            {% set ns.tie_count = ns.tie_count + 1 %}
-                        {% endif %}
+                    {% elif not other.won_tiebreaker and not s.won_tiebreaker %}
+                        {% set ns.tied = true %}
+                        {% set ns.tie_count = ns.tie_count + 1 %}
+                    {% elif other.won_tiebreaker and s.won_tiebreaker %}
+                        {% set ns.tied = true %}
+                        {% set ns.tie_count = ns.tie_count + 1 %}
                     {% endif %}
-                {% endfor %}
-                {% set ns.place = ns.rank + ns.tie_count if ns.tied else ns.rank %}
-                {% set ordinals = {1: '1st', 2: '2nd', 3: '3rd'} %}
-                {% set place_str = ordinals.get(ns.place, ns.place ~ 'th') %}
-                {% if ns.tied %}{% set place_str = 'T-' ~ place_str %}{% endif %}
-                <li>
-                    <span class="place">{{ place_str }}</span>
-                    {{ s.name }}
-                    <span class="pts">({{ s.line_score }}{% if s.won_tiebreaker %}*{% endif %} pts{% if s.score != s.line_score %}, raw {{ s.score }}{% endif %})</span>
-                </li>
-                {% endfor %}
-            </ul>
+                {% endif %}
+            {% endfor %}
+            {% set ns.place = ns.rank + ns.tie_count if ns.tied else ns.rank %}
+            {% set ordinals = {1: '1st', 2: '2nd', 3: '3rd'} %}
+            {% set place_str = ordinals.get(ns.place, ns.place ~ 'th') %}
+            {% if ns.tied %}{% set place_str = 'T-' ~ place_str %}{% endif %}
+            <span class="list-meta"><span class="text-faint">{{ place_str }}</span> {{ s.name }} <span class="text-faint">({{ s.line_score }}{% if s.won_tiebreaker %}*{% endif %} pts{% if s.score != s.line_score %}, raw {{ s.score }}{% endif %})</span></span>
+            {% endfor %}
             {% endif %}
             {% set cup_lc = line_changes.get(cup.id, []) %}
-            {% set actual_changes = cup_lc|selectattr('line_before', 'ne', cup_lc[0].line_after if cup_lc else 0)|list %}
             {% set display_changes = [] %}
             {% for lc in cup_lc %}
                 {% if lc.line_before != lc.line_after %}
@@ -107,29 +53,36 @@
                 {% endif %}
             {% endfor %}
             {% if display_changes %}
-            <div class="cup-line-changes">
-                Lines:
+            <div class="list-meta" style="display:flex;flex-wrap:wrap;align-items:center;gap:var(--space-1);">
+                <span>Lines:</span>
                 {% for lc in display_changes %}
-                    {{ lc.name }}: {{ lc.line_before|format_line }} → {{ lc.line_after|format_line }}{% if not loop.last %}, {% endif %}
+                <span class="badge badge-line">{{ lc.name }}: {{ lc.line_before|format_line }} → {{ lc.line_after|format_line }}</span>
                 {% endfor %}
             </div>
             {% endif %}
-        </li>
-        {% endfor %}
-    </ul>
-    {% else %}
-    <p class="empty">No cups yet. Add one above!</p>
-    {% endif %}
+        </div>
+        <div class="list-actions">
+            <a class="btn btn-sm btn-ghost" href="{{ url_for('edit_cup', cup_id=cup.id) }}">Edit</a>
+            <form method="post" action="{{ url_for('delete_cup', cup_id=cup.id) }}" style="display:inline"
+                  onsubmit="return confirm('Delete this cup and its scores? Line adjustments from this cup will not be reverted.')">
+                <button type="submit" class="btn btn-sm btn-danger delete">Delete</button>
+            </form>
+        </div>
+    </li>
+    {% endfor %}
+</ul>
+{% else %}
+<p class="empty">No cups yet. Add one above!</p>
+{% endif %}
 
-    <script>
-        // Convert UTC times to local for display
-        document.querySelectorAll("time").forEach(function(el) {
-            var utc = el.getAttribute("datetime");
-            if (!utc) return;
-            var d = new Date(utc.replace(" ", "T") + "Z");
-            if (isNaN(d)) return;
-            el.textContent = d.toLocaleString();
-        });
-    </script>
-</body>
-</html>
+<script>
+    // Convert UTC times to local for display
+    document.querySelectorAll("time").forEach(function(el) {
+        var utc = el.getAttribute("datetime");
+        if (!utc) return;
+        var d = new Date(utc.replace(" ", "T") + "Z");
+        if (isNaN(d)) return;
+        el.textContent = d.toLocaleString();
+    });
+</script>
+{% endblock %}
