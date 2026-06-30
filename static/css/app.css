@@ -455,6 +455,26 @@ a:hover {
   flex-shrink: 0;
 }
 
+/* A list row whose entire area is a single link.
+   The anchor carries the row's padding and stretches to fill the row, so the
+   WHOLE row is clickable — not just the link text. Visuals are unchanged: the
+   anchor inherits the same padding / min-height the row previously held.
+   Use only for single-action rows; multi-action rows keep .list-actions. */
+.list-item-link {
+  padding: 0;
+}
+
+.list-item-link > a {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  min-width: 0;
+  min-height: 56px;
+  padding: var(--space-3) var(--space-4);
+}
+
 /* Vertical stack of full-width actions (e.g. home CTAs / nav) */
 .stack {
   display: flex;
