@@ -16,3 +16,8 @@ User=graham
 ExecStart=/home/graham/km-tracker/scripts/backup.sh
 # A backup should never hang the system; cap the run time.
 TimeoutStartSec=300
+# Lightweight sandboxing that won't break the script's host/Drive access.
+# (ProtectSystem/ProtectHome are intentionally omitted: they'd require correct
+# ReadWritePaths for ~/km-tracker/data and ~/.config/rclone to stay functional.)
+NoNewPrivileges=true
+PrivateTmp=true

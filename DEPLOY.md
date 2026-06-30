@@ -181,10 +181,18 @@ The database lives at `./data/km_tracker.db` on the host. Backups are automated 
   `LOCAL_RETENTION` (default 100).
 - Pushes snapshots **off-box to Google Drive** via `rclone` on a throttled cadence
   (only when the DB changed *and* at least `DRIVE_PUSH_INTERVAL_MIN` minutes —
-  default 15 — since the last push), pruning Drive to the newest `DRIVE_RETENTION`
-  (default 50).
-- Always keeps local snapshots even if the Drive push can't run (e.g. rclone not
-  configured); it just reports the Drive error and exits non-zero.
+  default 15 — since the last push), pruning the recent ring buffer on Drive to
+  the newest `DRIVE_RETENTION` (default 50).
+- Maintains a **`daily/` long-tail tier** on Drive: at most one snapshot per UTC
+  day, retained for the newest `DAILY_RETENTION` days (default 30). The recent
+  ring buffer can rotate out within hours when pushes are frequent, so the daily
+  tier ensures a logical corruption that goes unnoticed for a day or two still has
+  a clean copy to restore from.
+- Always keeps local snapshots even if the Drive push can't run. If rclone isn't
+  set up yet (not installed, or the remote isn't configured), it logs a warning
+  and **exits 0** — the local snapshot is already safe, so the systemd unit won't
+  be marked failed on every timer tick during setup. It only exits non-zero when a
+  *configured* remote actually errors.
 
 The timer fires every 5 minutes (frequent local snapshots); the script itself
 throttles the off-box push to ~15 minutes. No secrets live in the repo — the
@@ -192,9 +200,27 @@ rclone OAuth token is stored only in `~/.config/rclone/rclone.conf`.
 
 ### 1. Install rclone
 
+Prefer the distro package (or the official `.deb` with a verified checksum):
+
 ```bash
-curl https://rclone.org/install.sh | sudo bash
+sudo apt-get update && sudo apt-get install -y rclone
 ```
+
+Or download the official release `.deb` and verify its SHA256 before installing
+(replace the version as needed):
+
+```bash
+# See https://github.com/rclone/rclone/releases for the current version + checksums.
+curl -fsSLO https://downloads.rclone.org/v1.67.0/rclone-v1.67.0-linux-amd64.deb
+curl -fsSLO https://downloads.rclone.org/v1.67.0/SHA256SUMS
+sha256sum --check --ignore-missing SHA256SUMS   # must print "OK" for the .deb
+sudo apt-get install -y ./rclone-v1.67.0-linux-amd64.deb
+```
+
+> **Fallback only:** the upstream one-liner
+> `curl https://rclone.org/install.sh | sudo bash` pipes a remote script straight
+> into root. Use it only if the package isn't available, and review/pin the script
+> (download it, read it, run a known revision) before piping it to a root shell.
 
 ### 2. Configure a Google Drive remote named `gdrive` (headless)
 
@@ -209,7 +235,10 @@ rclone config
 # name> gdrive
 # Storage> drive            (Google Drive)
 # client_id> (leave blank)  client_secret> (leave blank)
-# scope> 1                  (full access) — or 2 for drive.file
+# scope> 2                  ← RECOMMENDED: drive.file (rclone can only see/touch
+#                             files it created, so a leaked token can't read or
+#                             delete the rest of your Drive). Pick 1 (full access)
+#                             ONLY if you need rclone to manage pre-existing files.
 # Edit advanced config> n
 # Use auto config?> n       ← IMPORTANT: say No on a headless box
 ```
@@ -236,6 +265,13 @@ Verify the remote works:
 rclone lsd gdrive:
 ```
 
+Lock down rclone's config — it holds the OAuth token, so it must not be
+world/group-readable:
+
+```bash
+chmod 600 ~/.config/rclone/rclone.conf
+```
+
 The destination folder (`km-tracker-backups`) is **auto-created on the first
 copy** — you don't need to make it manually.
 
@@ -245,6 +281,7 @@ copy** — you don't need to make it manually.
 cd /home/graham/km-tracker
 cp .env.backup.example .env.backup
 # Edit .env.backup — at minimum confirm RCLONE_DEST=gdrive:km-tracker-backups
+chmod 600 .env.backup   # the script refuses to source it if group/other-writable
 ```
 
 `.env.backup` is gitignored — never commit it. (There are still no secrets in it;

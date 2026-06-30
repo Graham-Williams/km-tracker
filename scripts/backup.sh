@@ -16,7 +16,11 @@
 #     DB actually changed) so we don't hammer the Drive API.
 #   - The local-snapshot half always runs even if the Drive half can't (e.g.
 #     rclone not configured) — losing the off-box copy must never cost us the
-#     on-box copy.
+#     on-box copy. If rclone isn't set up yet we exit 0 (local copy is safe); we
+#     only exit non-zero when a configured remote actually errors.
+#   - A long-tail DRIVE "daily/" tier keeps at most one snapshot per UTC day for
+#     DAILY_RETENTION days, defending against slow logical corruption that would
+#     otherwise rotate out of the flat recent-snapshot ring buffer.
 #
 # Secrets: the rclone OAuth token lives ONLY in rclone's own config
 # (~/.config/rclone/rclone.conf). No tokens or secrets are read from, written to,
@@ -24,34 +28,27 @@
 #
 set -euo pipefail
 
-# --- Load configuration -----------------------------------------------------
-# Optional gitignored config file in the repo root. Resolve the repo root from
-# this script's location so the script works regardless of the caller's cwd.
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-ENV_FILE="${REPO_ROOT}/.env.backup"
-if [[ -f "${ENV_FILE}" ]]; then
-  # shellcheck disable=SC1090
-  source "${ENV_FILE}"
-fi
-
-# Config vars with sane defaults (env / .env.backup override these).
-DB_PATH="${DB_PATH:-${HOME}/km-tracker/data/km_tracker.db}"
-LOCAL_BACKUP_DIR="${LOCAL_BACKUP_DIR:-${HOME}/km-tracker/data/backups}"
-STATE_DIR="${STATE_DIR:-${HOME}/km-tracker/data/.backup-state}"
-RCLONE_DEST="${RCLONE_DEST:-}"                       # e.g. gdrive:km-tracker-backups
-LOCAL_RETENTION="${LOCAL_RETENTION:-100}"            # keep newest N local snapshots
-DRIVE_RETENTION="${DRIVE_RETENTION:-50}"             # keep newest N on Drive
-DRIVE_PUSH_INTERVAL_MIN="${DRIVE_PUSH_INTERVAL_MIN:-15}"  # min minutes between Drive pushes
-
-# State files (checksums + push timestamp) live in STATE_DIR.
-LOCAL_CKSUM_FILE="${STATE_DIR}/last_local.sha256"
-DRIVE_CKSUM_FILE="${STATE_DIR}/last_drive.sha256"
-DRIVE_PUSH_TS_FILE="${STATE_DIR}/last_drive_push.epoch"
-
 # --- Helpers ----------------------------------------------------------------
 log() { printf '%s backup.sh: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
 die() { log "ERROR: $*"; exit 1; }
+
+# Octal permission bits of a file (Linux `stat -c` primary; macOS `stat -f`
+# fallback so the script is testable off-box). Echoes e.g. "644"; non-zero rc if
+# neither stat form works.
+perms_of() {
+  stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1" 2>/dev/null
+}
+
+# True if the file is writable by group or other (a tamper risk for a file we
+# `source`). Returns 2 if we can't determine the mode.
+is_group_or_other_writable() {
+  local mode perms group_digit other_digit
+  mode="$(perms_of "$1")" || return 2
+  perms="${mode: -3}"                 # last 3 octal digits (owner/group/other)
+  group_digit="${perms:1:1}"
+  other_digit="${perms:2:1}"
+  (( (group_digit & 2) || (other_digit & 2) ))
+}
 
 # Portable sha256 of a file -> bare hex digest. Ubuntu has sha256sum; fall back
 # to shasum (macOS / minimal images) so the script is testable off-box too.
@@ -62,6 +59,52 @@ sha256_of() {
     shasum -a 256 "$1" | awk '{print $1}'
   fi
 }
+
+# Assert a config value is a positive integer (>= 1). A non-numeric retention
+# would arithmetic-evaluate to 0 and prune EVERYTHING — fail loudly instead.
+require_positive_int() {
+  local name="$1" val="$2"
+  [[ "${val}" =~ ^[0-9]+$ ]] || die "${name}='${val}' is not an integer (must be >= 1)"
+  (( val >= 1 )) || die "${name}='${val}' must be >= 1"
+}
+
+# --- Load configuration -----------------------------------------------------
+# Optional gitignored config file in the repo root. Resolve the repo root from
+# this script's location so the script works regardless of the caller's cwd.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+ENV_FILE="${REPO_ROOT}/.env.backup"
+if [[ -f "${ENV_FILE}" ]]; then
+  # Sourcing executes the file as code every timer tick. If it's writable by
+  # anyone other than the owner, an attacker could drop commands in it — refuse.
+  if is_group_or_other_writable "${ENV_FILE}"; then
+    die "${ENV_FILE} is group/other-writable — refusing to source it (run: chmod 600 ${ENV_FILE})"
+  elif (( $? == 2 )); then
+    log "WARN: could not determine permissions of ${ENV_FILE}; sourcing anyway"
+  fi
+  # shellcheck disable=SC1090
+  source "${ENV_FILE}"
+fi
+
+# Config vars with sane defaults (env / .env.backup override these).
+DB_PATH="${DB_PATH:-${HOME}/km-tracker/data/km_tracker.db}"
+LOCAL_BACKUP_DIR="${LOCAL_BACKUP_DIR:-${HOME}/km-tracker/data/backups}"
+STATE_DIR="${STATE_DIR:-${HOME}/km-tracker/data/.backup-state}"
+RCLONE_DEST="${RCLONE_DEST:-}"                       # e.g. gdrive:km-tracker-backups
+LOCAL_RETENTION="${LOCAL_RETENTION:-100}"            # keep newest N local snapshots
+DRIVE_RETENTION="${DRIVE_RETENTION:-50}"             # keep newest N recent on Drive
+DAILY_RETENTION="${DAILY_RETENTION:-30}"             # keep newest N in Drive daily/ tier
+DRIVE_PUSH_INTERVAL_MIN="${DRIVE_PUSH_INTERVAL_MIN:-15}"  # min minutes between Drive pushes
+
+# Validate retention config BEFORE any prune runs (a bad value would delete data).
+require_positive_int LOCAL_RETENTION "${LOCAL_RETENTION}"
+require_positive_int DRIVE_RETENTION "${DRIVE_RETENTION}"
+require_positive_int DAILY_RETENTION "${DAILY_RETENTION}"
+
+# State files (checksums + push timestamp) live in STATE_DIR.
+LOCAL_CKSUM_FILE="${STATE_DIR}/last_local.sha256"
+DRIVE_CKSUM_FILE="${STATE_DIR}/last_drive.sha256"
+DRIVE_PUSH_TS_FILE="${STATE_DIR}/last_drive_push.epoch"
 
 # --- Preconditions ----------------------------------------------------------
 [[ -f "${DB_PATH}" ]] || die "DB not found at DB_PATH=${DB_PATH}"
@@ -85,8 +128,12 @@ import sys
 src_path = os.environ["DB_PATH"]
 dst_path = os.environ["TMP_SNAPSHOT"]
 
-# Open the live DB read-only via URI so we never accidentally write to it.
-src = sqlite3.connect(f"file:{src_path}?mode=ro", uri=True)
+# Open the live DB by plain path (NOT a file: URI). The online .backup() API is
+# read-only with respect to the source, so we don't need mode=ro — and a plain
+# connection opens WAL-mode DBs reliably, whereas a `file:...?mode=ro` URI can
+# fail to open a WAL DB and is vulnerable to URI-param injection if the path
+# contains a "?".
+src = sqlite3.connect(src_path)
 try:
     dst = sqlite3.connect(dst_path)
     try:
@@ -97,7 +144,7 @@ try:
 finally:
     src.close()
 
-# Sanity check: the snapshot must be a usable SQLite DB.
+# Sanity check: the SNAPSHOT (destination) must be a usable SQLite DB.
 check = sqlite3.connect(dst_path)
 try:
     ok = check.execute("PRAGMA integrity_check").fetchone()[0]
@@ -141,14 +188,29 @@ if (( ${#LOCAL_SNAPSHOTS[@]} > LOCAL_RETENTION )); then
 fi
 
 # --- Drive push (decoupled cadence) -----------------------------------------
-# Wrapped so any failure here is reported but does NOT fail the whole run — the
-# local snapshot above is already safely on disk.
+# Return codes:
+#   0  — pushed OK, or intentionally skipped (throttle/dedup/unconfigured rclone)
+#   1  — a CONFIGURED remote actually errored (worth surfacing as a unit failure)
+# Rationale: while the user hasn't finished rclone setup yet, the local snapshot
+# is already safe — we must NOT mark the systemd unit failed every 5 minutes. So
+# "rclone not installed / remote not configured" => WARN + return 0. Only a real
+# failure of a configured remote returns non-zero.
 drive_push() {
-  # Use `return 1` (not die's hard exit) so failures unwind back to the caller,
-  # which reports them without discarding the already-saved local snapshot.
-  [[ -n "${RCLONE_DEST}" ]] || { log "ERROR: RCLONE_DEST is not set (configure it in .env.backup) — skipping Drive push"; return 1; }
-  command -v rclone >/dev/null 2>&1 || { log "ERROR: rclone not installed — skipping Drive push"; return 1; }
+  [[ -n "${RCLONE_DEST}" ]] || { log "WARN: RCLONE_DEST not set — local snapshot saved; skipping Drive push (set it in .env.backup once rclone is configured)"; return 0; }
   [[ -n "${LATEST_LOCAL_SNAPSHOT}" && -f "${LATEST_LOCAL_SNAPSHOT}" ]] || { log "ERROR: no local snapshot available to push"; return 1; }
+
+  # rclone unconfigured? Parse the remote name (part before the first ':') and
+  # check it actually exists. If not, the user hasn't finished setup — warn and
+  # exit 0 rather than failing the unit on every tick.
+  if ! command -v rclone >/dev/null 2>&1; then
+    log "WARN: rclone not installed — local snapshot saved; skipping Drive push (see DEPLOY.md)"
+    return 0
+  fi
+  local remote_name="${RCLONE_DEST%%:*}"
+  if ! rclone listremotes 2>/dev/null | grep -qx "${remote_name}:"; then
+    log "WARN: rclone remote '${remote_name}:' not configured — local snapshot saved; skipping Drive push (run 'rclone config', see DEPLOY.md)"
+    return 0
+  fi
 
   # (a) Throttle: has it been >= DRIVE_PUSH_INTERVAL_MIN since the last push?
   local now last_push elapsed_min
@@ -186,16 +248,43 @@ drive_push() {
     done
   fi
 
+  # --- Daily long-tail tier -------------------------------------------------
+  # The recent ring buffer above (DRIVE_RETENTION) can rotate out within hours of
+  # frequent pushes, so a logical corruption that goes unnoticed for a day or two
+  # could lose its last clean copy. Keep a separate daily/ subfolder holding at
+  # most ONE snapshot per UTC day, retained for DAILY_RETENTION days.
+  local daily_dest="${RCLONE_DEST}/daily"
+  local today
+  today="$(date -u +%Y%m%d)"
+  # Has a daily snapshot already been added for today? Daily files keep their
+  # original km_tracker_<UTC-timestamp>.db name, so today's copy starts with
+  # km_tracker_<today>T. If none exists yet, add the current snapshot.
+  local existing_today
+  existing_today="$(rclone lsf "${daily_dest}" --include "km_tracker_${today}T*.db" 2>/dev/null | head -n1 || true)"
+  if [[ -z "${existing_today}" ]]; then
+    log "adding daily snapshot for ${today} to ${daily_dest}"
+    rclone copy "${LATEST_LOCAL_SNAPSHOT}" "${daily_dest}" || { log "ERROR: rclone copy to daily/ failed"; return 1; }
+    # Prune daily/ to the newest DAILY_RETENTION files.
+    local daily_files=()
+    local dfile
+    while IFS= read -r dfile; do daily_files+=("$dfile"); done \
+      < <(rclone lsf "${daily_dest}" --include 'km_tracker_*.db' 2>/dev/null | sort -r || true)
+    if (( ${#daily_files[@]} > DAILY_RETENTION )); then
+      for old in "${daily_files[@]:DAILY_RETENTION}"; do
+        rclone deletefile "${daily_dest}/${old}" && log "pruned daily snapshot ${old}" || log "WARN: failed to prune daily snapshot ${old}"
+      done
+    fi
+  fi
+
   # Record successful push: timestamp + the checksum now on Drive.
   printf '%s\n' "${now}" > "${DRIVE_PUSH_TS_FILE}"
   printf '%s\n' "${SNAP_CKSUM}" > "${DRIVE_CKSUM_FILE}"
   log "Drive push complete (sha ${SNAP_CKSUM:0:12})"
 }
 
-# Run the Drive push in a subshell-tolerant way: report its failure but keep the
-# overall exit status clean as long as local snapshots succeeded. We capture the
-# failure so the script's exit code reflects "Drive problem" without unwinding
-# the (already-completed) local work.
+# Run the Drive push: report its failure but keep the overall exit status clean
+# as long as local snapshots succeeded and the Drive half only *skipped* (rc 0).
+# A non-zero rc means a configured remote actually errored — surface that.
 DRIVE_RC=0
 drive_push || DRIVE_RC=$?
 if (( DRIVE_RC != 0 )); then
