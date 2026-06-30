@@ -17,10 +17,13 @@
   --color-muted: #6b7280;         /* secondary / subtitle text */
   --color-faint: #9aa0a8;         /* tertiary text (hints, meta) */
 
-  --color-accent: #d8413f;        /* single accent (Kario red) */
-  --color-accent-hover: #bb3331;  /* accent on hover/active */
+  /* Accent — themeable via [data-theme] on <html>. Default = violet.
+     Destructive actions use --color-danger (below), NOT the accent. */
+  --color-accent: #7c3aed;        /* single accent (violet, default) */
+  --color-accent-hover: #6d28d9;  /* accent on hover/active */
   --color-accent-contrast: #ffffff; /* text/icon on accent */
-  --color-accent-soft: #fbe9e9;   /* tinted accent surface (badges) */
+  --color-accent-soft: #ede9fe;   /* tinted accent surface (badges) */
+  --color-accent-gradient: var(--color-accent); /* primary button bg (gradient themes override) */
 
   --color-danger: #d1453b;
   --color-danger-soft: #fdecea;
@@ -61,6 +64,59 @@
   --transition: 140ms ease;
 }
 
+/* ---------- Accent themes (light) ----------
+   Each theme overrides only the accent variables via [data-theme] on <html>.
+   violet is the default (already set in :root). Dark overrides live in the
+   prefers-color-scheme: dark block below, mirroring these. */
+[data-theme="violet"] {
+  --color-accent: #7c3aed;
+  --color-accent-hover: #6d28d9;
+  --color-accent-soft: #ede9fe;
+  --color-accent-gradient: var(--color-accent);
+}
+[data-theme="indigo"] {
+  --color-accent: #4f46e5;
+  --color-accent-hover: #4338ca;
+  --color-accent-soft: #e0e7ff;
+  --color-accent-gradient: var(--color-accent);
+}
+[data-theme="ocean"] {
+  --color-accent: #2563eb;
+  --color-accent-hover: #1d4ed8;
+  --color-accent-soft: #dbeafe;
+  --color-accent-gradient: var(--color-accent);
+}
+[data-theme="teal"] {
+  --color-accent: #0d9488;
+  --color-accent-hover: #0f766e;
+  --color-accent-soft: #ccfbf1;
+  --color-accent-gradient: var(--color-accent);
+}
+[data-theme="emerald"] {
+  --color-accent: #059669;
+  --color-accent-hover: #047857;
+  --color-accent-soft: #d1fae5;
+  --color-accent-gradient: var(--color-accent);
+}
+[data-theme="rose"] {
+  --color-accent: #db2777;
+  --color-accent-hover: #be185d;
+  --color-accent-soft: #fce7f3;
+  --color-accent-gradient: var(--color-accent);
+}
+[data-theme="aurora"] {
+  --color-accent: #8b5cf6;
+  --color-accent-hover: #7c3aed;
+  --color-accent-soft: rgba(139, 92, 246, 0.16);
+  --color-accent-gradient: linear-gradient(135deg, #8b5cf6 0%, #06b6d4 100%);
+}
+[data-theme="sunset"] {
+  --color-accent: #f43f5e;
+  --color-accent-hover: #e11d48;
+  --color-accent-soft: rgba(244, 63, 94, 0.14);
+  --color-accent-gradient: linear-gradient(135deg, #f97316 0%, #db2777 100%);
+}
+
 @media (prefers-color-scheme: dark) {
   :root {
     --color-bg: #15171a;
@@ -72,10 +128,10 @@
     --color-muted: #a0a6ae;
     --color-faint: #767c85;
 
-    --color-accent: #f05a57;
-    --color-accent-hover: #f8716e;
-    --color-accent-contrast: #1a0d0d;
-    --color-accent-soft: #3a1f1f;
+    --color-accent: #8b5cf6;
+    --color-accent-hover: #a78bfa;
+    --color-accent-contrast: #ffffff;
+    --color-accent-soft: rgba(139, 92, 246, 0.18);
 
     --color-danger: #f4675c;
     --color-danger-soft: #3a1f1d;
@@ -86,6 +142,57 @@
 
     --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
     --shadow-md: 0 2px 4px rgba(0, 0, 0, 0.35), 0 6px 16px rgba(0, 0, 0, 0.4);
+  }
+
+  /* Accent themes — dark overrides (mirror the light [data-theme] blocks).
+     --color-accent-contrast stays #fff (set in dark :root above). */
+  [data-theme="violet"] {
+    --color-accent: #8b5cf6;
+    --color-accent-hover: #a78bfa;
+    --color-accent-soft: rgba(139, 92, 246, 0.18);
+    --color-accent-gradient: var(--color-accent);
+  }
+  [data-theme="indigo"] {
+    --color-accent: #6366f1;
+    --color-accent-hover: #818cf8;
+    --color-accent-soft: rgba(99, 102, 241, 0.18);
+    --color-accent-gradient: var(--color-accent);
+  }
+  [data-theme="ocean"] {
+    --color-accent: #3b82f6;
+    --color-accent-hover: #60a5fa;
+    --color-accent-soft: rgba(59, 130, 246, 0.18);
+    --color-accent-gradient: var(--color-accent);
+  }
+  [data-theme="teal"] {
+    --color-accent: #14b8a6;
+    --color-accent-hover: #2dd4bf;
+    --color-accent-soft: rgba(20, 184, 166, 0.18);
+    --color-accent-gradient: var(--color-accent);
+  }
+  [data-theme="emerald"] {
+    --color-accent: #10b981;
+    --color-accent-hover: #34d399;
+    --color-accent-soft: rgba(16, 185, 129, 0.18);
+    --color-accent-gradient: var(--color-accent);
+  }
+  [data-theme="rose"] {
+    --color-accent: #ec4899;
+    --color-accent-hover: #f472b6;
+    --color-accent-soft: rgba(236, 72, 153, 0.18);
+    --color-accent-gradient: var(--color-accent);
+  }
+  [data-theme="aurora"] {
+    --color-accent: #a78bfa;
+    --color-accent-hover: #c4b5fd;
+    --color-accent-soft: rgba(167, 139, 250, 0.18);
+    --color-accent-gradient: linear-gradient(135deg, #a78bfa 0%, #22d3ee 100%);
+  }
+  [data-theme="sunset"] {
+    --color-accent: #fb7185;
+    --color-accent-hover: #fda4af;
+    --color-accent-soft: rgba(251, 113, 133, 0.18);
+    --color-accent-gradient: linear-gradient(135deg, #fb923c 0%, #f472b6 100%);
   }
 }
 
@@ -218,13 +325,14 @@ a:hover {
 }
 
 .btn-primary {
-  background: var(--color-accent);
+  background: var(--color-accent-gradient);
   color: var(--color-accent-contrast);
   box-shadow: var(--shadow-sm);
 }
 
 .btn-primary:hover {
-  background: var(--color-accent-hover);
+  /* brightness works for both solid and gradient accent backgrounds */
+  filter: brightness(1.07);
   color: var(--color-accent-contrast);
 }
 
@@ -563,4 +671,115 @@ input[type="checkbox"] {
 
 .mb-4 {
   margin-bottom: var(--space-4);
+}
+
+/* ---------- Theme picker ---------- */
+.theme-picker {
+  position: fixed;
+  top: var(--space-3);
+  right: var(--space-3);
+  z-index: 50;
+}
+
+/* Circular palette trigger — shows the current accent */
+.theme-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--color-border-strong);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-sm);
+  cursor: pointer;
+  transition: transform var(--transition), box-shadow var(--transition),
+    border-color var(--transition);
+}
+
+.theme-trigger:hover {
+  box-shadow: var(--shadow-md);
+}
+
+.theme-trigger:active {
+  transform: translateY(1px);
+}
+
+/* The colored dot inside the trigger reflects the active accent */
+.theme-trigger-dot {
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-pill);
+  background: var(--color-accent-gradient);
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.12);
+}
+
+/* Popover menu */
+.theme-menu {
+  position: absolute;
+  top: calc(100% + var(--space-2));
+  right: 0;
+  width: max-content;
+  max-width: calc(100vw - 2 * var(--space-3));
+  padding: var(--space-3);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
+}
+
+.theme-menu[hidden] {
+  display: none;
+}
+
+.theme-menu-title {
+  font-size: 0.78rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--color-faint);
+  margin-bottom: var(--space-2);
+}
+
+.theme-options {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: var(--space-2);
+}
+
+/* Each theme option: a swatch button */
+.theme-option {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border-radius: var(--radius-md);
+  border: 2px solid transparent;
+  background: var(--color-surface-2);
+  cursor: pointer;
+  transition: border-color var(--transition), transform var(--transition);
+}
+
+.theme-option:hover {
+  transform: translateY(-1px);
+}
+
+.theme-swatch {
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius-pill);
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.12);
+}
+
+/* Active theme gets a ring + check */
+.theme-option[aria-pressed="true"] {
+  border-color: var(--color-accent);
+}
+
+.theme-option[aria-pressed="true"] .theme-swatch {
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.12),
+    0 0 0 2px var(--color-surface), 0 0 0 4px var(--color-accent);
 }

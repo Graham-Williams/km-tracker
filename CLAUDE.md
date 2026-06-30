@@ -27,7 +27,17 @@ As of the `feature/ui-makeover` work, the app has a shared design system instead
 
 - **`static/css/app.css`** — the single shared design system. CSS-custom-property based: all colors/spacing/radii/shadows are defined as variables in `:root` (light) and overridden in a `@media (prefers-color-scheme: dark)` block, so **light + dark mode are automatic**. Mobile-first, centered content column (`--content-width`, ~520px). Flask serves it from `/static`.
 - **`templates/base.html`** — the shared layout **every template should `{% extends "base.html" %}`**. It sets doctype/viewport/`color-scheme` meta, links `app.css` via `{{ url_for('static', filename='css/app.css') }}`, and renders flash messages (uses `get_flashed_messages(with_categories=true)`: `success`→`.flash-success`, `info`→`.flash-info`, everything else incl. uncategorized→`.flash-error`).
-- **No JS framework** — vanilla only; the design system is pure CSS.
+- **No JS framework** — vanilla only; the design system is pure CSS (plus a tiny vanilla-JS theme picker).
+
+### Accent theming (user-selectable)
+The **accent** color is themeable independently of the rest of the palette; **destructive styling never changes** (`--color-danger` and `.btn-danger` are fixed red regardless of theme).
+
+- **Mechanism:** a `data-theme` attribute on `<html>` overrides only the accent variables (`--color-accent`, `--color-accent-hover`, `--color-accent-soft`, `--color-accent-gradient`; `--color-accent-contrast` stays near-white). Each theme is a `[data-theme="name"]` block in `:root`-level (light) CSS **and** a mirrored block inside the `@media (prefers-color-scheme: dark)` query, so every theme works in both modes. The **default is `violet`** — its values are also the base `:root`/dark `:root` accent values, so no attribute = violet.
+- **`--color-accent-gradient`:** the primary-button background. Defaults to `var(--color-accent)` (solid). The two gradient themes (`aurora`, `sunset`) set it to a `linear-gradient(...)`, giving multi-color buttons while links/badges/focus rings still use the solid `--color-accent`. `.btn-primary` uses `background: var(--color-accent-gradient)` and hovers via `filter: brightness(1.07)` (works for solid + gradient).
+- **Themes shipped (8):** `violet` (default), `indigo`, `ocean`, `teal`, `emerald`, `rose`, `aurora` (gradient violet→cyan), `sunset` (gradient orange→pink).
+- **Persistence:** stored in `localStorage` under key **`km-theme`**. An inline no-FOUC `<script>` at the **top of `<head>`** (before the CSS link) reads it and sets `data-theme` before first paint — no flash of the wrong theme. The picker logic is a separate vanilla `<script>` near the end of `<body>`.
+- **Picker UI:** a fixed circular "palette" trigger (`.theme-picker`/`.theme-trigger`, top-right, shows current accent) opens a popover (`.theme-menu`) of swatch buttons (`.theme-option`/`.theme-swatch`). Active theme marked via `aria-pressed="true"`. Closes on outside-click / Escape. All styled with design-system variables.
+- **To add a theme:** (1) add a `[data-theme="name"]` block in the light themes section of `app.css` and a mirrored one inside the dark `@media` block (set accent/hover/soft, and gradient if it's a gradient theme); (2) add a `.theme-option` button with a hardcoded swatch color in `base.html`'s `.theme-options`. No JS changes needed — the picker reads all `.theme-option`s generically.
 
 ### base.html blocks
 - `{% block title %}` — `<title>` text (default "KM Tracker").
@@ -65,7 +75,7 @@ Remove the old `<!DOCTYPE>`, `<html>`, `<head>`, inline `<style>`, the manual fl
 - **Utilities:** `.muted`, `.text-faint`, `.mt-4`, `.mb-4`.
 
 ### CSS variable names (app.css tokens)
-Colors: `--color-bg`, `--color-surface`, `--color-surface-2`, `--color-border`, `--color-border-strong`, `--color-text`, `--color-muted`, `--color-faint`, `--color-accent`, `--color-accent-hover`, `--color-accent-contrast`, `--color-accent-soft`, `--color-danger`(+`-soft`), `--color-success`(+`-soft`), `--color-info`(+`-soft`).
+Colors: `--color-bg`, `--color-surface`, `--color-surface-2`, `--color-border`, `--color-border-strong`, `--color-text`, `--color-muted`, `--color-faint`, `--color-accent`, `--color-accent-hover`, `--color-accent-contrast`, `--color-accent-soft`, `--color-accent-gradient` (primary-button bg; solid by default, gradient for `aurora`/`sunset` — see Accent theming), `--color-danger`(+`-soft`), `--color-success`(+`-soft`), `--color-info`(+`-soft`).
 Other: `--font-sans`; spacing `--space-1`…`--space-7`; radius `--radius-sm|md|lg|pill`; `--shadow-sm`, `--shadow-md`; `--content-width`; `--transition`.
 
 ## Code Style & Conventions
