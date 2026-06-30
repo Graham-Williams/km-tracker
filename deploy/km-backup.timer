@@ -1,0 +1,17 @@
+# Schedules km-backup.service on the self-hosted "personalserver" box.
+#
+# Fires every 5 minutes -> frequent, cheap LOCAL snapshots. The script itself
+# throttles the off-box Drive push to roughly every DRIVE_PUSH_INTERVAL_MIN
+# minutes (default 15), so a tight timer here is fine. See DEPLOY.md.
+[Unit]
+Description=Run KM Tracker backup every 5 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+# Catch up on a missed run (e.g. box was asleep/off) instead of waiting a full
+# interval after boot.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -23,6 +23,58 @@ This is a public GitHub repo — keep all committed content professional and gen
 - **Deployment:** Docker container with gunicorn (see `Dockerfile`, `docker-compose.yml`). The `app` container runs as a **non-root user (UID 10001)** and publishes **no host port** — the `cloudflared` connector reaches it over the compose network at `http://app:8080`. Because `./data` is bind-mounted, the host dir must be `chown`'d to UID 10001 before first launch (see `DEPLOY.md`). Local dev still uses `python app.py` directly (debug off by default; set `FLASK_DEBUG=1` to enable). Can be self-hosted on a headless Linux box via Docker + a Cloudflare named tunnel (`cloudflared` service in compose, image pinned to a released tag), gated behind Cloudflare Access. `SECRET_KEY` and `TUNNEL_TOKEN` come from a gitignored `.env` (`cloudflared` reads `TUNNEL_TOKEN` from env, not the command line; see `.env.example`). Full runbook in `DEPLOY.md`
 - **Dependencies:** `requirements.txt` = prod (flask, python-dotenv, gunicorn); `requirements-dev.txt` = prod + test deps (pytest, playwright)
 
+## Self-Hosted Deployment & Backups
+
+The app is self-hosted on a headless Ubuntu Server box ("personalserver"), running
+via Docker Compose. The box **tracks `main`**.
+
+### Deploy procedure (box)
+
+Until the Cloudflare tunnel is fully set up, deploy = pull + rebuild + restart with
+the CI override (which publishes the host port so the box is reachable on the LAN):
+
+```bash
+cd /home/graham/km-tracker
+git pull
+docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d --build app
+```
+
+(Once the tunnel is live, drop the `docker-compose.ci.yml` override — the tunnel
+reaches the app over the internal network and no host port should be published.)
+
+> **DEPLOY-SAFETY RULE — never restart/redeploy while a cup is in progress.**
+> A live cup session is mid-write state (`cups.status = 'in_progress'`). Restarting
+> the container mid-cup can lose or corrupt that session's progress. **Before any
+> restart/redeploy, check that zero cups are in progress and only proceed when the
+> count is 0:**
+>
+> ```bash
+> sqlite3 data/km_tracker.db \
+>   "SELECT COUNT(*) FROM cups WHERE status='in_progress' AND deleted_at IS NULL;"
+> ```
+>
+> If it returns anything other than `0`, do **not** restart — wait until the cup is
+> finished (or coordinate with whoever's running game night).
+
+### Backups
+
+Automated by `scripts/backup.sh` on the **host** (not in the container), driven by
+the `deploy/km-backup.{service,timer}` systemd units:
+
+- **Local snapshots:** consistent SQLite online-backup snapshots into `data/backups/`,
+  deduplicated by sha256, pruned to the newest `LOCAL_RETENTION` (default 100). The
+  timer fires every 5 minutes.
+- **Off-box copies:** pushed to Google Drive via `rclone` on a throttled cadence
+  (only when the DB changed and ≥ `DRIVE_PUSH_INTERVAL_MIN` minutes — default 15 —
+  since the last push), pruned to the newest `DRIVE_RETENTION` (default 50).
+- The local half always runs even if the Drive push can't (rclone unconfigured →
+  reports the error, exits non-zero, but local snapshots are unaffected).
+- Config: gitignored `.env.backup` (template: `.env.backup.example`). **No secrets in
+  the repo** — the rclone OAuth token lives only in `~/.config/rclone/rclone.conf`.
+
+Full setup/runbook (rclone headless auth, systemd install, restore) is in `DEPLOY.md`
+→ "Automated backups".
+
 ## UI / Design System
 
 As of the `feature/ui-makeover` work, the app has a shared design system instead of per-template inline `<style>` blocks.

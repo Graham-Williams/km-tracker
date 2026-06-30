@@ -168,17 +168,158 @@ git pull
 docker compose up -d --build
 ```
 
-## Backups
+## Automated backups
 
-The database lives at `./data/km_tracker.db` on the host. Back it up periodically, e.g.
-a nightly copy:
+The database lives at `./data/km_tracker.db` on the host. Backups are automated by
+`scripts/backup.sh`, driven by a systemd timer. The script runs on the **host**
+(not in the container) and:
+
+- Takes a **consistent** snapshot using SQLite's online backup API via `python3`
+  (stdlib only — no `sqlite3` CLI, no pip deps), safe to run while gunicorn writes.
+- Keeps **frequent local snapshots** in `data/backups/`, deduplicated by sha256
+  (an unchanged DB doesn't create a new file), pruned to the newest
+  `LOCAL_RETENTION` (default 100).
+- Pushes snapshots **off-box to Google Drive** via `rclone` on a throttled cadence
+  (only when the DB changed *and* at least `DRIVE_PUSH_INTERVAL_MIN` minutes —
+  default 15 — since the last push), pruning the recent ring buffer on Drive to
+  the newest `DRIVE_RETENTION` (default 50).
+- Maintains a **`daily/` long-tail tier** on Drive: at most one snapshot per UTC
+  day, retained for the newest `DAILY_RETENTION` days (default 30). The recent
+  ring buffer can rotate out within hours when pushes are frequent, so the daily
+  tier ensures a logical corruption that goes unnoticed for a day or two still has
+  a clean copy to restore from.
+- Always keeps local snapshots even if the Drive push can't run. If rclone isn't
+  set up yet (not installed, or the remote isn't configured), it logs a warning
+  and **exits 0** — the local snapshot is already safe, so the systemd unit won't
+  be marked failed on every timer tick during setup. It only exits non-zero when a
+  *configured* remote actually errors.
+
+The timer fires every 5 minutes (frequent local snapshots); the script itself
+throttles the off-box push to ~15 minutes. No secrets live in the repo — the
+rclone OAuth token is stored only in `~/.config/rclone/rclone.conf`.
+
+### 1. Install rclone
+
+Prefer the distro package (or the official `.deb` with a verified checksum):
 
 ```bash
-cp ./data/km_tracker.db ./data/km_tracker.$(date +%F).db
+sudo apt-get update && sudo apt-get install -y rclone
 ```
 
-For a hot backup that's safe while the app is running, prefer SQLite's own backup:
+Or download the official release `.deb` and verify its SHA256 before installing
+(replace the version as needed):
 
 ```bash
+# See https://github.com/rclone/rclone/releases for the current version + checksums.
+curl -fsSLO https://downloads.rclone.org/v1.67.0/rclone-v1.67.0-linux-amd64.deb
+curl -fsSLO https://downloads.rclone.org/v1.67.0/SHA256SUMS
+sha256sum --check --ignore-missing SHA256SUMS   # must print "OK" for the .deb
+sudo apt-get install -y ./rclone-v1.67.0-linux-amd64.deb
+```
+
+> **Fallback only:** the upstream one-liner
+> `curl https://rclone.org/install.sh | sudo bash` pipes a remote script straight
+> into root. Use it only if the package isn't available, and review/pin the script
+> (download it, read it, run a known revision) before piping it to a root shell.
+
+### 2. Configure a Google Drive remote named `gdrive` (headless)
+
+On a **headless** box rclone can't open a browser, so you authorize on a machine
+that has one (e.g. Graham's Mac) and paste the token back.
+
+On the **box**:
+
+```bash
+rclone config
+# n) New remote
+# name> gdrive
+# Storage> drive            (Google Drive)
+# client_id> (leave blank)  client_secret> (leave blank)
+# scope> 2                  ← RECOMMENDED: drive.file (rclone can only see/touch
+#                             files it created, so a leaked token can't read or
+#                             delete the rest of your Drive). Pick 1 (full access)
+#                             ONLY if you need rclone to manage pre-existing files.
+# Edit advanced config> n
+# Use auto config?> n       ← IMPORTANT: say No on a headless box
+```
+
+rclone prints a command to run on a machine **with a browser**. On your **Mac**
+(with rclone installed locally), run it:
+
+```bash
+rclone authorize "drive"
+```
+
+Sign in / consent in the browser; rclone prints a JSON token blob. Copy it and
+paste it back into the prompt on the box. Finish with:
+
+```bash
+# Configure this as a Shared Drive?> n
+# y) Yes this is OK
+# q) Quit config
+```
+
+Verify the remote works:
+
+```bash
+rclone lsd gdrive:
+```
+
+Lock down rclone's config — it holds the OAuth token, so it must not be
+world/group-readable:
+
+```bash
+chmod 600 ~/.config/rclone/rclone.conf
+```
+
+The destination folder (`km-tracker-backups`) is **auto-created on the first
+copy** — you don't need to make it manually.
+
+### 3. Configure the backup
+
+```bash
+cd /home/graham/km-tracker
+cp .env.backup.example .env.backup
+# Edit .env.backup — at minimum confirm RCLONE_DEST=gdrive:km-tracker-backups
+chmod 600 .env.backup   # the script refuses to source it if group/other-writable
+```
+
+`.env.backup` is gitignored — never commit it. (There are still no secrets in it;
+the OAuth token lives in rclone's config.)
+
+### 4. Install the systemd units
+
+```bash
+sudo cp deploy/km-backup.service deploy/km-backup.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now km-backup.timer
+```
+
+The units assume the repo at `/home/graham/km-tracker` and run as user `graham`.
+
+### 5. Verify
+
+```bash
+# Timer is scheduled:
+systemctl list-timers | grep km-backup
+
+# Run it once now and watch the log:
+sudo systemctl start km-backup.service
+journalctl -u km-backup.service --no-pager -n 50
+
+# A local snapshot should appear:
+ls -1 data/backups/
+
+# And the file should appear in Drive:
+rclone lsf gdrive:km-tracker-backups
+```
+
+To restore, just copy a snapshot back over `data/km_tracker.db` while the app is
+stopped (it's a plain SQLite file).
+
+### Manual one-off backup (without the timer)
+
+```bash
+# Hot backup that's safe while the app is running:
 sqlite3 ./data/km_tracker.db ".backup ./data/km_tracker.$(date +%F).db"
 ```
