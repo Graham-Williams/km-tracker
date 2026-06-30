@@ -1,0 +1,8 @@
+# CI-only override. Publishes the app's port on the host so the e2e job can
+# reach it at http://localhost:8080. The production deploy does NOT use this
+# file — there the app is reached only over the internal Docker network by the
+# cloudflared tunnel (see docker-compose.yml and DEPLOY.md).
+services:
+  app:
+    ports:
+      - "8080:8080"

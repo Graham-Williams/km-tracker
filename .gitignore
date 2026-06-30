@@ -27,6 +27,7 @@ venv/
 
 # Database (local dev instances — committed migrations/schema are fine)
 db/
+data/
 *.db
 *.db-journal
 *.db-wal

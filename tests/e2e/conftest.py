@@ -6,7 +6,6 @@ import time
 
 import pytest
 
-from app import app
 from db import get_connection, init_db
 
 
@@ -18,7 +17,20 @@ def _find_free_port():
 
 @pytest.fixture(scope="session")
 def _server():
-    """Start Flask once for the entire e2e test session."""
+    """Start Flask once for the entire e2e test session.
+
+    When E2E_BASE_URL is set, the server is already running externally
+    (e.g. in a Docker container) — skip starting Flask and return the
+    DB path from the DB_PATH env var so _reset_db can wipe between tests.
+    """
+    external_url = os.environ.get("E2E_BASE_URL")
+    if external_url:
+        db_path = os.environ.get("DB_PATH")
+        yield {"url": external_url, "db_path": db_path}
+        return
+
+    from app import app
+
     db_dir = tempfile.mkdtemp()
     db_path = os.path.join(db_dir, "e2e_test.db")
     os.environ["DB_PATH"] = db_path
@@ -40,7 +52,7 @@ def _server():
         except OSError:
             time.sleep(0.1)
 
-    yield {"port": port, "db_path": db_path}
+    yield {"url": f"http://127.0.0.1:{port}", "db_path": db_path}
 
 
 @pytest.fixture(autouse=True)
@@ -60,4 +72,4 @@ def _reset_db(_server):
 
 @pytest.fixture(scope="session")
 def base_url(_server):
-    return f"http://127.0.0.1:{_server['port']}"
+    return _server["url"]

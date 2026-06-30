@@ -20,6 +20,8 @@ This is a public GitHub repo — keep all committed content professional and gen
 - **Testing:** pytest (Flask test client for unit/integration, Playwright for e2e)
 - **Port:** 8080 (5000 conflicts with macOS AirPlay Receiver)
 - **Network access:** Binds to `0.0.0.0` so other devices on the local network can reach it
+- **Deployment:** Docker container with gunicorn (see `Dockerfile`, `docker-compose.yml`). The `app` container runs as a **non-root user (UID 10001)** and publishes **no host port** — the `cloudflared` connector reaches it over the compose network at `http://app:8080`. Because `./data` is bind-mounted, the host dir must be `chown`'d to UID 10001 before first launch (see `DEPLOY.md`). Local dev still uses `python app.py` directly (debug off by default; set `FLASK_DEBUG=1` to enable). Can be self-hosted on a headless Linux box via Docker + a Cloudflare named tunnel (`cloudflared` service in compose, image pinned to a released tag), gated behind Cloudflare Access. `SECRET_KEY` and `TUNNEL_TOKEN` come from a gitignored `.env` (`cloudflared` reads `TUNNEL_TOKEN` from env, not the command line; see `.env.example`). Full runbook in `DEPLOY.md`
+- **Dependencies:** `requirements.txt` = prod (flask, python-dotenv, gunicorn); `requirements-dev.txt` = prod + test deps (pytest, playwright)
 
 ## UI / Design System
 
@@ -122,6 +124,7 @@ Running list of features under consideration. Not commitments — ideas to pull 
 - **Bet tracking** — players typically bet on cups or sessions. Record who bet what, who won, and settlement status. Schema TBD.
 - **Screenshot-based score entry** — upload a photo of the end-of-cup scoreboard, auto-parse scores (OCR + vision). Mapping scores to players should be straightforward once extraction works.
 - **Stale veto forfeit** — enforce the "use it or lose it" rule: entering race 3 with 3 unused half-vetoes auto-forfeits one. (Next feature up.)
+- **Record cup completion time, not start time** — live cup sessions currently stamp `cups.date` when the session starts (`status = 'in_progress'`). For accurate session history the timestamp should reflect when the cup finishes. Options: update `date` at completion, or add a separate `completed_at` column and keep `date` as start. Note the `UNIQUE` constraint on `date` — a schema change may be needed.
 - **Soft-delete everywhere** — extend the `deleted_at` pattern (already on `cups`) to all tables so nothing is truly deleted. Helpful for debugging.
 - **Visual refresh (mobile-first)** — clean, minimal, flat design. Mobile-first. Explore wheel animation library during this refactor.
 - **Friendly URL** — custom domain or hostname instead of raw IP on local network.
