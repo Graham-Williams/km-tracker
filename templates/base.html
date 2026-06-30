@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="light dark">
+    <!-- Apply saved accent theme before paint (no flash of wrong theme). -->
+    <script>
+      (function(){
+        try {
+          var t = localStorage.getItem('km-theme');
+          if (t) document.documentElement.setAttribute('data-theme', t);
+        } catch(e){}
+      })();
+    </script>
+    <title>{% block title %}KM Tracker{% endblock %}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
+    {% block styles %}{% endblock %}
+</head>
+<body>
+    <div class="theme-picker">
+        <button type="button" class="theme-trigger" id="themeTrigger"
+                aria-label="Change theme" aria-haspopup="true" aria-expanded="false">
+            <span class="theme-trigger-dot" aria-hidden="true"></span>
+        </button>
+        <div class="theme-menu" id="themeMenu" role="menu" aria-label="Accent theme" hidden>
+            <div class="theme-menu-title">Accent</div>
+            <div class="theme-options">
+                <button type="button" class="theme-option" role="menuitemradio" data-theme-name="violet" aria-label="Violet">
+                    <span class="theme-swatch" style="background:#7c3aed"></span>
+                </button>
+                <button type="button" class="theme-option" role="menuitemradio" data-theme-name="indigo" aria-label="Indigo">
+                    <span class="theme-swatch" style="background:#4f46e5"></span>
+                </button>
+                <button type="button" class="theme-option" role="menuitemradio" data-theme-name="ocean" aria-label="Ocean">
+                    <span class="theme-swatch" style="background:#2563eb"></span>
+                </button>
+                <button type="button" class="theme-option" role="menuitemradio" data-theme-name="teal" aria-label="Teal">
+                    <span class="theme-swatch" style="background:#0d9488"></span>
+                </button>
+                <button type="button" class="theme-option" role="menuitemradio" data-theme-name="emerald" aria-label="Emerald">
+                    <span class="theme-swatch" style="background:#059669"></span>
+                </button>
+                <button type="button" class="theme-option" role="menuitemradio" data-theme-name="rose" aria-label="Rose">
+                    <span class="theme-swatch" style="background:#db2777"></span>
+                </button>
+                <button type="button" class="theme-option" role="menuitemradio" data-theme-name="aurora" aria-label="Aurora">
+                    <span class="theme-swatch" style="background:linear-gradient(135deg,#8b5cf6 0%,#06b6d4 100%)"></span>
+                </button>
+                <button type="button" class="theme-option" role="menuitemradio" data-theme-name="sunset" aria-label="Sunset">
+                    <span class="theme-swatch" style="background:linear-gradient(135deg,#f97316 0%,#db2777 100%)"></span>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <main class="page">
+        {% block back %}{% endblock %}
+
+        {% block header %}
+        <header class="page-header">
+            <h1 class="page-title">{% block heading %}{% endblock %}</h1>
+            {% block subtitle %}{% endblock %}
+        </header>
+        {% endblock %}
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+        <div class="flashes">
+            {% for category, message in messages %}
+            {% set flash_class = 'flash-success' if category == 'success' else 'flash-info' if category == 'info' else 'flash-error' %}
+            <div class="flash {{ flash_class }}">{{ message }}</div>
+            {% endfor %}
+        </div>
+        {% endif %}
+        {% endwith %}
+
+        {% block content %}{% endblock %}
+    </main>
+
+    <script>
+      (function(){
+        var DEFAULT_THEME = 'violet';
+        var trigger = document.getElementById('themeTrigger');
+        var menu = document.getElementById('themeMenu');
+        if (!trigger || !menu) return;
+        var options = menu.querySelectorAll('.theme-option');
+
+        function current(){
+          try { return localStorage.getItem('km-theme') || DEFAULT_THEME; }
+          catch(e){ return DEFAULT_THEME; }
+        }
+
+        function markActive(name){
+          options.forEach(function(opt){
+            opt.setAttribute('aria-pressed', opt.dataset.themeName === name ? 'true' : 'false');
+          });
+        }
+
+        function openMenu(){
+          menu.hidden = false;
+          trigger.setAttribute('aria-expanded', 'true');
+        }
+        function closeMenu(){
+          menu.hidden = true;
+          trigger.setAttribute('aria-expanded', 'false');
+        }
+
+        markActive(current());
+
+        trigger.addEventListener('click', function(e){
+          e.stopPropagation();
+          if (menu.hidden) openMenu(); else closeMenu();
+        });
+
+        options.forEach(function(opt){
+          opt.addEventListener('click', function(){
+            var name = opt.dataset.themeName;
+            document.documentElement.setAttribute('data-theme', name);
+            try { localStorage.setItem('km-theme', name); } catch(e){}
+            markActive(name);
+            closeMenu();
+          });
+        });
+
+        document.addEventListener('click', function(e){
+          if (!menu.hidden && !menu.contains(e.target) && e.target !== trigger) closeMenu();
+        });
+        document.addEventListener('keydown', function(e){
+          if (e.key === 'Escape' && !menu.hidden) { closeMenu(); trigger.focus(); }
+        });
+      })();
+    </script>
+</body>
+</html>
