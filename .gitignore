@@ -7,6 +7,8 @@ node_modules/
 .env
 .env.local
 .env.*.local
+# Backup config for the self-hosted box (real values; .env.backup.example is committed)
+.env.backup
 
 # Build output
 dist/
@@ -32,6 +34,8 @@ data/
 *.db-journal
 *.db-wal
 *.db-shm
+# Backup runtime state (checksums, last-push timestamp) on the host
+.backup-state/
 
 # OS
 .DS_Store
