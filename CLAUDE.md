@@ -21,6 +21,53 @@ This is a public GitHub repo — keep all committed content professional and gen
 - **Port:** 8080 (5000 conflicts with macOS AirPlay Receiver)
 - **Network access:** Binds to `0.0.0.0` so other devices on the local network can reach it
 
+## UI / Design System
+
+As of the `feature/ui-makeover` work, the app has a shared design system instead of per-template inline `<style>` blocks.
+
+- **`static/css/app.css`** — the single shared design system. CSS-custom-property based: all colors/spacing/radii/shadows are defined as variables in `:root` (light) and overridden in a `@media (prefers-color-scheme: dark)` block, so **light + dark mode are automatic**. Mobile-first, centered content column (`--content-width`, ~520px). Flask serves it from `/static`.
+- **`templates/base.html`** — the shared layout **every template should `{% extends "base.html" %}`**. It sets doctype/viewport/`color-scheme` meta, links `app.css` via `{{ url_for('static', filename='css/app.css') }}`, and renders flash messages (uses `get_flashed_messages(with_categories=true)`: `success`→`.flash-success`, `info`→`.flash-info`, everything else incl. uncategorized→`.flash-error`).
+- **No JS framework** — vanilla only; the design system is pure CSS.
+
+### base.html blocks
+- `{% block title %}` — `<title>` text (default "KM Tracker").
+- `{% block back %}` — optional back-link; put `<a class="back-link" href="/">← Home</a>` here.
+- `{% block header %}` — whole header region (override only for a custom header). By default renders `<h1 class="page-title">{% block heading %}{% endblock %}</h1>` + `{% block subtitle %}{% endblock %}`.
+  - `{% block heading %}` — page H1 text.
+  - `{% block subtitle %}` — optional; supply `<p class="page-subtitle">…</p>`.
+- `{% block styles %}` — optional `<head>` slot for rare page-specific CSS (e.g. the wheel animation on the race page). Prefer app.css classes; only use this for genuinely page-unique styling.
+- `{% block content %}` — main page body.
+
+### Refactor recipe (canonical skeleton)
+```jinja
+{% extends "base.html" %}
+{% block title %}Cups — KM Tracker{% endblock %}
+{% block back %}<a class="back-link" href="/">← Home</a>{% endblock %}
+{% block heading %}Cups{% endblock %}
+{% block subtitle %}<p class="page-subtitle">Optional subtitle</p>{% endblock %}
+{% block content %}
+  <!-- design-system markup here -->
+{% endblock %}
+```
+Remove the old `<!DOCTYPE>`, `<html>`, `<head>`, inline `<style>`, the manual flash `{% with %}` loop, and the hand-rolled back-link — base.html provides all of them. **Preserve every `url_for`, form `action`/`method`, input `name`/`id`/`value`, `maxlength`/`required`, checkbox names, Jinja control flow, and custom filters (`|format_line`) exactly** — only markup/styling changes.
+
+### Component-class vocabulary (use these; no need to read app.css)
+- **Layout:** `.page` (provided by base.html), `.stack` (vertical full-width stack with gap).
+- **Header:** `.page-header`, `.page-title`, `.page-subtitle`, `.back-link`, `.section-heading` (small uppercase divider label).
+- **Buttons:** `.btn` (base) + one variant: `.btn-primary` (accent), `.btn-secondary` (outlined surface), `.btn-danger` (outlined red), `.btn-ghost` (subtle). Modifiers: `.btn-sm` (small inline action), `.btn-block` (full-width large CTA).
+- **Cards:** `.card` (rounded surface w/ shadow). Forms styled as a card: `class="form card"`.
+- **Lists / rows:** `.list` (rounded surface container, `<ul>`), `.list-item` (row, left content + right actions, hover state), `.list-content` (left column), `.list-title`, `.list-meta` (secondary line), `.list-actions` (right-aligned action group).
+- **Badges/pills:** `.badge` (default neutral) + `.badge-line`, `.badge-status` (success-tinted), `.badge-info`.
+- **Forms:** `.form` (vertical flex), `.field` (labeled field column), `.field-row` (horizontal row, children flex equally), `.check` (inline checkbox+label). Native `input`/`select`/`textarea` are styled globally (incl. focus ring + checkbox accent) — no class needed.
+- **Flash:** `.flash` + `.flash-error` / `.flash-success` / `.flash-info`, wrapped in `.flashes` (base.html handles this automatically).
+- **Empty state:** `.empty` (dashed centered placeholder).
+- **Table:** `.table` (standings/score grids); `th.num`/`td.num` for right-aligned tabular numbers.
+- **Utilities:** `.muted`, `.text-faint`, `.mt-4`, `.mb-4`.
+
+### CSS variable names (app.css tokens)
+Colors: `--color-bg`, `--color-surface`, `--color-surface-2`, `--color-border`, `--color-border-strong`, `--color-text`, `--color-muted`, `--color-faint`, `--color-accent`, `--color-accent-hover`, `--color-accent-contrast`, `--color-accent-soft`, `--color-danger`(+`-soft`), `--color-success`(+`-soft`), `--color-info`(+`-soft`).
+Other: `--font-sans`; spacing `--space-1`…`--space-7`; radius `--radius-sm|md|lg|pill`; `--shadow-sm`, `--shadow-md`; `--content-width`; `--transition`.
+
 ## Code Style & Conventions
 
 - Keep it simple — don't over-engineer

@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="light dark">
+    <title>{% block title %}KM Tracker{% endblock %}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
+    {% block styles %}{% endblock %}
+</head>
+<body>
+    <main class="page">
+        {% block back %}{% endblock %}
+
+        {% block header %}
+        <header class="page-header">
+            <h1 class="page-title">{% block heading %}{% endblock %}</h1>
+            {% block subtitle %}{% endblock %}
+        </header>
+        {% endblock %}
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+        <div class="flashes">
+            {% for category, message in messages %}
+            {% set flash_class = 'flash-success' if category == 'success' else 'flash-info' if category == 'info' else 'flash-error' %}
+            <div class="flash {{ flash_class }}">{{ message }}</div>
+            {% endfor %}
+        </div>
+        {% endif %}
+        {% endwith %}
+
+        {% block content %}{% endblock %}
+    </main>
+</body>
+</html>

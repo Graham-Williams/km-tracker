@@ -1,0 +1,566 @@
+/* ==========================================================================
+   KM Tracker — Design System (app.css)
+   Clean & modern, Todoist-like. Mobile-first. Light + dark via
+   prefers-color-scheme. All colors are CSS custom properties: light values
+   live in :root, dark overrides in the media query at the bottom.
+   ========================================================================== */
+
+/* ---------- Design tokens ---------- */
+:root {
+  /* Color palette — light */
+  --color-bg: #f7f8fa;            /* page background */
+  --color-surface: #ffffff;       /* cards, raised surfaces */
+  --color-surface-2: #f1f2f4;     /* subtle fills (hover, inputs) */
+  --color-border: #e3e5e8;        /* hairline borders */
+  --color-border-strong: #d2d5da; /* stronger borders (inputs, focus base) */
+  --color-text: #1f2329;          /* primary text */
+  --color-muted: #6b7280;         /* secondary / subtitle text */
+  --color-faint: #9aa0a8;         /* tertiary text (hints, meta) */
+
+  --color-accent: #d8413f;        /* single accent (Kario red) */
+  --color-accent-hover: #bb3331;  /* accent on hover/active */
+  --color-accent-contrast: #ffffff; /* text/icon on accent */
+  --color-accent-soft: #fbe9e9;   /* tinted accent surface (badges) */
+
+  --color-danger: #d1453b;
+  --color-danger-soft: #fdecea;
+  --color-success: #2e8b57;
+  --color-success-soft: #e7f4ec;
+  --color-info: #2563c9;
+  --color-info-soft: #e8f0fd;
+
+  /* Typography */
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter,
+    system-ui, "Helvetica Neue", Arial, sans-serif;
+
+  /* Spacing scale */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --space-6: 2rem;
+  --space-7: 3rem;
+
+  /* Border radius scale */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-pill: 999px;
+
+  /* Shadows */
+  --shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.06),
+    0 1px 3px rgba(16, 24, 40, 0.05);
+  --shadow-md: 0 2px 4px rgba(16, 24, 40, 0.06),
+    0 4px 12px rgba(16, 24, 40, 0.08);
+
+  /* Layout */
+  --content-width: 520px;
+
+  /* Motion */
+  --transition: 140ms ease;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --color-bg: #15171a;
+    --color-surface: #1e2024;
+    --color-surface-2: #26292e;
+    --color-border: #2e3238;
+    --color-border-strong: #3a3f46;
+    --color-text: #e8eaed;
+    --color-muted: #a0a6ae;
+    --color-faint: #767c85;
+
+    --color-accent: #f05a57;
+    --color-accent-hover: #f8716e;
+    --color-accent-contrast: #1a0d0d;
+    --color-accent-soft: #3a1f1f;
+
+    --color-danger: #f4675c;
+    --color-danger-soft: #3a1f1d;
+    --color-success: #4ec07e;
+    --color-success-soft: #16291f;
+    --color-info: #6fa3f5;
+    --color-info-soft: #19222f;
+
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow-md: 0 2px 4px rgba(0, 0, 0, 0.35), 0 6px 16px rgba(0, 0, 0, 0.4);
+  }
+}
+
+/* ---------- Reset / base ---------- */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  font-family: var(--font-sans);
+  background: var(--color-bg);
+  color: var(--color-text);
+  line-height: 1.5;
+  font-size: 1rem;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  min-height: 100vh;
+}
+
+a {
+  color: var(--color-accent);
+  text-decoration: none;
+  transition: color var(--transition);
+}
+
+a:hover {
+  color: var(--color-accent-hover);
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* ---------- Layout ---------- */
+.page {
+  width: 100%;
+  max-width: var(--content-width);
+  margin: 0 auto;
+  padding: var(--space-4) var(--space-4) var(--space-7);
+}
+
+/* ---------- Header ---------- */
+.page-header {
+  margin-bottom: var(--space-5);
+}
+
+.page-header h1,
+.page-title {
+  font-size: 1.6rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  line-height: 1.2;
+}
+
+.subtitle,
+.page-subtitle {
+  color: var(--color-muted);
+  font-size: 0.95rem;
+  margin-top: var(--space-1);
+}
+
+/* Back-link ("← Home") */
+.back-link {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--color-muted);
+  font-size: 0.9rem;
+  font-weight: 500;
+  margin-bottom: var(--space-3);
+  transition: color var(--transition);
+}
+
+.back-link:hover {
+  color: var(--color-text);
+}
+
+/* Section headings within a page */
+.section-heading {
+  font-size: 0.8rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--color-faint);
+  margin: var(--space-5) 0 var(--space-2);
+}
+
+/* ---------- Buttons ---------- */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  min-height: 44px;
+  padding: 0.6rem 1.1rem;
+  font-family: inherit;
+  font-size: 1rem;
+  font-weight: 600;
+  line-height: 1;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: var(--color-surface-2);
+  color: var(--color-text);
+  cursor: pointer;
+  text-align: center;
+  white-space: nowrap;
+  transition: background var(--transition), border-color var(--transition),
+    color var(--transition), box-shadow var(--transition), transform var(--transition);
+}
+
+.btn:hover {
+  background: var(--color-border);
+}
+
+.btn:active {
+  transform: translateY(1px);
+}
+
+.btn-primary {
+  background: var(--color-accent);
+  color: var(--color-accent-contrast);
+  box-shadow: var(--shadow-sm);
+}
+
+.btn-primary:hover {
+  background: var(--color-accent-hover);
+  color: var(--color-accent-contrast);
+}
+
+.btn-secondary {
+  background: var(--color-surface);
+  border-color: var(--color-border-strong);
+  color: var(--color-text);
+}
+
+.btn-secondary:hover {
+  background: var(--color-surface-2);
+}
+
+.btn-danger {
+  background: transparent;
+  border-color: var(--color-border-strong);
+  color: var(--color-danger);
+}
+
+.btn-danger:hover {
+  background: var(--color-danger-soft);
+  border-color: var(--color-danger);
+}
+
+/* Small / ghost size — for inline row actions */
+.btn-sm {
+  min-height: 36px;
+  padding: 0.4rem 0.8rem;
+  font-size: 0.9rem;
+  border-radius: var(--radius-sm);
+}
+
+.btn-ghost {
+  background: transparent;
+  border-color: var(--color-border);
+  color: var(--color-text);
+}
+
+.btn-ghost:hover {
+  background: var(--color-surface-2);
+}
+
+/* Full-width block button (large CTA) */
+.btn-block {
+  display: flex;
+  width: 100%;
+  min-height: 52px;
+  font-size: 1.1rem;
+}
+
+/* ---------- Cards ---------- */
+.card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+  padding: var(--space-4);
+}
+
+.card + .card {
+  margin-top: var(--space-3);
+}
+
+/* ---------- Lists (list rows) ---------- */
+.list {
+  list-style: none;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+  overflow: hidden;
+}
+
+.list-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  min-height: 56px;
+  border-bottom: 1px solid var(--color-border);
+  transition: background var(--transition);
+}
+
+.list-item:last-child {
+  border-bottom: none;
+}
+
+.list-item:hover {
+  background: var(--color-surface-2);
+}
+
+/* Left side content of a row */
+.list-content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.list-title {
+  font-size: 1.05rem;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.list-meta {
+  font-size: 0.85rem;
+  color: var(--color-muted);
+}
+
+/* Right side actions of a row */
+.list-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-shrink: 0;
+}
+
+/* Vertical stack of full-width actions (e.g. home CTAs / nav) */
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+/* ---------- Badges / pills ---------- */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 0.15rem 0.55rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  line-height: 1.4;
+  border-radius: var(--radius-pill);
+  background: var(--color-surface-2);
+  color: var(--color-muted);
+}
+
+.badge-line {
+  background: var(--color-accent-soft);
+  color: var(--color-accent);
+}
+
+.badge-status {
+  background: var(--color-success-soft);
+  color: var(--color-success);
+}
+
+.badge-info {
+  background: var(--color-info-soft);
+  color: var(--color-info);
+}
+
+/* ---------- Forms ---------- */
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.field-row {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.field-row > * {
+  flex: 1;
+}
+
+label {
+  font-size: 0.9rem;
+  font-weight: 500;
+  color: var(--color-text);
+}
+
+/* Inline checkbox label */
+.check {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 0.9rem;
+  font-weight: 500;
+  color: var(--color-text);
+  cursor: pointer;
+  min-height: 36px;
+}
+
+input[type="text"],
+input[type="number"],
+input[type="date"],
+input[type="datetime-local"],
+input[type="email"],
+input[type="password"],
+select,
+textarea {
+  width: 100%;
+  font-family: inherit;
+  font-size: 1rem;
+  color: var(--color-text);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  padding: 0.6rem 0.75rem;
+  min-height: 44px;
+  transition: border-color var(--transition), box-shadow var(--transition),
+    background var(--transition);
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--color-faint);
+}
+
+input[type="text"]:focus,
+input[type="number"]:focus,
+input[type="date"]:focus,
+input[type="datetime-local"]:focus,
+input[type="email"]:focus,
+input[type="password"]:focus,
+select:focus,
+textarea:focus {
+  outline: none;
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px var(--color-accent-soft);
+}
+
+input[type="checkbox"] {
+  width: 1.15rem;
+  height: 1.15rem;
+  accent-color: var(--color-accent);
+  cursor: pointer;
+}
+
+/* ---------- Flash messages ---------- */
+.flash {
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
+  margin-bottom: var(--space-3);
+  font-size: 0.92rem;
+  font-weight: 500;
+  border: 1px solid transparent;
+}
+
+.flash-error {
+  background: var(--color-danger-soft);
+  color: var(--color-danger);
+  border-color: var(--color-danger);
+}
+
+.flash-success {
+  background: var(--color-success-soft);
+  color: var(--color-success);
+  border-color: var(--color-success);
+}
+
+.flash-info {
+  background: var(--color-info-soft);
+  color: var(--color-info);
+  border-color: var(--color-info);
+}
+
+.flashes {
+  margin-bottom: var(--space-4);
+}
+
+/* ---------- Empty state ---------- */
+.empty {
+  text-align: center;
+  color: var(--color-muted);
+  font-size: 0.95rem;
+  padding: var(--space-6) var(--space-4);
+  background: var(--color-surface);
+  border: 1px dashed var(--color-border-strong);
+  border-radius: var(--radius-lg);
+}
+
+/* ---------- Table (standings / score lists) ---------- */
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  font-size: 0.95rem;
+}
+
+.table th,
+.table td {
+  text-align: left;
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.table th {
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--color-faint);
+  font-weight: 600;
+}
+
+.table tr:last-child td {
+  border-bottom: none;
+}
+
+.table td.num,
+.table th.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- Utilities ---------- */
+.muted {
+  color: var(--color-muted);
+}
+
+.text-faint {
+  color: var(--color-faint);
+}
+
+.mt-4 {
+  margin-top: var(--space-4);
+}
+
+.mb-4 {
+  margin-bottom: var(--space-4);
+}

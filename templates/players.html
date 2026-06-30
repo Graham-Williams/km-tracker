@@ -1,79 +1,44 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Players — KM Tracker</title>
-    <style>
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-        body { font-family: system-ui, sans-serif; padding: 1rem; max-width: 480px; margin: 0 auto; }
-        h1 { margin-bottom: 1rem; }
-        .flash { background: #fee; color: #900; padding: 0.5rem; border-radius: 4px; margin-bottom: 1rem; }
-        .add-form { display: flex; flex-direction: column; gap: 0.5rem; margin-bottom: 1.5rem; }
-        .add-form .row { display: flex; gap: 0.5rem; }
-        .add-form input[type="text"] { flex: 1; padding: 0.5rem; font-size: 1rem; border: 1px solid #ccc; border-radius: 4px; }
-        .add-form button { padding: 0.5rem 1rem; font-size: 1rem; }
-        .add-form label { font-size: 0.9rem; display: flex; align-items: center; gap: 0.25rem; }
-        .player-list { list-style: none; }
-        .player-item { display: flex; justify-content: space-between; align-items: center; padding: 0.75rem 0; border-bottom: 1px solid #eee; }
-        .player-info { display: flex; align-items: center; gap: 0.5rem; }
-        .player-name { font-size: 1.1rem; }
-        .player-line { font-size: 0.8rem; color: #666; }
-        .player-default { font-size: 0.8rem; color: #888; }
-        .player-actions { display: flex; gap: 0.5rem; }
-        .player-actions a, .player-actions button {
-            padding: 0.25rem 0.75rem; font-size: 0.9rem; border-radius: 4px;
-            text-decoration: none; border: 1px solid #ccc; background: #f8f8f8; color: #333; cursor: pointer;
-        }
-        .player-actions button.delete { color: #900; border-color: #c99; }
-        .empty { color: #666; font-style: italic; }
-    </style>
-</head>
-<body>
-    <a href="/" style="font-size:0.85rem;color:#888;text-decoration:none;">← Home</a>
-    <h1>Players</h1>
+{% extends "base.html" %}
 
-    {% with messages = get_flashed_messages() %}
-    {% if messages %}
-    {% for message in messages %}
-    <div class="flash">{{ message }}</div>
-    {% endfor %}
-    {% endif %}
-    {% endwith %}
+{% block title %}Players — KM Tracker{% endblock %}
+{% block back %}<a class="back-link" href="/">← Home</a>{% endblock %}
+{% block heading %}Players{% endblock %}
 
-    <form class="add-form" method="post" action="{{ url_for('create_player') }}">
-        <div class="row">
-            <input type="text" name="name" placeholder="New player name" maxlength="30" required>
-            <button type="submit">Add</button>
-        </div>
-        <label><input type="checkbox" name="has_line"> Plays with a line</label>
-        <label><input type="checkbox" name="default_cup" checked> Default on new cups</label>
-    </form>
+{% block content %}
+<form class="form card" method="post" action="{{ url_for('create_player') }}">
+    <div class="field-row">
+        <input type="text" name="name" placeholder="New player name" maxlength="30" required>
+        <button type="submit" class="btn btn-primary" style="flex:0 0 auto;">Add</button>
+    </div>
+    <label class="check"><input type="checkbox" name="has_line"> Plays with a line</label>
+    <label class="check"><input type="checkbox" name="default_cup" checked> Default on new cups</label>
+</form>
 
-    {% if players %}
-    <ul class="player-list">
-        {% for player in players %}
-        <li class="player-item">
-            <div class="player-info">
-                <span class="player-name">{{ player.name }}</span>
+{% if players %}
+<ul class="list mt-4">
+    {% for player in players %}
+    <li class="list-item">
+        <div class="list-content">
+            <span class="list-title">
+                {{ player.name }}
                 {% if player.has_line %}
-                <span class="player-line">({{ player.line|format_line }})</span>
+                <span class="badge badge-line">{{ player.line|format_line }}</span>
                 {% endif %}
                 {% if player.default_cup %}
-                <span class="player-default">(default)</span>
+                <span class="badge">default</span>
                 {% endif %}
-            </div>
-            <div class="player-actions">
-                <a href="{{ url_for('edit_player', player_id=player.id) }}">Edit</a>
-                <form method="post" action="{{ url_for('delete_player', player_id=player.id) }}" style="display:inline">
-                    <button type="submit" class="delete">Delete</button>
-                </form>
-            </div>
-        </li>
-        {% endfor %}
-    </ul>
-    {% else %}
-    <p class="empty">No players yet. Add one above!</p>
-    {% endif %}
-</body>
-</html>
+            </span>
+        </div>
+        <div class="list-actions">
+            <a class="btn btn-sm btn-ghost" href="{{ url_for('edit_player', player_id=player.id) }}">Edit</a>
+            <form method="post" action="{{ url_for('delete_player', player_id=player.id) }}" style="display:inline">
+                <button type="submit" class="btn btn-sm btn-danger">Delete</button>
+            </form>
+        </div>
+    </li>
+    {% endfor %}
+</ul>
+{% else %}
+<p class="empty">No players yet. Add one above!</p>
+{% endif %}
+{% endblock %}
