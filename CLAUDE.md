@@ -77,7 +77,7 @@ Full setup/runbook (rclone headless auth, systemd install, restore) is in `DEPLO
 
 ### Staging environment
 
-A hosted **staging** playground runs at **`staging.km.graham-williams.com`** — a safe
+A hosted **staging** playground runs at **`staging-km.graham-williams.com`** — a safe
 place to try changes/UI with **fake data only** (no real game-night data). It's a
 **second `app` container** (`staging-app`) on the same box, behind the **same
 Cloudflare tunnel**, but isolated from prod by design:

@@ -1,6 +1,11 @@
 # Staging override — a SECOND app container serving a fake-data playground at
-# staging.km.graham-williams.com, reachable only through the same Cloudflare
+# staging-km.graham-williams.com, reachable only through the same Cloudflare
 # tunnel as prod (no host port published).
+#
+# NOTE: a single-level subdomain (staging-km, not staging.km) is deliberate —
+# Cloudflare's free Universal SSL cert only covers graham-williams.com and
+# *.graham-williams.com (one label). A two-level host like staging.km.* would
+# need paid Advanced Certificate Manager, so we use staging-km instead.
 #
 # Design:
 #   - Separate DB file on the same ./data volume: km_tracker.staging.db. Prod's
@@ -27,7 +32,7 @@ services:
     environment:
       - DB_PATH=/data/km_tracker.staging.db
       - SECRET_KEY=${SECRET_KEY:?SECRET_KEY must be set}
-      - APP_HOST=staging.km.graham-williams.com
+      - APP_HOST=${STAGING_APP_HOST:-staging-km.graham-williams.com}
       - CF_ACCESS_TEAM_DOMAIN=${CF_ACCESS_TEAM_DOMAIN}
       - CF_ACCESS_AUD=${STAGING_CF_ACCESS_AUD}
     restart: unless-stopped
