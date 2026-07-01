@@ -222,7 +222,9 @@ def main(argv=None):
         )
         return 2
 
-    db_path = os.path.abspath(db_path)
+    # realpath (not abspath) so a staging-named symlink pointing at the prod DB
+    # resolves to its real target and is correctly rejected by the guard below.
+    db_path = os.path.realpath(db_path)
 
     # --- SAFETY RAIL: refuse to touch a non-staging DB unless --force. ---
     # This runs BEFORE any file/DB access so a guard trip never creates or
