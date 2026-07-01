@@ -75,6 +75,34 @@ the `deploy/km-backup.{service,timer}` systemd units:
 Full setup/runbook (rclone headless auth, systemd install, restore) is in `DEPLOY.md`
 → "Automated backups".
 
+## Security Hardening (public access)
+
+The app is exposed publicly at `km.graham-williams.com` behind a Cloudflare
+tunnel + Cloudflare Access. Two `before_request` hooks in `app.py` back up Access
+as defense-in-depth (full operator docs in `DEPLOY.md` → "Public access hardening"):
+
+- **CSRF — Origin/Referer host check (`csrf_origin_check`).** On every
+  `POST`/`PUT`/`PATCH`/`DELETE`, rejects (403) requests whose `Origin` (else
+  `Referer`) host ≠ the app's own host. Requests with neither header (curl, the
+  Flask **test client**, non-browser callers) are allowed; safe methods are never
+  checked. This covers both the HTML `<form>` POSTs and the JSON/`fetch`
+  endpoints (`spin`, `voto`, `half-veto`, `next-race`) without touching templates
+  or JS. Expected host = `APP_HOST` / `APP_ORIGIN` env if set, else the request
+  `Host` (Cloudflare forwards the real hostname, so no config needed). **On by
+  default;** set `CSRF_PROTECTION=0` to disable for local dev. Playwright e2e
+  issues same-origin requests, so it passes unchanged.
+- **Cloudflare Access JWT verification (`cloudflare_access_check`).** Enforced
+  **only when both `CF_ACCESS_TEAM_DOMAIN` and `CF_ACCESS_AUD` are set** (unset →
+  skipped, so dev/tailnet keep working). Requires + validates the RS256 Access
+  token from the `Cf-Access-Jwt-Assertion` header (fallback: `CF_Authorization`
+  cookie): signature checked against the team JWKS
+  (`https://<TEAM_DOMAIN>/cdn-cgi/access/certs`, fetched with stdlib `urllib`,
+  cached in-process, auto-refreshed on unknown `kid`), plus `aud`/issuer/expiry.
+  Missing/invalid → 403. `/static/*` is exempt.
+
+Dependency added for JWT verification: **`PyJWT[crypto]`** (in `requirements.txt`,
+so it ships in the Docker image). Config env vars are documented in `.env.example`.
+
 ## UI / Design System
 
 As of the `feature/ui-makeover` work, the app has a shared design system instead of per-template inline `<style>` blocks.

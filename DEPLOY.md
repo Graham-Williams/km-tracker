@@ -161,6 +161,51 @@ get in — verify that others can't:
 > mapping (e.g. `8080:8080`), anyone on the LAN can hit the app directly at that port
 > and **completely bypass Cloudflare Access**. Don't add a public host port.
 
+## Public access hardening
+
+Two app-side guards back up Cloudflare Access as defense-in-depth. Both are
+`before_request` hooks in `app.py`.
+
+### CSRF (Origin/Referer check) — on by default
+
+Because Access's auth cookie is sent on cross-site requests, a malicious page
+could otherwise forge state-changing requests to the app. On every
+`POST`/`PUT`/`PATCH`/`DELETE`, the app rejects (403) any request whose `Origin`
+(or, failing that, `Referer`) host doesn't match its own host. Requests with
+neither header (curl, health checks, non-browser callers) are allowed, and safe
+methods (`GET`/`HEAD`/`OPTIONS`) are never checked.
+
+- **No config needed** — it uses the incoming `Host` header, which Cloudflare
+  forwards as the original hostname (`km.yourdomain.com`), so it just works.
+- Set `APP_HOST=km.yourdomain.com` in `.env` only if you want to pin the expected
+  host explicitly instead of trusting the request Host.
+- Set `CSRF_PROTECTION=0` to disable (local dev only; leave it on in production).
+
+### Cloudflare Access JWT verification — opt-in via env
+
+If the Access *policy* were ever misconfigured or bypassed (e.g. a stray host
+port — see the warning above), the tunnel would hand requests straight to the
+app. To refuse un-authenticated requests at the app itself, set both of these in
+`.env`:
+
+- `CF_ACCESS_TEAM_DOMAIN` — your team domain, e.g. `yourteam.cloudflareaccess.com`.
+  Find it in **Zero Trust → Settings** (also shown on the Access login page URL
+  and under Custom Pages).
+- `CF_ACCESS_AUD` — the Access **application AUD tag**. Find it in **Zero Trust →
+  Access → Applications → (your app) → Overview → Application Audience (AUD) Tag**.
+
+When **both** are set, the app requires a valid Cloudflare Access identity token
+on every request (from the `Cf-Access-Jwt-Assertion` header Cloudflare injects,
+or the `CF_Authorization` cookie). It validates the RS256 signature against your
+team's JWKS (`https://<TEAM_DOMAIN>/cdn-cgi/access/certs`, fetched with stdlib
+`urllib` and cached in-process, refreshed automatically when Cloudflare rotates
+keys), and checks the audience, issuer, and expiry. Invalid/missing → 403.
+`/static/*` is exempt so assets still load.
+
+When **either** var is unset (local dev, or LAN/tailnet access), verification is
+skipped entirely — so this only enforces once you've configured it for
+production.
+
 ## Updating the deployment
 
 ```bash
