@@ -5,9 +5,9 @@
 {% block heading %}Cup Session{% endblock %}
 {% block subtitle %}
 {% if current_race <= max_races %}
-<p class="page-subtitle">Race {{ current_race }} of {{ max_races }}</p>
+<p class="page-subtitle">Race {{ current_race }} of {{ max_races }} · {{ edition_label }}</p>
 {% else %}
-<p class="page-subtitle">All races complete!</p>
+<p class="page-subtitle">All races complete! · {{ edition_label }}</p>
 {% endif %}
 {% endblock %}
 
@@ -277,49 +277,19 @@
         // --- Canvas Wheel ---
         var canvas = document.getElementById("wheel-canvas");
         var ctx = canvas ? canvas.getContext("2d") : null;
-        // Course-themed colors (matched to each course's environment)
-        var COLORS = [
-            // Nitro — Mushroom Cup
-            "#5B8C5A", // Luigi Circuit (green grass)
-            "#7EC87E", // Moo Moo Meadows (bright meadow)
-            "#A0522D", // Mushroom Gorge (earthy mushrooms)
-            "#7B7B7B", // Toad's Factory (industrial gray)
-            // Nitro — Flower Cup
-            "#E8733A", // Mario Circuit (red/orange)
-            "#F5C242", // Coconut Mall (sunny mall)
-            "#B8D8E8", // DK Summit (icy blue)
-            "#C9A033", // Wario's Gold Mine (gold)
-            // Nitro — Star Cup
-            "#F4A4C0", // Daisy Circuit (pink)
-            "#2980B9", // Koopa Cape (deep water blue)
-            "#C0392B", // Maple Treeway (autumn red)
-            "#D35400", // Grumble Volcano (lava orange)
-            // Nitro — Special Cup
-            "#D4A76A", // Dry Dry Ruins (sandy tan)
-            "#2C3E50", // Moonview Highway (dark night)
-            "#4A4A4A", // Bowser's Castle (dark stone)
-            "#7D3C98", // Rainbow Road (purple/cosmic)
-            // Retro — Shell Cup
-            "#F9D89C", // GCN Peach Beach (sandy peach)
-            "#82E0AA", // DS Yoshi Falls (green waterfall)
-            "#6C7A89", // SNES Ghost Valley 2 (ghostly gray)
-            "#E67E22", // N64 Mario Raceway (orange track)
-            // Retro — Banana Cup
-            "#AED6F1", // N64 Sherbet Land (icy light blue)
-            "#F7DC6F", // GBA Shy Guy Beach (warm sand)
-            "#D5C4A1", // DS Delfino Square (warm stone)
-            "#9B59B6", // GCN Waluigi Stadium (purple)
-            // Retro — Leaf Cup
-            "#E6B980", // DS Desert Hills (desert tan)
-            "#C0392B", // GBA Bowser Castle 3 (lava red)
-            "#27AE60", // N64 DK's Jungle Parkway (jungle green)
-            "#E8733A", // GCN Mario Circuit (red/orange)
-            // Retro — Lightning Cup
-            "#5DADE2", // SNES Mario Circuit 3 (sky blue)
-            "#F1948A", // DS Peach Gardens (rosy pink)
-            "#6B8E23", // GCN DK Mountain (mountain green)
-            "#555555", // N64 Bowser's Castle (dark fortress)
-        ];
+        // Slice colors generated programmatically from the track count so any
+        // edition/size works (Wii = 32 tracks, MK8 Deluxe = 96). Evenly-spaced
+        // HSL hues with alternating lightness so adjacent slices stay distinct
+        // even when there are many of them.
+        var COLORS = (function () {
+            var colors = [];
+            for (var i = 0; i < NUM_SLICES; i++) {
+                var hue = Math.round((360 * i) / NUM_SLICES);
+                var light = i % 2 === 0 ? 55 : 45;
+                colors.push("hsl(" + hue + ", 62%, " + light + "%)");
+            }
+            return colors;
+        })();
 
         function drawWheel() {
             if (!ctx) return;
@@ -346,10 +316,13 @@
                 ctx.rotate((angleDeg + 180) * Math.PI / 180);
                 ctx.textAlign = "left";
                 ctx.fillStyle = isPlayed ? "#bbb" : "#fff";
-                ctx.font = (isPlayed ? "italic " : "bold ") + "22px system-ui, sans-serif";
+                // Scale label size to the slice count so many-track editions
+                // (e.g. MK8DX's 96) don't overlap. Clamp to a readable range.
+                var fontPx = Math.max(9, Math.min(22, Math.round(1400 / NUM_SLICES)));
+                ctx.font = (isPlayed ? "italic " : "bold ") + fontPx + "px system-ui, sans-serif";
                 ctx.shadowColor = "rgba(0,0,0,0.4)";
                 ctx.shadowBlur = 2;
-                ctx.fillText(COURSES[i], -(r - 15), 5);
+                ctx.fillText(COURSES[i], -(r - 15), fontPx * 0.35);
                 ctx.shadowBlur = 0;
                 ctx.restore();
             }

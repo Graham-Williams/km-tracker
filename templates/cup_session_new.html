@@ -24,6 +24,15 @@
 
 {% block content %}
 <form class="form card" method="post" action="{{ url_for('cup_session_create') }}" id="session-form">
+    <div class="field">
+        <label for="game_edition">Edition</label>
+        <select name="game_edition" id="game_edition">
+            {% for value, label in editions.items() %}
+            <option value="{{ value }}"{% if value == default_edition %} selected{% endif %}>{{ label }}</option>
+            {% endfor %}
+        </select>
+    </div>
+
     <div>
         <div class="section-heading">Players</div>
         <ul class="player-list" id="player-list">

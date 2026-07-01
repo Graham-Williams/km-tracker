@@ -61,8 +61,36 @@ def test_cups_columns(db_path):
     assert "id" in columns
     assert "date" in columns
     assert "notes" in columns
+    assert "game_edition" in columns
     assert columns["date"]["notnull"] == 1
     assert columns["notes"]["notnull"] == 0
+    assert columns["game_edition"]["notnull"] == 1
+
+
+def test_migration_adds_game_edition_to_existing_db(db_path):
+    """A cups table created without game_edition gets the column (backfilled to
+    'wii') and the migration is idempotent."""
+    # Simulate a pre-migration DB: cups table without game_edition.
+    conn = get_connection(db_path)
+    conn.execute(
+        "CREATE TABLE cups (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "date DATETIME NOT NULL UNIQUE, notes TEXT, deleted_at DATETIME, "
+        "status TEXT NOT NULL DEFAULT 'completed', voto_count INTEGER NOT NULL DEFAULT 0)"
+    )
+    conn.execute("INSERT INTO cups (date) VALUES ('2026-01-01')")
+    conn.commit()
+    conn.close()
+
+    # init_db runs schema (no-op for existing table) then migrations.
+    init_db(db_path)
+    init_db(db_path)  # idempotent — must not error on second run
+
+    conn = get_connection(db_path)
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(cups)")}
+    assert "game_edition" in cols
+    row = conn.execute("SELECT game_edition FROM cups WHERE id = 1").fetchone()
+    conn.close()
+    assert row["game_edition"] == "wii"  # existing row backfilled
 
 
 def test_scores_columns(db_path):

@@ -8,6 +8,7 @@ A tracker and suite of tools for Kario Mart game nights.
 - **Cup & Score Tracking** — record cups with per-player scores, placements, and tiebreaker results
 - **Lines (Handicaps)** — optional per-player handicap that adjusts scores and auto-adjusts after 3-player cups based on placement
 - **Cup Sessions** — guided race-by-race cup flow with a spinning wheel course picker, half-veto/voto mechanics, and score entry at the end
+- **Game Editions** — choose **Mario Kart Wii** (32 tracks) or **Mario Kart 8 Deluxe** (96 tracks: 48 base + 48 Booster Course Pass) per cup session. Only the track list differs — all house rules (race count, vetoes, votoes, line deltas) are identical across editions
 - **Stats & Leaderboards** — track standings, wins, and trends across cups
 - **Game Night Utilities** — tools to assist with running sessions smoothly
 
@@ -59,6 +60,10 @@ backups/
     km_tracker_20260321T031522456Z.db
     km_tracker_20260321T194837012Z.db
 ```
+
+### Schema Migrations
+
+Fresh databases are created from `schema.sql`. For changes to **existing** tables (which `CREATE TABLE IF NOT EXISTS` can't apply), `db.run_migrations()` runs on every startup (called from `init_db()`, which the Docker entrypoint invokes before serving). Each migration is guarded by a `PRAGMA table_info` check so it is idempotent and safe to run repeatedly against a populated production DB. Example: the `cups.game_edition` column (multi-edition support) is added via `ALTER TABLE ... ADD COLUMN game_edition TEXT NOT NULL DEFAULT 'wii'`, which backfills existing cups to Wii. To add a new migration, append another guarded step to `run_migrations()` and mirror the final shape in `schema.sql`.
 
 ### Staging Database
 

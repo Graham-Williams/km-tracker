@@ -17,6 +17,7 @@ This is a public GitHub repo — keep all committed content professional and gen
 
 - **Backend:** Python + Flask (server-rendered HTML via Jinja templates)
 - **Database:** SQLite (via Python stdlib) — DB path is configured via `DB_PATH` in `.env` (defaults to `db/km_tracker.db`). Run with `--staging` flag to use a separate sandbox DB (`STAGING_DB_PATH`)
+  - **Migrations:** fresh DBs come from `schema.sql`; changes to existing tables go in `db.run_migrations()`, which `init_db()` calls on every startup. Each step is guarded by a `PRAGMA table_info` check so it's idempotent/safe on the populated prod DB (the box rebuilds from `main` and the entrypoint runs `init_db`). Keep `schema.sql` and the migration in sync — new fresh DBs must match a fully-migrated one.
 - **Testing:** pytest (Flask test client for unit/integration, Playwright for e2e)
 - **Port:** 8080 (5000 conflicts with macOS AirPlay Receiver)
 - **Network access:** Binds to `0.0.0.0` so other devices on the local network can reach it
@@ -113,6 +114,16 @@ After any UI change, run autonomous visual testing before asking for manual veri
 | Phone (Pixel 9 Pro) | 412 x 915 |
 
 Save screenshots to `.claude/features/<feature-name>/screenshots/` (e.g. `desktop_index.png`, `iphone_cup_session.png`). Include all screenshots in the PR description when opening the PR.
+
+## Game Editions
+
+The app supports multiple Mario Kart editions per cup session; **only the track list differs** between editions — all house rules are identical (`MAX_RACES=4`, `MAX_HALF_VETOES=3`, `MAX_VOTOES=4`, line deltas -3/0/+3, all in `app.py`).
+
+- **`maps.py`** — `TRACK_SETS = {"wii": [...32...], "mk8dx": [...96...]}` (MK8DX = 48 base + 48 Booster Course Pass, 24 cups). `EDITION_LABELS` maps the stored string to a display label. Helpers: `courses_for(edition)` and `edition_label(edition)` (both fall back to `DEFAULT_EDITION = "wii"`). `COURSES` remains a flat alias of the Wii list for backward compatibility.
+- **Storage:** `cups.game_edition TEXT NOT NULL DEFAULT 'wii'`. Chosen on the new-session screen (`cup_session_new.html` `<select name="game_edition">`), validated against `TRACK_SETS` in `cup_session_create`, and read back in the session/spin/complete routes to pick the right track set.
+- **Display:** `edition_label` is registered as a Jinja filter (`{{ cup.game_edition|edition_label }}`) and also passed as a context var to the race/complete screens. Shown on `/cups` history and the session headers.
+- **Spin wheel** (`cup_session_race.html`): slice colors are generated programmatically from `NUM_SLICES` (evenly-spaced HSL hues, alternating lightness) and label font size scales to the slice count — so any edition/size renders. Do **not** reintroduce a hardcoded per-track color array.
+- **Adding an edition:** add a track list + `EDITION_LABELS` entry in `maps.py`; the select, routes, wheel, and display pick it up automatically. No schema change needed.
 
 ## Planned Features
 

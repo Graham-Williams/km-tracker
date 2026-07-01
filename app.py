@@ -10,7 +10,13 @@ from dotenv import load_dotenv
 from flask import Flask, abort, flash, jsonify, redirect, render_template, request, url_for
 
 from db import get_connection, get_db_path, init_db
-from maps import COURSES
+from maps import (
+    DEFAULT_EDITION,
+    EDITION_LABELS,
+    TRACK_SETS,
+    courses_for,
+    edition_label,
+)
 
 load_dotenv()
 
@@ -35,6 +41,12 @@ def format_line(value):
     """Format a line value with a sign: +0, +3, -5."""
     n = int(value)
     return f"+{n}" if n >= 0 else str(n)
+
+
+@app.template_filter("edition_label")
+def edition_label_filter(value):
+    """Render a stored edition string (e.g. 'wii') as a display label."""
+    return edition_label(value)
 
 
 def get_in_progress_cup():
@@ -157,7 +169,7 @@ def delete_player(player_id):
 def cups():
     conn = get_connection()
     rows = conn.execute(
-        "SELECT id, date, notes FROM cups WHERE deleted_at IS NULL AND status = 'completed' ORDER BY date DESC"
+        "SELECT id, date, notes, game_edition FROM cups WHERE deleted_at IS NULL AND status = 'completed' ORDER BY date DESC"
     ).fetchall()
     cup_ids = [r["id"] for r in rows]
     results = {}
@@ -658,7 +670,11 @@ def cup_session_new():
     ).fetchall()
     conn.close()
     return render_template(
-        "cup_session_new.html", players=default_players, all_players=all_players
+        "cup_session_new.html",
+        players=default_players,
+        all_players=all_players,
+        editions=EDITION_LABELS,
+        default_edition=DEFAULT_EDITION,
     )
 
 
@@ -674,11 +690,16 @@ def cup_session_create():
         flash("Select at least one player.")
         return redirect(url_for("cup_session_new"))
 
+    edition = request.form.get("game_edition", DEFAULT_EDITION)
+    if edition not in TRACK_SETS:
+        edition = DEFAULT_EDITION
+
     date_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:00")
     conn = get_connection()
     try:
         cursor = conn.execute(
-            "INSERT INTO cups (date, status) VALUES (?, 'in_progress')", (date_utc,)
+            "INSERT INTO cups (date, status, game_edition) VALUES (?, 'in_progress', ?)",
+            (date_utc, edition),
         )
         cup_id = cursor.lastrowid
         for pid in player_ids:
@@ -699,7 +720,7 @@ def _get_cup_session(cup_id):
     """Fetch a cup session with its players, races, and veto state. Returns None if not found."""
     conn = get_connection()
     cup = conn.execute(
-        "SELECT id, date, notes, status, voto_count FROM cups WHERE id = ? AND status = 'in_progress'",
+        "SELECT id, date, notes, status, voto_count, game_edition FROM cups WHERE id = ? AND status = 'in_progress'",
         (cup_id,),
     ).fetchone()
     if cup is None:
@@ -729,6 +750,7 @@ def cup_session_race(cup_id):
         abort(404)
     played_maps = [r["map"] for r in session["races"]]
     current_race = len(session["races"]) + 1
+    edition = session["cup"]["game_edition"]
     return render_template(
         "cup_session_race.html",
         cup=session["cup"],
@@ -739,7 +761,8 @@ def cup_session_race(cup_id):
         max_races=MAX_RACES,
         max_half_vetoes=MAX_HALF_VETOES,
         max_votoes=MAX_VOTOES,
-        all_courses=COURSES,
+        all_courses=courses_for(edition),
+        edition_label=edition_label(edition),
     )
 
 
@@ -747,7 +770,7 @@ def cup_session_race(cup_id):
 def cup_session_spin(cup_id):
     conn = get_connection()
     cup = conn.execute(
-        "SELECT id, status FROM cups WHERE id = ? AND status = 'in_progress'",
+        "SELECT id, status, game_edition FROM cups WHERE id = ? AND status = 'in_progress'",
         (cup_id,),
     ).fetchone()
     if cup is None:
@@ -762,13 +785,14 @@ def cup_session_spin(cup_id):
     if len(races) >= MAX_RACES:
         return jsonify({"error": "All races completed"}), 400
 
+    courses = courses_for(cup["game_edition"])
     played_maps = {r["map"] for r in races}
-    valid = [c for c in COURSES if c not in played_maps]
+    valid = [c for c in courses if c not in played_maps]
     if not valid:
         return jsonify({"error": "No valid maps remaining"}), 400
 
     chosen = random.choice(valid)
-    return jsonify({"map": chosen, "index": COURSES.index(chosen)})
+    return jsonify({"map": chosen, "index": courses.index(chosen)})
 
 
 @app.route("/cup-session/<int:cup_id>/half-veto", methods=["POST"])
@@ -877,7 +901,7 @@ def cup_session_next_race(cup_id):
 def cup_session_complete(cup_id):
     conn = get_connection()
     cup = conn.execute(
-        "SELECT id, date, notes, status, voto_count FROM cups WHERE id = ?",
+        "SELECT id, date, notes, status, voto_count, game_edition FROM cups WHERE id = ?",
         (cup_id,),
     ).fetchone()
     if cup is None:
@@ -912,7 +936,8 @@ def cup_session_complete(cup_id):
         cup=cup,
         players=players,
         races=races,
-        all_courses=COURSES,
+        all_courses=courses_for(cup["game_edition"]),
+        edition_label=edition_label(cup["game_edition"]),
         existing_scores=existing_scores,
     )
 
