@@ -223,7 +223,7 @@ docker compose up -d --build
 ## Staging environment
 
 A second, isolated **staging** instance runs alongside prod at
-`staging.km.graham-williams.com`. It's a safe playground for trying changes and UI
+`staging-km.graham-williams.com`. It's a safe playground for trying changes and UI
 against **fake data only** — it never shares a database with prod.
 
 ### Architecture
@@ -249,12 +249,17 @@ cloudflared (one tunnel) ─┤
 
 1. **Add a public hostname to the existing tunnel** (Zero Trust → Networks →
    Tunnels → your `km-tracker` tunnel → Public Hostname → Add):
-   - Subdomain: `staging.km`  (Domain: `graham-williams.com`)
+   - Subdomain: `staging-km`  (Domain: `graham-williams.com`)
    - Service: **`http://staging-app:8080`**  ← the staging container name on the
      compose network.
+   - **Use a single-level subdomain (`staging-km`, not `staging.km`).** The free
+     Universal SSL cert only covers `graham-williams.com` and
+     `*.graham-williams.com` (one label), so a two-level host like
+     `staging.km.graham-williams.com` fails the TLS handshake at the edge and
+     would require paid Advanced Certificate Manager.
 2. **Add a self-hosted Access application** (Zero Trust → Access → Applications →
    Add an application → Self-hosted):
-   - Application domain: `staging.km.graham-williams.com`.
+   - Application domain: `staging-km.graham-williams.com`.
    - Add the **same Allow policy** you use for prod (scope to your email(s)).
 3. Copy the **new app's AUD** (that Access app → Overview → Application Audience
    (AUD) Tag) into the box `.env` as:
@@ -278,7 +283,7 @@ docker compose -f docker-compose.yml -f docker-compose.access.yml \
 `docker-compose.access.yml` layers the Access env vars (`APP_HOST`,
 `CF_ACCESS_TEAM_DOMAIN`, `CF_ACCESS_AUD`) onto the prod `app`;
 `docker-compose.staging.yml` adds the `staging-app` service with its own
-`DB_PATH`, `APP_HOST=staging.km.graham-williams.com`, and
+`DB_PATH`, `APP_HOST=staging-km.graham-williams.com`, and
 `CF_ACCESS_AUD=${STAGING_CF_ACCESS_AUD}`.
 
 ### First bring-up — seed the staging DB
