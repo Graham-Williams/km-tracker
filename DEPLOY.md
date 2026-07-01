@@ -175,10 +175,12 @@ could otherwise forge state-changing requests to the app. On every
 neither header (curl, health checks, non-browser callers) are allowed, and safe
 methods (`GET`/`HEAD`/`OPTIONS`) are never checked.
 
-- **No config needed** — it uses the incoming `Host` header, which Cloudflare
-  forwards as the original hostname (`km.yourdomain.com`), so it just works.
-- Set `APP_HOST=km.yourdomain.com` in `.env` only if you want to pin the expected
-  host explicitly instead of trusting the request Host.
+- **Recommended for production:** set `APP_HOST=km.graham-williams.com` in `.env` —
+  this pins the CSRF expected-host explicitly instead of trusting the request `Host`
+  header.
+- Without it the check falls back to the incoming `Host` header, which Cloudflare
+  forwards as the original hostname (`km.yourdomain.com`), so it still works — but
+  pinning is the safer default.
 - Set `CSRF_PROTECTION=0` to disable (local dev only; leave it on in production).
 
 ### Cloudflare Access JWT verification — opt-in via env

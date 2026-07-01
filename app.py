@@ -5,6 +5,7 @@ import secrets
 import sqlite3
 import sys
 import threading
+import time
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit
@@ -78,7 +79,9 @@ def csrf_origin_check():
     expected = _expected_host()
     origin = request.headers.get("Origin")
     if origin:
-        if urlsplit(origin).netloc != expected:
+        parts = urlsplit(origin)
+        # Behind Cloudflare the Origin is always https; reject plaintext http.
+        if parts.scheme != "https" or parts.netloc != expected:
             abort(403, description="Cross-origin request blocked.")
         return
     referer = request.headers.get("Referer")
@@ -100,28 +103,58 @@ CF_ACCESS_ENABLED = bool(CF_ACCESS_TEAM_DOMAIN and CF_ACCESS_AUD)
 
 _jwks_lock = threading.Lock()
 _jwks_keys = {}  # kid -> public key object, cached in-process
+_jwks_last_fetch = None  # monotonic timestamp of the last JWKS fetch *attempt* (None = never)
+# Minimum seconds between JWKS fetch attempts. An unknown `kid` is attacker-
+# controllable (read from the unverified JWT header), so without this throttle a
+# flood of bogus-kid requests would trigger an uncached outbound fetch each time
+# -> trivial DoS + thundering herd against the two sync gunicorn workers. This
+# bounds fetches to at most one per interval while still picking up legitimate
+# Cloudflare key rotation within ~REFETCH_MIN_INTERVAL seconds.
+REFETCH_MIN_INTERVAL = 60
+_JWKS_MAX_BYTES = 1024 * 1024  # cap the response body read (hostile/huge response)
 
 
 def _fetch_cf_jwks():
-    """Fetch the team's JWKS (stdlib urllib, no extra deps)."""
+    """Fetch the team's JWKS (stdlib urllib, no extra deps). Body read is capped."""
     url = f"https://{CF_ACCESS_TEAM_DOMAIN}/cdn-cgi/access/certs"
     with urllib.request.urlopen(url, timeout=5) as resp:  # noqa: S310 (fixed https host)
-        return json.loads(resp.read().decode("utf-8"))
+        raw = resp.read(_JWKS_MAX_BYTES + 1)
+    if len(raw) > _JWKS_MAX_BYTES:
+        raise ValueError("JWKS response too large")
+    return json.loads(raw.decode("utf-8"))
 
 
 def _cf_signing_key(kid):
-    """Return the cached public key for `kid`, refreshing the JWKS on an unknown kid."""
+    """Return the cached public key for `kid`, refreshing the JWKS on an unknown kid.
+
+    Fail-closed: any error or uncertainty returns None so the caller aborts 403.
+    Refetches are single-flighted (under the lock) and throttled to at most one
+    attempt per REFETCH_MIN_INTERVAL seconds, so an attacker spraying unknown
+    kids can't force an outbound fetch per request.
+    """
+    global _jwks_last_fetch, _jwks_keys
     with _jwks_lock:
         key = _jwks_keys.get(kid)
-    if key is not None:
-        return key
-    # Unknown kid -> Cloudflare rotated keys; refetch and repopulate the cache.
-    jwks = _fetch_cf_jwks()
-    with _jwks_lock:
-        for jwk in jwks.get("keys", []):
-            k = jwk.get("kid")
-            if k:
-                _jwks_keys[k] = RSAAlgorithm.from_jwk(json.dumps(jwk))
+        if key is not None:
+            return key
+        # Unknown kid: only fetch if we're outside the throttle window. Update the
+        # last-attempt timestamp even on failure so failures don't bypass it.
+        now = time.monotonic()
+        if _jwks_last_fetch is not None and now - _jwks_last_fetch < REFETCH_MIN_INTERVAL:
+            return None
+        _jwks_last_fetch = now
+        try:
+            jwks = _fetch_cf_jwks()
+            # Replace the cache wholesale so rotated-out keys are evicted, not merged.
+            new_keys = {}
+            for jwk in jwks.get("keys", []):
+                k = jwk.get("kid")
+                if k:
+                    new_keys[k] = RSAAlgorithm.from_jwk(json.dumps(jwk))
+            _jwks_keys = new_keys
+        except Exception:
+            app.logger.exception("Cloudflare Access JWKS fetch/parse failed")
+            return None
         return _jwks_keys.get(kid)
 
 
@@ -140,6 +173,8 @@ def _verify_cf_access_token(token):
         algorithms=["RS256"],
         audience=CF_ACCESS_AUD,
         issuer=f"https://{CF_ACCESS_TEAM_DOMAIN}",
+        leeway=10,  # small tolerance for clock skew
+        options={"require": ["exp", "iat", "aud", "iss"]},
     )
 
 
@@ -162,6 +197,10 @@ def cloudflare_access_check():
     try:
         _verify_cf_access_token(token)
     except Exception:
+        # Log server-side (no token contents) so a real outage — e.g. a JWKS
+        # fetch failure — is distinguishable from a merely invalid token in the
+        # logs. Still fail closed with a 403.
+        app.logger.exception("Cloudflare Access token verification failed")
         abort(403, description="Cloudflare Access token invalid.")
 
 
