@@ -13,6 +13,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app.py db.py maps.py schema.sql ./
 COPY templates/ templates/
 COPY static/ static/
+# scripts/ carries the staging seed helper (scripts/seed_staging.py), invoked via
+# `docker compose ... exec staging-app python scripts/seed_staging.py --reset`.
+COPY scripts/ scripts/
 
 COPY entrypoint.sh .
 RUN chmod +x entrypoint.sh

@@ -215,6 +215,110 @@ git pull
 docker compose up -d --build
 ```
 
+> If you've wired the Access env override (`docker-compose.access.yml`, see
+> "Public access hardening") and/or staging (below), include those `-f` files in
+> every deploy so the app containers keep their Access config. The full command
+> with staging is shown in the next section.
+
+## Staging environment
+
+A second, isolated **staging** instance runs alongside prod at
+`staging.km.graham-williams.com`. It's a safe playground for trying changes and UI
+against **fake data only** — it never shares a database with prod.
+
+### Architecture
+
+```
+                          ┌─► app container         ──► ./data/km_tracker.db          (PROD)
+cloudflared (one tunnel) ─┤
+                          └─► staging-app container ──► ./data/km_tracker.staging.db   (STAGING, fake data)
+```
+
+- **One tunnel, two public hostnames.** The existing `cloudflared` container
+  routes `km.*` → `http://app:8080` and `staging.km.*` → `http://staging-app:8080`
+  over the compose network. Neither app publishes a host port.
+- **Separate DB file** on the same `./data` volume: `km_tracker.staging.db`. Prod's
+  `km_tracker.db` is never touched by staging. Staging is driven purely by its
+  `DB_PATH` env var (`docker-compose.staging.yml`); `entrypoint.sh` runs `init_db()`
+  against it on startup (idempotent schema create).
+- **Separate Cloudflare Access application → separate AUD.** Staging gets its own
+  Access app, so its own Application Audience (AUD) tag, provided to the container
+  as `STAGING_CF_ACCESS_AUD`. **Do not reuse the prod `CF_ACCESS_AUD`.**
+
+### Cloudflare dashboard steps (human, one-time)
+
+1. **Add a public hostname to the existing tunnel** (Zero Trust → Networks →
+   Tunnels → your `km-tracker` tunnel → Public Hostname → Add):
+   - Subdomain: `staging.km`  (Domain: `graham-williams.com`)
+   - Service: **`http://staging-app:8080`**  ← the staging container name on the
+     compose network.
+2. **Add a self-hosted Access application** (Zero Trust → Access → Applications →
+   Add an application → Self-hosted):
+   - Application domain: `staging.km.graham-williams.com`.
+   - Add the **same Allow policy** you use for prod (scope to your email(s)).
+3. Copy the **new app's AUD** (that Access app → Overview → Application Audience
+   (AUD) Tag) into the box `.env` as:
+
+   ```
+   STAGING_CF_ACCESS_AUD=<the staging app's AUD>
+   ```
+
+   Also ensure `CF_ACCESS_TEAM_DOMAIN` is set (shared with prod). Leaving
+   `STAGING_CF_ACCESS_AUD` blank disables app-side JWT verification for staging
+   (Cloudflare Access still gates it at the edge, but set the AUD for
+   defense-in-depth parity with prod).
+
+### Deploy (prod + staging together)
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.access.yml \
+  -f docker-compose.staging.yml up -d --build
+```
+
+`docker-compose.access.yml` layers the Access env vars (`APP_HOST`,
+`CF_ACCESS_TEAM_DOMAIN`, `CF_ACCESS_AUD`) onto the prod `app`;
+`docker-compose.staging.yml` adds the `staging-app` service with its own
+`DB_PATH`, `APP_HOST=staging.km.graham-williams.com`, and
+`CF_ACCESS_AUD=${STAGING_CF_ACCESS_AUD}`.
+
+### First bring-up — seed the staging DB
+
+On the very first launch the staging DB is empty. Populate it with fake data:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.access.yml \
+  -f docker-compose.staging.yml exec staging-app \
+  python scripts/seed_staging.py --reset
+```
+
+This creates 6 obviously-fake players (Test Toad, Dummy Diddy, Sample Shy Guy,
+Mock Mario, Fake Bowser, Demo Daisy) and 12 cups (11 completed with a realistic
+spread of results + 1 in-progress) so the app looks lived-in. The dataset is
+**deterministic** (same every reseed).
+
+### Reseed on demand
+
+To wipe and repopulate staging at any time (e.g. after messing it up while
+testing):
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.access.yml \
+  -f docker-compose.staging.yml exec staging-app \
+  python scripts/seed_staging.py --reset
+```
+
+**Safety rail:** `scripts/seed_staging.py` refuses to run unless the resolved DB
+path's basename contains `"staging"` (override only with `--force`). This makes it
+effectively impossible to seed/wipe the production `km_tracker.db` by accident. It
+reads the DB path from `DB_PATH` (set by the staging container) or a `--db PATH`
+arg; without `--reset` it refuses to seed a DB that already has data (no
+double-seeding).
+
+> The **"never restart/redeploy while a cup is in progress"** rule still applies —
+> redeploying with the command above rebuilds and restarts the **prod** `app`
+> container too. Check `cups.status='in_progress'` on the prod DB is `0` first
+> (see CLAUDE.md → deploy-safety rule).
+
 ## Automated backups
 
 The database lives at `./data/km_tracker.db` on the host. Backups are automated by
