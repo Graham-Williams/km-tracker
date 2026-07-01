@@ -75,6 +75,48 @@ the `deploy/km-backup.{service,timer}` systemd units:
 Full setup/runbook (rclone headless auth, systemd install, restore) is in `DEPLOY.md`
 → "Automated backups".
 
+### Staging environment
+
+A hosted **staging** playground runs at **`staging.km.graham-williams.com`** — a safe
+place to try changes/UI with **fake data only** (no real game-night data). It's a
+**second `app` container** (`staging-app`) on the same box, behind the **same
+Cloudflare tunnel**, but isolated from prod by design:
+
+- **Separate DB:** `data/km_tracker.staging.db` (prod's `km_tracker.db` is never
+  touched). Same `./data` volume; driven purely by the `DB_PATH` env var.
+- **Separate Cloudflare Access app → separate AUD.** Staging has its own Access
+  application, so its own AUD, supplied via the box `.env` as
+  `STAGING_CF_ACCESS_AUD` — **never reuse the prod `CF_ACCESS_AUD`.**
+- Compose override: `docker-compose.staging.yml` (layers on `docker-compose.yml` +
+  `docker-compose.access.yml`). No host port published — reachable only via the tunnel.
+
+Deploy prod + staging together:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.access.yml \
+  -f docker-compose.staging.yml up -d --build
+```
+
+**Reseed staging on demand** (wipes + repopulates fake data; deterministic set of
+6 obviously-fake players + 12 cups incl. one in-progress):
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.access.yml \
+  -f docker-compose.staging.yml exec staging-app \
+  python scripts/seed_staging.py --reset
+```
+
+`scripts/seed_staging.py` has a **hard safety rail**: it refuses to run unless the
+target DB's basename contains `"staging"` (override only with `--force`), so it can
+never wipe the prod DB. The **never-redeploy-mid-cup** rule still applies to the
+prod container. Full runbook (Cloudflare dashboard steps, first bring-up) is in
+`DEPLOY.md` → "Staging environment".
+
+> Note: `docker-compose.access.yml` also wires the prod Access env vars
+> (`APP_HOST`, `CF_ACCESS_TEAM_DOMAIN`, `CF_ACCESS_AUD`) onto the base `app`
+> service, so the prod deploy command is now
+> `docker compose -f docker-compose.yml -f docker-compose.access.yml up -d --build`.
+
 ## Security Hardening (public access)
 
 The app is exposed publicly at `km.graham-williams.com` behind a Cloudflare

@@ -1,0 +1,16 @@
+# Cloudflare Access override for the PROD app container.
+#
+# Layers the public-access-hardening env vars (see DEPLOY.md → "Public access
+# hardening") onto the base `app` service so the running container actually
+# enforces the CSRF host pin + Cloudflare Access JWT verification. These values
+# come from the box .env; leaving CF_ACCESS_* blank there disables JWT
+# verification (local/dev), which is the intended fallback.
+#
+# Prod deploy:
+#   docker compose -f docker-compose.yml -f docker-compose.access.yml up -d --build
+services:
+  app:
+    environment:
+      - APP_HOST=${APP_HOST:-km.graham-williams.com}
+      - CF_ACCESS_TEAM_DOMAIN=${CF_ACCESS_TEAM_DOMAIN}
+      - CF_ACCESS_AUD=${CF_ACCESS_AUD}
