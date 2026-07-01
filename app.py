@@ -1,12 +1,19 @@
+import json
 import os
 import random
 import secrets
 import sqlite3
 import sys
+import threading
+import time
+import urllib.request
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlsplit
 
 from collections import Counter
 
+import jwt
+from jwt.algorithms import RSAAlgorithm
 from dotenv import load_dotenv
 from flask import Flask, abort, flash, jsonify, redirect, render_template, request, url_for
 
@@ -17,6 +24,186 @@ load_dotenv()
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY") or secrets.token_hex(32)
+
+
+# ---------------------------------------------------------------------------
+# Security hardening: CSRF (Origin/Referer) + Cloudflare Access JWT verification
+#
+# The app is single-origin and sits behind Cloudflare Access. The Access auth
+# cookie IS sent on cross-site requests, so a malicious page could otherwise
+# forge state-changing requests. These two before_request hooks defend against
+# that (CSRF) and add defense-in-depth in case the Access policy is bypassed.
+# ---------------------------------------------------------------------------
+
+
+def _env_flag(name, default):
+    """Read a boolean-ish env var. Absent -> default; '0'/'false'/'no'/'off'/'' -> False."""
+    val = os.environ.get(name)
+    if val is None:
+        return default
+    return val.strip().lower() not in ("0", "false", "no", "off", "")
+
+
+# --- 1. CSRF protection via Origin/Referer host matching ---
+
+CSRF_PROTECTION = _env_flag("CSRF_PROTECTION", True)  # default ON; set 0 to disable for local dev
+APP_HOST = os.environ.get("APP_HOST", "").strip()
+APP_ORIGIN = os.environ.get("APP_ORIGIN", "").strip()
+
+STATE_CHANGING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+
+
+def _expected_host():
+    """The host this app considers 'itself'. Prefer explicit config, else the request Host."""
+    if APP_HOST:
+        return APP_HOST
+    if APP_ORIGIN:
+        return urlsplit(APP_ORIGIN).netloc
+    return request.host
+
+
+@app.before_request
+def csrf_origin_check():
+    """Block cross-origin state-changing requests (CSRF).
+
+    Browsers always send an Origin header on cross-origin POST/PUT/PATCH/DELETE
+    (and on same-origin ones for these methods too), so matching its host against
+    our own host blocks real CSRF. Non-browser clients (curl, the Flask test
+    client) send neither Origin nor Referer -> allowed, so this doesn't break the
+    test suite or API-style callers.
+    """
+    if not CSRF_PROTECTION:
+        return
+    if request.method not in STATE_CHANGING_METHODS:
+        return
+    expected = _expected_host()
+    origin = request.headers.get("Origin")
+    if origin:
+        parts = urlsplit(origin)
+        # Exact host match is the CSRF defense. Scheme is NOT required: the app is
+        # served over http internally / on the tailnet (and https via Cloudflare),
+        # so requiring https here would 403 legitimate http requests.
+        if parts.netloc != expected:
+            abort(403, description="Cross-origin request blocked.")
+        return
+    referer = request.headers.get("Referer")
+    if referer:
+        if urlsplit(referer).netloc != expected:
+            abort(403, description="Cross-origin request blocked.")
+        return
+    # Neither header present -> non-browser client -> allow.
+    return
+
+
+# --- 2. Cloudflare Access JWT verification (defense-in-depth) ---
+
+CF_ACCESS_TEAM_DOMAIN = os.environ.get("CF_ACCESS_TEAM_DOMAIN", "").strip()
+CF_ACCESS_AUD = os.environ.get("CF_ACCESS_AUD", "").strip()
+# Only enforced in production, i.e. when BOTH are configured. Unset -> skip
+# entirely so local dev and the tailnet keep working.
+CF_ACCESS_ENABLED = bool(CF_ACCESS_TEAM_DOMAIN and CF_ACCESS_AUD)
+
+_jwks_lock = threading.Lock()
+_jwks_keys = {}  # kid -> public key object, cached in-process
+_jwks_last_fetch = None  # monotonic timestamp of the last JWKS fetch *attempt* (None = never)
+# Minimum seconds between JWKS fetch attempts. An unknown `kid` is attacker-
+# controllable (read from the unverified JWT header), so without this throttle a
+# flood of bogus-kid requests would trigger an uncached outbound fetch each time
+# -> trivial DoS + thundering herd against the two sync gunicorn workers. This
+# bounds fetches to at most one per interval while still picking up legitimate
+# Cloudflare key rotation within ~REFETCH_MIN_INTERVAL seconds.
+REFETCH_MIN_INTERVAL = 60
+_JWKS_MAX_BYTES = 1024 * 1024  # cap the response body read (hostile/huge response)
+
+
+def _fetch_cf_jwks():
+    """Fetch the team's JWKS (stdlib urllib, no extra deps). Body read is capped."""
+    url = f"https://{CF_ACCESS_TEAM_DOMAIN}/cdn-cgi/access/certs"
+    with urllib.request.urlopen(url, timeout=5) as resp:  # noqa: S310 (fixed https host)
+        raw = resp.read(_JWKS_MAX_BYTES + 1)
+    if len(raw) > _JWKS_MAX_BYTES:
+        raise ValueError("JWKS response too large")
+    return json.loads(raw.decode("utf-8"))
+
+
+def _cf_signing_key(kid):
+    """Return the cached public key for `kid`, refreshing the JWKS on an unknown kid.
+
+    Fail-closed: any error or uncertainty returns None so the caller aborts 403.
+    Refetches are single-flighted (under the lock) and throttled to at most one
+    attempt per REFETCH_MIN_INTERVAL seconds, so an attacker spraying unknown
+    kids can't force an outbound fetch per request.
+    """
+    global _jwks_last_fetch, _jwks_keys
+    with _jwks_lock:
+        key = _jwks_keys.get(kid)
+        if key is not None:
+            return key
+        # Unknown kid: only fetch if we're outside the throttle window. Update the
+        # last-attempt timestamp even on failure so failures don't bypass it.
+        now = time.monotonic()
+        if _jwks_last_fetch is not None and now - _jwks_last_fetch < REFETCH_MIN_INTERVAL:
+            return None
+        _jwks_last_fetch = now
+        try:
+            jwks = _fetch_cf_jwks()
+            # Replace the cache wholesale so rotated-out keys are evicted, not merged.
+            new_keys = {}
+            for jwk in jwks.get("keys", []):
+                k = jwk.get("kid")
+                if k:
+                    new_keys[k] = RSAAlgorithm.from_jwk(json.dumps(jwk))
+            _jwks_keys = new_keys
+        except Exception:
+            app.logger.exception("Cloudflare Access JWKS fetch/parse failed")
+            return None
+        return _jwks_keys.get(kid)
+
+
+def _verify_cf_access_token(token):
+    """Verify an RS256 CF Access JWT: signature, aud, issuer, expiry. Raises on failure."""
+    header = jwt.get_unverified_header(token)
+    kid = header.get("kid")
+    if not kid:
+        raise jwt.InvalidTokenError("missing kid")
+    key = _cf_signing_key(kid)
+    if key is None:
+        raise jwt.InvalidTokenError("unknown signing key")
+    return jwt.decode(
+        token,
+        key=key,
+        algorithms=["RS256"],
+        audience=CF_ACCESS_AUD,
+        issuer=f"https://{CF_ACCESS_TEAM_DOMAIN}",
+        leeway=10,  # small tolerance for clock skew
+        options={"require": ["exp", "iat", "aud", "iss"]},
+    )
+
+
+@app.before_request
+def cloudflare_access_check():
+    """Require a valid Cloudflare Access identity token in production.
+
+    Enforced only when CF_ACCESS_TEAM_DOMAIN + CF_ACCESS_AUD are both set. Static
+    assets are exempt so CSS/JS still load. The token comes from the
+    Cf-Access-Jwt-Assertion header (Cloudflare injects it) or the CF_Authorization
+    cookie as a fallback.
+    """
+    if not CF_ACCESS_ENABLED:
+        return
+    if request.path.startswith("/static/"):
+        return
+    token = request.headers.get("Cf-Access-Jwt-Assertion") or request.cookies.get("CF_Authorization")
+    if not token:
+        abort(403, description="Cloudflare Access token missing.")
+    try:
+        _verify_cf_access_token(token)
+    except Exception:
+        # Log server-side (no token contents) so a real outage — e.g. a JWKS
+        # fetch failure — is distinguishable from a merely invalid token in the
+        # logs. Still fail closed with a 403.
+        app.logger.exception("Cloudflare Access token verification failed")
+        abort(403, description="Cloudflare Access token invalid.")
 
 
 def resolve_db_path(staging, env):
