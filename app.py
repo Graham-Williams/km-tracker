@@ -80,8 +80,10 @@ def csrf_origin_check():
     origin = request.headers.get("Origin")
     if origin:
         parts = urlsplit(origin)
-        # Behind Cloudflare the Origin is always https; reject plaintext http.
-        if parts.scheme != "https" or parts.netloc != expected:
+        # Exact host match is the CSRF defense. Scheme is NOT required: the app is
+        # served over http internally / on the tailnet (and https via Cloudflare),
+        # so requiring https here would 403 legitimate http requests.
+        if parts.netloc != expected:
             abort(403, description="Cross-origin request blocked.")
         return
     referer = request.headers.get("Referer")
