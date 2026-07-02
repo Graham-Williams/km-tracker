@@ -57,7 +57,7 @@ not improvise around them.
 
 4. **Reseed to a known state before AND after.** Staging is a throwaway sandbox —
    trash it guilt-free, but leave it clean. Reseed with
-   `scripts/seed_staging.py --reset` (exact command in §2/§6) **before** you start
+   `scripts/seed_staging.py --reset` (exact command in §2/§7) **before** you start
    (known deterministic state) and **after** you finish (leave it clean). The seed
    script has its own hard rail: it refuses to run unless the DB basename contains
    `staging` (bypass only with `--force`, which you must never pass).
@@ -171,12 +171,95 @@ attack against this known state and diff against it in the invariant audit.
 
 ---
 
-## 3. Attack plan — fan out subagents in parallel
+## 3. Change-awareness — find what's new on staging and focus-fire it
+
+Staging almost always carries a **not-yet-merged feature** that prod/`main` lacks.
+Before the broad sweep, pin down exactly what that change is and build a
+**dedicated, heavier attack pass** aimed straight at it. This runs **in ADDITION**
+to §4's broad fan-out — it never replaces it. New code has the least test
+coverage; assume the freshest change is the weakest.
+
+### 3a. Discover the staging-vs-prod diff
+
+On the box, prod (`app`) and staging (`staging-app`) build from the same repo at
+`/home/graham/km-tracker`, but staging is usually deployed from a feature branch /
+newer commit. Establish the delta from three angles; use whichever resolves.
+
+```bash
+cd /home/graham/km-tracker
+COMPOSE="docker compose -f docker-compose.yml -f docker-compose.access.yml -f docker-compose.staging.yml"
+git fetch origin --quiet
+
+# (i) Branch delta — most reliable: staging is deployed from the current feature
+#     branch, prod from main. This is the code you're about to test.
+git log  --oneline origin/main..HEAD                 # commits on staging, not prod
+git diff --stat    origin/main...HEAD                # changed files
+git diff           origin/main...HEAD -- app.py migrations/ templates/ static/
+
+# (ii) Deployed-commit cross-check — confirm what's ACTUALLY running in each
+#      container (not just what the working tree says). If git is in the image:
+$COMPOSE exec -T app         git rev-parse HEAD 2>/dev/null   # prod SHA  (READ ONLY)
+$COMPOSE exec -T staging-app git rev-parse HEAD 2>/dev/null   # staging SHA
+#      then diff the two SHAs from the checkout:  git diff <PROD_SHA>..<STAGING_SHA>
+#      If git isn't in the image, fall back to a deployed version marker
+#      (e.g. VERSION file / build label) or the image cross-check below.
+
+# (iii) Image cross-check — catch a stale/rebuilt container and compare build times:
+$COMPOSE images app staging-app
+```
+
+If prod and staging report the **same** commit and the branch shows no delta, there
+is no unmerged change to focus-fire — note that and skip to §4.
+
+### 3b. Map the diff to changed surfaces
+
+From the diff, enumerate concrete targets:
+- **Routes:** `git diff origin/main...HEAD -- app.py | grep -nE "@app\.route|def "`
+  — new/modified endpoints and handlers.
+- **DB columns / migrations:** new files under `migrations/`, and
+  `git diff origin/main...HEAD | grep -iE "ADD COLUMN|ALTER TABLE|CREATE TABLE"`
+  — new columns (like the recent `game_edition` on `cups`) and enum-like fields.
+- **State-machine transitions:** changed spin / voto / half-veto / next-race /
+  complete / cancel guards, new `status` values, changed caps/deltas.
+- **UI flows:** changed `templates/` — new form fields, new pickers (e.g. an
+  edition selector), new hidden inputs.
+
+Write a short target list (endpoints, columns, params) and carry it into 3c.
+
+### 3c. Dedicated heavier attack pass on the changed surface
+
+Dispatch a **dedicated subagent** (separate from and parallel to §4's broad
+fan-out) that attacks **only the changed surface, harder**. First reason
+explicitly about how THIS change could break, then probe each hypothesis:
+
+- **New enum/choice column with unhandled values** (e.g. `game_edition`): POST
+  every route that writes it with values outside the allowed set — empty, `null`,
+  unknown string, wrong case, integer, and a value valid for *another* edition used
+  where it shouldn't be. Does junk reach the DB? Does course/track validation key
+  off it and either 500 or accept anything?
+- **Migration leaving old rows in a bad state:** did the migration backfill
+  existing rows (old cups → `game_edition='wii'`)? Query the new column on
+  **pre-existing** seeded rows for NULL/empty/unexpected values, then exercise a
+  read path that touches the column on an old row.
+- **New field bypassing existing validation:** does the new input skip the
+  `int(...)` / range / scope checks the older fields get? Hit it with the full
+  Surface A hostile set and see if the new path is unguarded.
+- **Changed flow breaking an old invariant:** if the feature touched a cap,
+  counter, score/line formula, race numbering, or a state transition, re-run the
+  relevant §5 invariant checks and prove the old guarantee still holds.
+- Throw the **full Surface A/B/C toolkit** (malformed input, out-of-order,
+  double-submit, concurrency) at the new/changed routes specifically.
+
+Report every finding here under the dedicated changed-surface heading (§6).
+
+---
+
+## 4. Attack plan — fan out subagents in parallel
 
 Dispatch **subagents in parallel**, one per surface below (AI budget is not a
 constraint — prefer more parallel agents over serializing). Give each the access
 path (§1), the baseline (§2), and the exact endpoint contract for its surface.
-Each subagent returns findings in the §5 format. **Reads are free; every request
+Each subagent returns findings in the §6 format. **Reads are free; every request
 here is a deliberate write against the throwaway staging server — that is
 expected and safe.**
 
@@ -248,7 +331,7 @@ can't exceed their caps under a race (read-check-write is non-atomic):
 
 ---
 
-## 4. Invariant audit (after the chaos, before the final reseed)
+## 5. Invariant audit (after the chaos, before the final reseed)
 
 Inspect the **staging DB directly** (read-only, same `$COMPOSE ... exec -T
 staging-app python`/`sqlite3` path as §2) and confirm nothing is internally
@@ -274,7 +357,7 @@ any drift to a specific attack.
 
 ---
 
-## 5. Report format
+## 6. Report format
 
 Deliver one report. For **each finding**:
 
@@ -293,8 +376,12 @@ Deliver one report. For **each finding**:
   suite. Write the sketch as real, runnable-shaped pytest, not prose.
 
 End the report with:
-- **Invariant-audit summary** — each §4 check and pass/fail.
-- **Confirmation staging was reseeded clean** (§6) and the throwaway container
+- **Findings in the changed surface: <feature>** — a dedicated heading collecting
+  every finding from the §3 focus-fire pass, so the human sees at a glance whether
+  the currently-deployed unmerged change is safe, *separately* from pre-existing
+  issues. If §3 found nothing, say so explicitly ("changed surface: no findings").
+- **Invariant-audit summary** — each §5 check and pass/fail.
+- **Confirmation staging was reseeded clean** (§7) and the throwaway container
   removed.
 
 Return the report as your final message. Do **not** commit it, do not fix the
@@ -303,7 +390,7 @@ and fixes.
 
 ---
 
-## 6. Cleanup & exit criteria
+## 7. Cleanup & exit criteria
 
 Always, even if the sweep errored partway:
 
@@ -323,8 +410,10 @@ $COMPOSE ps
 ```
 
 **Exit criteria — all must hold:**
-- Every surface in §3 attempted (or explicitly noted as skipped, with reason).
-- Invariant audit (§4) completed.
-- Throwaway container removed; staging reseeded clean (§6).
+- Every surface in §4 attempted (or explicitly noted as skipped, with reason).
+- Changed surface identified (§3) and given its dedicated focus-fire pass (or
+  explicitly noted that staging carries no unmerged change vs prod/main).
+- Invariant audit (§5) completed.
+- Throwaway container removed; staging reseeded clean (§7).
 - Prod untouched (verified via `docker compose ps` uptime).
-- Report (§5) delivered.
+- Report (§6) delivered.
