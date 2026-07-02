@@ -174,7 +174,7 @@
         <select id="manual-override">
             <option value="">Manual override...</option>
             {% for course in all_courses %}
-            <option value="{{ loop.index0 }}">{{ course }}</option>
+            <option value="{{ loop.index0 }}">{{ course }} ({{ loop.index }})</option>
             {% endfor %}
         </select>
     </div>
@@ -271,8 +271,21 @@
         var NUM_SLICES = COURSES.length;
         var SLICE_ANGLE = 360 / NUM_SLICES;
         var currentMap = null;
+        // Index of the current course within COURSES. Kept alongside currentMap
+        // (which stays the raw name for storage) so we can show the 1-based
+        // on-screen course number in the UI without ever persisting it.
+        var currentIndex = null;
         var isSpinning = false;
         var totalRotation = 0;
+
+        // Display label for a course: raw name plus its 1-based on-screen number,
+        // e.g. "Water Park (19)". Display-only — never sent to the server.
+        function courseLabel(index) {
+            return COURSES[index] + " (" + (index + 1) + ")";
+        }
+        function currentLabel() {
+            return currentIndex === null ? currentMap : courseLabel(currentIndex);
+        }
 
         // --- Canvas Wheel ---
         var canvas = document.getElementById("wheel-canvas");
@@ -322,7 +335,7 @@
                 ctx.font = (isPlayed ? "italic " : "bold ") + fontPx + "px system-ui, sans-serif";
                 ctx.shadowColor = "rgba(0,0,0,0.4)";
                 ctx.shadowBlur = 2;
-                ctx.fillText(COURSES[i], -(r - 15), fontPx * 0.35);
+                ctx.fillText(courseLabel(i), -(r - 15), fontPx * 0.35);
                 ctx.shadowBlur = 0;
                 ctx.restore();
             }
@@ -402,8 +415,9 @@
                     .then(function(data) {
                         if (data.error) { alert(data.error); spinBtn.disabled = false; return; }
                         currentMap = data.map;
+                        currentIndex = data.index;
                         spinToIndex(data.index, function() {
-                            document.getElementById("wheel-label").textContent = currentMap;
+                            document.getElementById("wheel-label").textContent = currentLabel();
                             document.getElementById("wheel-label").classList.add("visible");
                             enableVetoControls();
                             enableNextRace();
@@ -436,6 +450,7 @@
 
         function resetForRespin() {
             currentMap = null;
+            currentIndex = null;
             document.getElementById("wheel-label").classList.remove("visible");
             disableVetoControls();
             var btn = document.getElementById("next-race-btn") || document.getElementById("complete-btn");
@@ -547,9 +562,10 @@
                 if (!manualSelect.value || isSpinning) return;
                 var idx = parseInt(manualSelect.value, 10);
                 currentMap = COURSES[idx];
+                currentIndex = idx;
                 spinBtn.disabled = true;
                 spinToIndex(idx, function() {
-                    document.getElementById("wheel-label").textContent = currentMap;
+                    document.getElementById("wheel-label").textContent = currentLabel();
                     document.getElementById("wheel-label").classList.add("visible");
                     enableVetoControls();
                     enableNextRace();
@@ -570,7 +586,7 @@
                 var title = isComplete ? "Complete Cup" : "Next Race";
                 document.getElementById("next-race-title").textContent = title;
                 document.getElementById("next-race-message").textContent =
-                    "Are you sure? Did you just play " + currentMap + "?";
+                    "Are you sure? Did you just play " + currentLabel() + "?";
                 openModal("next-race-modal");
             });
         }

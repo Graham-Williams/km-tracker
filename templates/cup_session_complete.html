@@ -73,7 +73,7 @@
                 <label for="race-{{ race.race_number }}">Race {{ race.race_number }}:</label>
                 <select name="race_{{ race.race_number }}" id="race-{{ race.race_number }}">
                     {% for course in all_courses %}
-                    <option value="{{ course }}" {% if course == race.map %}selected{% endif %}>{{ course }}</option>
+                    <option value="{{ course }}" {% if course == race.map %}selected{% endif %}>{{ course }} ({{ loop.index }})</option>
                     {% endfor %}
                 </select>
             </li>
