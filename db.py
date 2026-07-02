@@ -38,6 +38,19 @@ def backup_db(db_path=None):
     shutil.copy2(db_path, backup_path)
 
 
+def run_migrations(conn):
+    """Apply schema changes that CREATE TABLE IF NOT EXISTS can't make on an
+    already-populated DB. Each step is guarded so it is safe to run on every
+    startup (idempotent)."""
+    # Add cups.game_edition for DBs created before multi-edition support.
+    # Existing rows backfill to 'wii' via the column DEFAULT.
+    cup_columns = {row["name"] for row in conn.execute("PRAGMA table_info(cups)")}
+    if "game_edition" not in cup_columns:
+        conn.execute(
+            "ALTER TABLE cups ADD COLUMN game_edition TEXT NOT NULL DEFAULT 'wii'"
+        )
+
+
 def init_db(db_path=None):
     if db_path is None:
         db_path = get_db_path()
@@ -47,4 +60,6 @@ def init_db(db_path=None):
     conn = get_connection(db_path)
     with open(SCHEMA_PATH) as f:
         conn.executescript(f.read())
+    run_migrations(conn)
+    conn.commit()
     conn.close()

@@ -12,7 +12,8 @@ CREATE TABLE IF NOT EXISTS cups (
     notes TEXT,
     deleted_at DATETIME,
     status TEXT NOT NULL DEFAULT 'completed',
-    voto_count INTEGER NOT NULL DEFAULT 0
+    voto_count INTEGER NOT NULL DEFAULT 0,
+    game_edition TEXT NOT NULL DEFAULT 'wii'
 );
 
 CREATE TABLE IF NOT EXISTS cup_players (

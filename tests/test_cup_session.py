@@ -4,13 +4,16 @@ from db import get_connection
 from helpers import create_player
 
 
-def _create_session(client, player_ids=None):
+def _create_session(client, player_ids=None, edition=None):
     """Create a cup session with the given player IDs. Returns redirect response."""
     if player_ids is None:
         player_ids = ["1", "2"]
+    data = {"player_ids[]": player_ids}
+    if edition is not None:
+        data["game_edition"] = edition
     return client.post(
         "/cup-session/new",
-        data={"player_ids[]": player_ids},
+        data=data,
         follow_redirects=False,
     )
 
@@ -58,14 +61,73 @@ def _submit_scores(client, cup_id=1, player_ids=None, scores=None, lines=None, n
 # =============================================================================
 
 
-def test_maps_has_32_courses():
-    from maps import COURSES
-    assert len(COURSES) == 32
+def test_wii_edition_has_32_courses():
+    from maps import TRACK_SETS
+    assert len(TRACK_SETS["wii"]) == 32
 
 
-def test_maps_no_duplicates():
-    from maps import COURSES
-    assert len(COURSES) == len(set(COURSES))
+def test_mk8dx_edition_has_96_courses():
+    from maps import TRACK_SETS
+    assert len(TRACK_SETS["mk8dx"]) == 96
+
+
+def test_courses_backward_compat_alias():
+    # COURSES stays a flat alias of the Wii list for older importers.
+    from maps import COURSES, TRACK_SETS
+    assert COURSES == TRACK_SETS["wii"]
+
+
+def test_no_edition_has_duplicate_courses():
+    from maps import TRACK_SETS
+    for edition, courses in TRACK_SETS.items():
+        assert len(courses) == len(set(courses)), f"duplicates in {edition}"
+
+
+def test_new_session_defaults_to_wii(client):
+    _setup_players(client)
+    _create_session(client)
+    conn = get_connection()
+    row = conn.execute("SELECT game_edition FROM cups WHERE id = 1").fetchone()
+    conn.close()
+    assert row["game_edition"] == "wii"
+
+
+def test_mk8dx_session_stores_edition_and_uses_96_tracks(client):
+    from maps import TRACK_SETS
+    _setup_players(client)
+    _create_session(client, edition="mk8dx")
+
+    conn = get_connection()
+    row = conn.execute("SELECT game_edition FROM cups WHERE id = 1").fetchone()
+    conn.close()
+    assert row["game_edition"] == "mk8dx"
+
+    # The race page should surface the MK8DX track set, not the Wii one.
+    # (Tracks with apostrophes are HTML-escaped in the page, so only assert on
+    # distinctive apostrophe-free names; the 96-count is covered separately.)
+    page = client.get("/cup-session/1").get_data(as_text=True)
+    for track in ["Ninja Hideaway", "Sky-High Sundae", "Merry Mountain", "Mount Wario"]:
+        assert track in page, f"missing MK8DX track on race page: {track}"
+    assert "Luigi Circuit" not in page  # Wii-only track must not appear
+
+
+def test_invalid_edition_falls_back_to_wii(client):
+    _setup_players(client)
+    _create_session(client, edition="not-a-real-edition")
+    conn = get_connection()
+    row = conn.execute("SELECT game_edition FROM cups WHERE id = 1").fetchone()
+    conn.close()
+    assert row["game_edition"] == "wii"
+
+
+def test_spin_returns_mk8dx_track_for_mk8dx_session(client):
+    from maps import TRACK_SETS
+    _setup_players(client)
+    _create_session(client, edition="mk8dx")
+    resp = client.post("/cup-session/1/spin")
+    data = json.loads(resp.get_data(as_text=True))
+    assert data["map"] in TRACK_SETS["mk8dx"]
+    assert TRACK_SETS["mk8dx"][data["index"]] == data["map"]
 
 
 # =============================================================================
