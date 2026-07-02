@@ -130,6 +130,9 @@
         {% endfor %}
     ];
 
+    // Lines are Wii-only; on a Switch cup, added players get no line UI either.
+    var linesOn = {{ (cup.game_edition == 'wii')|int }};
+
     function getActivePlayerIds() {
         var ids = new Set();
         document.querySelectorAll(".score-row:not(.removed)").forEach(function(row) {
@@ -368,16 +371,16 @@
             div.className = "score-row";
             div.dataset.playerId = pid;
             div.dataset.playerLine = player.line;
-            div.dataset.hasLine = player.hasLine;
-            var lineStr = player.line >= 0 ? "+" + player.line : "" + player.line;
-            var lineHtml = player.hasLine
+            var showLine = player.hasLine && linesOn;
+            div.dataset.hasLine = showLine ? 1 : 0;
+            var lineHtml = showLine
                 ? '<input type="number" name="lines[]" value="' + player.line + '" class="line-input"><input type="number" name="line_scores[]" placeholder="Line" class="line-score-input">'
                 : '<input type="hidden" name="lines[]" value="0">';
             div.innerHTML =
                 '<span class="score-name">' + player.name + '</span>' +
                 '<span class="score-place"></span>' +
                 '<input type="hidden" name="player_ids[]" value="' + pid + '">' +
-                '<input type="number" name="scores[]" placeholder="' + (player.hasLine ? 'Raw' : 'Pts') + '" min="0" class="score-input">' +
+                '<input type="number" name="scores[]" placeholder="' + (showLine ? 'Raw' : 'Pts') + '" min="0" class="score-input">' +
                 lineHtml +
                 '<label class="tb-wrapper disabled"><input type="checkbox" name="tiebreakers[]" value="' + pid + '" disabled> TB</label>' +
                 '<button type="button" class="remove-btn" title="Remove player">&times;</button>';

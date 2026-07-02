@@ -1210,12 +1210,14 @@ def _setup_line_players(client):
 
 def test_mk8dx_cup_stays_lineless(client):
     # A 3-player Switch cup must not create line_changes or adjust players.line,
-    # even for players who have a line, and its scores store line=0/line_score=score.
+    # even for players who have a line. And even a crafted submit carrying
+    # non-zero lines[] (which the UI hides) must be zeroed server-side, so scores
+    # store line=0 / line_score=score.
     _setup_line_players(client)
     _create_session(client, ["1", "2", "3"], edition="mk8dx")
     _submit_scores(
         client, cup_id=1, player_ids=["1", "2", "3"],
-        scores=["100", "90", "80"], lines=["0", "0", "0"],
+        scores=["100", "90", "80"], lines=["50", "30", "10"],  # hostile: non-zero lines
     )
     conn = get_connection()
     lc = conn.execute("SELECT COUNT(*) AS n FROM line_changes WHERE cup_id = 1").fetchone()["n"]
@@ -1224,6 +1226,36 @@ def test_mk8dx_cup_stays_lineless(client):
     conn.close()
     assert lc == 0                       # no line-change records for Switch
     assert player_lines == [0, 0, 0]     # player line balances untouched
+    for s in score_rows:
+        assert s["line"] == 0 and s["line_score"] == s["score"]  # lines zeroed
+
+
+def test_mk8dx_edit_ignores_submitted_lines(client):
+    # Editing a completed Switch cup with a crafted non-zero lines[] (e.g. via the
+    # add-player path) must also stay lineless — the server zeroes it.
+    _setup_line_players(client)
+    _create_session(client, ["1", "2", "3"], edition="mk8dx")
+    _submit_scores(
+        client, cup_id=1, player_ids=["1", "2", "3"],
+        scores=["100", "90", "80"], lines=["0", "0", "0"],
+    )
+    client.post(
+        "/cups/1/edit",
+        data={
+            "date": "2030-01-01T12:00",
+            "notes": "",
+            "tz_offset": "",
+            "player_ids[]": ["1", "2", "3"],
+            "scores[]": ["100", "90", "80"],
+            "lines[]": ["50", "30", "10"],  # hostile: non-zero lines on a Switch cup
+        },
+        follow_redirects=True,
+    )
+    conn = get_connection()
+    score_rows = conn.execute("SELECT score, line, line_score FROM scores WHERE cup_id = 1").fetchall()
+    player_lines = [r["line"] for r in conn.execute("SELECT line FROM players ORDER BY id").fetchall()]
+    conn.close()
+    assert player_lines == [0, 0, 0]
     for s in score_rows:
         assert s["line"] == 0 and s["line_score"] == s["score"]
 
