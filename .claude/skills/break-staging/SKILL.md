@@ -37,16 +37,29 @@ not improvise around them.
      from it — **never** the `app` (prod) service.
    If you cannot positively confirm all three, **abort. Do not attack.**
 
-2. **Never run while a cup is in progress on staging.** BEFORE reseeding or
-   attacking, query the staging DB for live cups:
+2. **Never run while a *real* human session is live on staging.** BEFORE reseeding
+   or attacking, inspect the staging DB. The naive check —
    ```
    SELECT COUNT(*) FROM cups WHERE status='in_progress' AND deleted_at IS NULL;
    ```
-   Another human or agent may be actively using staging right now. If this returns
-   anything **other than 0 before your first reseed, ABORT** — someone is mid-cup;
-   do not trash their session. (After *your own* reseed there will be exactly one
-   in-progress fake cup — that one is yours to attack. The check is about not
-   stomping a pre-existing session.)
+   is **not sufficient on its own**: a clean, idle, freshly-seeded staging *always*
+   has **exactly one** in-progress cup, because `scripts/seed_staging.py --reset`
+   (which §7 runs at the end of every sweep) leaves one seeded in-progress fake cup
+   behind. A bare count of `> 0` would therefore falsely ABORT on normal leftover
+   seed state. Instead, distinguish the **deterministic seed baseline** from **real
+   activity**:
+   - If in-progress cups == **0** → safe, proceed.
+   - If the DB **exactly matches the seed fingerprint** (the seed script's fake
+     player-name set, and its player / cup / score counts, with the lone in-progress
+     cup being the seeded one — no scores, its seeded field of players + races) →
+     it's leftover from a prior run's cleanup reseed, **not** a human. Safe to
+     proceed and reseed.
+   - **Otherwise** (extra or missing cups, non-seed / real-looking player names,
+     unexpected counts, or an in-progress cup that isn't the seeded one) → a human
+     may be mid-session → **ABORT and report.**
+
+   The concrete fingerprint check (a python snippet that derives the baseline from
+   the actual seed script so it can't drift) lives in §2 — run it, don't eyeball it.
 
 3. **Never touch production.** Do not run any command against the `app` container,
    the prod DB `km_tracker.db`, or the prod hostname `km.graham-williams.com`. Do
@@ -72,12 +85,20 @@ enforces a Cloudflare Access JWT check server-side when `CF_ACCESS_TEAM_DOMAIN` 
 `CF_ACCESS_AUD` are set. So do **not** go through the public URL. Reach staging
 **on the box** instead.
 
-The box is the self-hosted server (Tailscale): `ssh graham@100.101.1.28`
-(hostname `personalserver`). The repo lives at `/home/graham/km-tracker`; the
-staging DB is on the bind-mounted `./data` volume as `km_tracker.staging.db`. The
+Reach staging on the self-hosted box over Tailscale SSH. The staging DB lives on
+the box's bind-mounted `./data` volume as `km_tracker.staging.db`. The
 `staging-app` container publishes **no host port**, so you can't curl it from the
 LAN, and the live gunicorn has the Access JWT check active — so don't attack the
 live container directly.
+
+> **Box coordinates are NOT committed** (this repo is public). The concrete SSH
+> target/user (`<BOX_SSH_TARGET>`) and on-box repo path (`<BOX_REPO_PATH>`) are
+> deliberately kept out of every tracked file — per this repo's convention that
+> box reachability + specifics live in local memory / private config, not in the
+> repo. The executing agent already has them from the Hopper session context
+> (personal-assistant memory + global config) or from the repo's private DEPLOY
+> notes; substitute them for the placeholders below. Every command's *shape* is
+> exactly what you run — only the address/user/path are placeheld.
 
 **Canonical approach — a disposable, auth-disabled app container against the same
 staging DB.** Stand up a *throwaway* one-off container from the `staging-app`
@@ -87,8 +108,8 @@ the real staging DB. It shares the staging DB with the live `staging-app` but do
 **not** rebuild, restart, or reconfigure it, and never touches prod.
 
 ```bash
-# ---- ON THE BOX (ssh graham@100.101.1.28), from the repo root ----
-cd /home/graham/km-tracker
+# ---- ON THE BOX (ssh <BOX_SSH_TARGET>), from the repo root ----
+cd <BOX_REPO_PATH>
 
 COMPOSE="docker compose -f docker-compose.yml -f docker-compose.access.yml -f docker-compose.staging.yml"
 
@@ -117,7 +138,7 @@ application/json`.
 UI-level checks): forward the box's loopback port over SSH, then hit
 `http://localhost:18080` locally:
 ```bash
-ssh -L 18080:127.0.0.1:18080 graham@100.101.1.28   # keep this session open
+ssh -L 18080:127.0.0.1:18080 <BOX_SSH_TARGET>   # keep this session open
 ```
 
 **Teardown (always, even on failure):**
@@ -139,28 +160,106 @@ docker rm -f km-tracker-qa
 Do this on the box, in order, **before** launching the QA container or attacking.
 
 ```bash
-cd /home/graham/km-tracker
+cd <BOX_REPO_PATH>
 COMPOSE="docker compose -f docker-compose.yml -f docker-compose.access.yml -f docker-compose.staging.yml"
 
-# (a) Confirm the DB path is the STAGING db and read the in-progress count in one
-#     shot, straight against the DB inside the live staging container (read-only):
+# (a) Confirm the DB is the STAGING db AND decide whether it's safe to reseed, in
+#     one read-only shot against the DB inside the live staging container. The
+#     safety decision distinguishes the deterministic seed baseline (leftover from
+#     a prior sweep's §7 cleanup reseed) from a real human session — see guardrail
+#     2. The expected fingerprint is derived FROM the actual seed script at runtime
+#     (fake player names, and player/cup/score counts) so it never drifts: if the
+#     seed roster/shape changes, this check reads the new values straight from
+#     scripts/seed_staging.py.
 $COMPOSE exec -T staging-app python - <<'PY'
-import os, sqlite3
+import os, sqlite3, sys, tempfile, importlib.util
+
+# --- Guardrail 1: prove this is the staging DB before reading anything. ---
 db = os.environ["DB_PATH"]
 assert "staging" in os.path.basename(db).lower(), f"NOT STAGING: {db} — ABORT"
+
+# --- Derive the seed fingerprint from the real seed script (no drift). ---
+# Load /app/scripts/seed_staging.py as a module; put /app on the path so its
+# own `from db import ...` resolves. Then re-run seed() against a throwaway temp
+# DB to get the EXACT deterministic counts (players/cups/scores) it produces,
+# and read its fake-player roster + in-progress-cup constant directly.
+sys.path.insert(0, "/app")
+spec = importlib.util.spec_from_file_location("seed_staging", "/app/scripts/seed_staging.py")
+seed_mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(seed_mod)
+
+expected_names = {p["name"] for p in seed_mod.FAKE_PLAYERS}
+expected_in_progress = seed_mod.NUM_IN_PROGRESS_CUPS          # deterministic (== 1)
+tmp = os.path.join(tempfile.mkdtemp(), "fingerprint.staging.db")
+try:
+    baseline = seed_mod.seed(tmp)                            # {'players','cups','scores'}
+finally:
+    for sfx in ("", "-journal", "-wal", "-shm"):
+        try: os.remove(tmp + sfx)
+        except OSError: pass
+expected = {"players": baseline["players"], "cups": baseline["cups"],
+            "scores": baseline["scores"]}
+
+# --- Read the LIVE staging DB state. ---
 c = sqlite3.connect(db)
-n = c.execute("SELECT COUNT(*) FROM cups WHERE status='in_progress' AND deleted_at IS NULL").fetchone()[0]
+live_names = {r[0] for r in c.execute("SELECT name FROM players")}
+live = {
+    "players": c.execute("SELECT COUNT(*) FROM players").fetchone()[0],
+    "cups":    c.execute("SELECT COUNT(*) FROM cups").fetchone()[0],
+    "scores":  c.execute("SELECT COUNT(*) FROM scores").fetchone()[0],
+}
+inprog_rows = c.execute(
+    "SELECT id FROM cups WHERE status='in_progress' AND deleted_at IS NULL"
+).fetchall()
+inprog = len(inprog_rows)
+
+# Is the single in-progress cup shaped like the seeded one? The seed's
+# _insert_in_progress_cup: no scores, a field of 5 cup_players
+# (rng.sample(player_ids, 5)), and one race per IN_PROGRESS_MAPS entry. Deriving
+# race count from IN_PROGRESS_MAPS keeps it drift-free; the field of 5 is a plain
+# literal in the seed, so mirror it here (bump if the seed changes the field size).
+SEED_INPROG_FIELD = 5
+seeded_shaped_inprog = False
+if inprog == expected_in_progress == 1:
+    cid = inprog_rows[0][0]
+    n_scores  = c.execute("SELECT COUNT(*) FROM scores WHERE cup_id=?", (cid,)).fetchone()[0]
+    n_players = c.execute("SELECT COUNT(*) FROM cup_players WHERE cup_id=?", (cid,)).fetchone()[0]
+    n_races   = c.execute("SELECT COUNT(*) FROM races WHERE cup_id=?", (cid,)).fetchone()[0]
+    seeded_shaped_inprog = (n_scores == 0 and n_players == SEED_INPROG_FIELD
+                            and n_races == len(seed_mod.IN_PROGRESS_MAPS))
+
+matches_seed_baseline = (
+    live == expected
+    and live_names == expected_names
+    and inprog == expected_in_progress
+    and seeded_shaped_inprog
+)
+
 print("DB_PATH =", db)
-print("in_progress cups =", n)
+print("in_progress cups =", inprog)
+print("live   =", live, "names:", sorted(live_names))
+print("expect =", expected, "names:", sorted(expected_names))
+print("seeded-shaped in-progress cup =", seeded_shaped_inprog)
+
+# --- Guardrail 2 decision. ---
+if inprog == 0:
+    print("SAFE: no in-progress cup — proceed.")
+elif matches_seed_baseline:
+    print("SAFE: DB exactly matches the deterministic seed baseline "
+          "(leftover from a prior cleanup reseed) — proceed.")
+else:
+    print("ABORT: staging state does not match the seed baseline and has a live "
+          "in-progress cup — a human may be mid-session. Do NOT reseed or attack.")
+    sys.exit(3)
 PY
 ```
 
 - If the assert fails (not a staging DB) → **ABORT** (guardrail 1).
-- If `in_progress cups` is **not 0** → **ABORT** (guardrail 2 — someone's using
-  staging).
+- If the snippet prints **ABORT** / exits non-zero → **ABORT** (guardrail 2 — a
+  real human session may be live). Only proceed on a `SAFE:` line.
 
-Only if clear, reseed to the known deterministic state (6 fake players, 11
-completed + 1 in-progress fake cup):
+Only if clear, reseed to the known deterministic state (the seed's fake-player
+roster; 11 completed + 1 in-progress fake cup):
 
 ```bash
 $COMPOSE exec -T staging-app python scripts/seed_staging.py --reset
@@ -182,11 +281,17 @@ coverage; assume the freshest change is the weakest.
 ### 3a. Discover the staging-vs-prod diff
 
 On the box, prod (`app`) and staging (`staging-app`) build from the same repo at
-`/home/graham/km-tracker`, but staging is usually deployed from a feature branch /
+`<BOX_REPO_PATH>`, but staging is usually deployed from a feature branch /
 newer commit. Establish the delta from three angles; use whichever resolves.
 
+> **Primary method is the host-checkout branch delta (i) below.** The container
+> `git rev-parse` cross-check (ii) is **best-effort only** — `git` is **not
+> installed in the app image**, so those in-container calls usually fail (they
+> already carry `2>/dev/null` + a fallback). Don't rely on them; lead with the
+> host-checkout diff.
+
 ```bash
-cd /home/graham/km-tracker
+cd <BOX_REPO_PATH>
 COMPOSE="docker compose -f docker-compose.yml -f docker-compose.access.yml -f docker-compose.staging.yml"
 git fetch origin --quiet
 
@@ -395,7 +500,7 @@ and fixes.
 Always, even if the sweep errored partway:
 
 ```bash
-cd /home/graham/km-tracker
+cd <BOX_REPO_PATH>
 COMPOSE="docker compose -f docker-compose.yml -f docker-compose.access.yml -f docker-compose.staging.yml"
 
 # 1. Tear down the throwaway QA container.
