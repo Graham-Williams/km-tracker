@@ -163,6 +163,57 @@ as defense-in-depth (full operator docs in `DEPLOY.md` → "Public access harden
 Dependency added for JWT verification: **`PyJWT[crypto]`** (in `requirements.txt`,
 so it ships in the Docker image). Config env vars are documented in `.env.example`.
 
+### Hardening test coverage
+
+Both hooks have dedicated offline unit tests (no network; a real RS256 keypair
+is generated in-process and the JWKS fetch is monkeypatched):
+
+- `tests/test_cf_access.py` — CF Access JWT verification: valid/expired/wrong-aud/
+  wrong-issuer/bad-signature/malformed/kid-less/HS256-confusion tokens, static
+  exemption, JWKS caching + unknown-`kid` throttling + key rotation + fail-closed.
+- `tests/test_csrf.py` — Origin/Referer pinning: matching vs. cross-origin,
+  `null` Origin, port mismatch, `APP_HOST`/`APP_ORIGIN` pinning, safe methods,
+  JSON endpoints, kill switch.
+- `tests/test_hostile_input.py` — malformed/hostile input on the main POST
+  endpoints. Bad input must return a 4xx / flash+redirect, never a 500, and
+  never persist bad state. **The input-validation bugs it documents (BUG-1 …
+  BUG-10, listed in the module docstring) are now FIXED** — all cases pass as
+  ordinary tests (no `xfail` remaining). The hardening in `app.py`:
+  - `parse_int_field()` + the `InvalidInput` exception centralize "parse a form
+    field to a valid int or reject cleanly." It calls `int()` (catches
+    non-numeric) and range-checks against SQLite's signed 64-bit INTEGER
+    (`SQLITE_MIN_INT`/`SQLITE_MAX_INT`) so an oversized value is rejected with a
+    400/flash instead of raising `OverflowError` mid-transaction.
+  - `parse_scores_from_form()` raises `InvalidInput` on a bad `player_ids[]` /
+    `scores[]`; `create_cup`, `update_cup`, and `cup_session_submit` catch it
+    (closing their conn first where one is open) and flash+redirect.
+  - `create_score` / `update_score` / `update_player` validate ids/scores/line
+    via `parse_int_field` before binding, and always close the connection on the
+    error path.
+  - `cup_session_create` validates `player_ids[]` **before** the cup INSERT and
+    wraps the write in `try/finally: conn.close()`, so a bad id can no longer
+    leak an open write transaction (the old "database is locked" bug).
+  - JSON endpoints type-check scalars: `half-veto` rejects a non-scalar
+    `player_id` (list/dict) with 400; `next-race` requires `map` to be a
+    non-empty string. Both previously raised `sqlite3.InterfaceError` → 500.
+  - **Round 2 (security-review follow-ups, F1–F4 in the module docstring):**
+    - **F1** `half-veto` also RANGE-checks `player_id` via `parse_int_field`
+      (type-only guard let an out-of-range int reach the bind → `OverflowError`
+      500) and now wraps all DB work in `try/finally: conn.close()`.
+    - **F2** `checked_line_score(score, line)` validates the SUM (`line_score`)
+      against `SQLITE_MIN/MAX_INT`. Two in-range operands can still overflow;
+      it's called in `parse_scores_from_form` and `create_score`/`update_score`
+      so the sum can no longer 500 at bind time.
+    - **F3** `update_cup` (empty/invalid date), `update_player` (empty name),
+      and `update_score` (empty score) error paths now close their connection.
+    - **F4** `app.config["MAX_CONTENT_LENGTH"] = 256 KB` caps request bodies
+      (→ 413), and `parse_scores_from_form` rejects lists longer than
+      `MAX_SCORE_ROWS` (50) — oversized-input DoS flank.
+- `tests/test_session_flow_abuse.py` — out-of-order/double-submit session
+  flows: double score submit (no duplicate scores / double line adjustments),
+  acting on completed/cancelled cups, veto/race counters never exceed limits,
+  duplicate race-number conflict, skipped steps.
+
 ## UI / Design System
 
 As of the `feature/ui-makeover` work, the app has a shared design system instead of per-template inline `<style>` blocks.
