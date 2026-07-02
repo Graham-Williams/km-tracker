@@ -196,6 +196,19 @@ is generated in-process and the JWKS fetch is monkeypatched):
   - JSON endpoints type-check scalars: `half-veto` rejects a non-scalar
     `player_id` (list/dict) with 400; `next-race` requires `map` to be a
     non-empty string. Both previously raised `sqlite3.InterfaceError` → 500.
+  - **Round 2 (security-review follow-ups, F1–F4 in the module docstring):**
+    - **F1** `half-veto` also RANGE-checks `player_id` via `parse_int_field`
+      (type-only guard let an out-of-range int reach the bind → `OverflowError`
+      500) and now wraps all DB work in `try/finally: conn.close()`.
+    - **F2** `checked_line_score(score, line)` validates the SUM (`line_score`)
+      against `SQLITE_MIN/MAX_INT`. Two in-range operands can still overflow;
+      it's called in `parse_scores_from_form` and `create_score`/`update_score`
+      so the sum can no longer 500 at bind time.
+    - **F3** `update_cup` (empty/invalid date), `update_player` (empty name),
+      and `update_score` (empty score) error paths now close their connection.
+    - **F4** `app.config["MAX_CONTENT_LENGTH"] = 256 KB` caps request bodies
+      (→ 413), and `parse_scores_from_form` rejects lists longer than
+      `MAX_SCORE_ROWS` (50) — oversized-input DoS flank.
 - `tests/test_session_flow_abuse.py` — out-of-order/double-submit session
   flows: double score submit (no duplicate scores / double line adjustments),
   acting on completed/cancelled cups, veto/race counters never exceed limits,

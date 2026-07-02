@@ -26,6 +26,15 @@ CASES COVERED HERE (previously -> 500, now handled gracefully):
   BUG-8  POST /cup-session/<id>/half-veto: JSON player_id of non-scalar type
   BUG-9  POST /cup-session/<id>/next-race: JSON map of non-string type
   BUG-10 POST /players/<id>/edit: line > 2**63-1 (SQLite INTEGER overflow)
+
+ROUND 2 (security-review follow-ups, see the section at the bottom):
+  F1  POST /cup-session/<id>/half-veto: JSON player_id in range-check gap
+      (type-checked, not range-checked) -> OverflowError 500 + leaked conn
+  F2  score + line SUMS overflow SQLite INTEGER even when both operands are
+      in range (POST /cups, /scores, /scores/<id>/edit, session complete)
+  F3  residual connection leaks on update_player / update_cup / update_score
+      early-return error paths
+  F4  no MAX_CONTENT_LENGTH and no list-length cap -> oversized-input DoS flank
 """
 
 from db import get_connection
@@ -385,3 +394,129 @@ def test_next_race_non_string_map_rejected_gracefully(client):
     response = client.post(f"/cup-session/{cup_id}/next-race", json={"map": {"nested": "object"}})
     assert 400 <= response.status_code < 500
     assert _count("races") == 0
+
+
+# =============================================================================
+# Hardening round 2 (security-review follow-ups): range checks on JSON ints,
+# overflow of derived sums, residual connection leaks, oversized-input DoS.
+# =============================================================================
+
+
+def test_half_veto_out_of_range_player_id_rejected_not_500(client):
+    # F1: the half-veto guard was type-only (rejected bool/non-scalar) but did
+    # NOT range-check. A JSON player_id past SQLite's INTEGER range slipped
+    # through, then raised OverflowError at bind time (a 500) and leaked the
+    # open connection. It must now be a clean 4xx...
+    cup_id = _start_session(client)
+    response = client.post(
+        f"/cup-session/{cup_id}/half-veto", json={"player_id": 2**63}
+    )
+    assert 400 <= response.status_code < 500
+    assert _count("cup_players", "half_veto_count != 0") == 0
+    # ...and the endpoint must not be wedged: a legit half-veto still succeeds.
+    ok = client.post(f"/cup-session/{cup_id}/half-veto", json={"player_id": 1})
+    assert ok.status_code == 200
+
+
+def test_cup_score_plus_line_sum_overflow_rejected(client):
+    # F2: both operands fit SQLite's INTEGER range individually, but their SUM
+    # (line_score = score + line) overflows ±2**63. The old code bound the sum
+    # directly and 500'd; it must now be rejected up front as a clean 4xx.
+    create_player(client, "Alice")
+    response = client.post(
+        "/cups",
+        data={
+            "date": "2026-03-15T20:00",
+            "player_ids[]": ["1"],
+            "scores[]": [str(2**63 - 1)],  # max in-range score
+            "lines[]": ["1"],              # in-range line; sum = 2**63 -> overflow
+        },
+        follow_redirects=True,
+    )
+    assert response.status_code < 500
+    assert _count("cups") == 0
+    assert _count("scores") == 0
+
+
+def test_create_score_line_sum_overflow_rejected(client):
+    # F2: same overflow via POST /scores, where the line comes from the player
+    # record. Bob carries a max-range line; a tiny score pushes the sum over.
+    _make_completed_cup(client)  # Alice(1), Bob(2); cup 1 holds player 1's score
+    client.post(
+        "/players/2/edit",
+        data={"name": "Bob", "has_line": "on", "line": str(2**63 - 1)},
+        follow_redirects=True,
+    )
+    response = client.post(
+        "/scores",
+        data={"cup_id": "1", "player_id": "2", "score": "1"},
+        follow_redirects=True,
+    )
+    assert response.status_code < 500
+    assert _count("scores", "player_id = 2") == 0
+
+
+def test_update_player_empty_name_does_not_wedge_connection(client):
+    # F3: the empty-name error path returned without closing the connection.
+    # Hammer it, then confirm a subsequent legit write still succeeds.
+    create_player(client, "Alice")
+    for _ in range(5):
+        bad = client.post("/players/1/edit", data={"name": "   "}, follow_redirects=True)
+        assert bad.status_code == 200
+    ok = client.post("/players/1/edit", data={"name": "Alicia"}, follow_redirects=True)
+    assert ok.status_code == 200
+    conn = get_connection()
+    row = conn.execute("SELECT name FROM players WHERE id = 1").fetchone()
+    conn.close()
+    assert row["name"] == "Alicia"
+
+
+def test_update_cup_bad_date_paths_do_not_wedge_connection(client):
+    # F3: update_cup's empty-date and invalid-date error paths both returned
+    # without closing the connection. Exercise both, then confirm a legit cup
+    # edit (a write) still lands.
+    create_player(client, "Alice")
+    client.post(
+        "/cups",
+        data={"date": "2026-03-15T20:00", "player_ids[]": ["1"], "scores[]": ["50"], "lines[]": ["0"]},
+    )
+    for _ in range(5):
+        client.post("/cups/1/edit", data={"date": ""}, follow_redirects=True)
+        client.post("/cups/1/edit", data={"date": "junk"}, follow_redirects=True)
+    ok = client.post(
+        "/cups/1/edit",
+        data={"date": "2026-04-01T18:00", "player_ids[]": ["1"], "scores[]": ["77"], "lines[]": ["0"]},
+        follow_redirects=True,
+    )
+    assert ok.status_code == 200
+    conn = get_connection()
+    row = conn.execute("SELECT score FROM scores WHERE cup_id = 1").fetchone()
+    conn.close()
+    assert row["score"] == 77
+
+
+def test_oversized_request_body_rejected(client):
+    # F4: MAX_CONTENT_LENGTH caps the body so an oversized POST is a clean 413
+    # instead of an unbounded in-memory read.
+    big = "A" * (300 * 1024)  # 300 KB > 256 KB cap
+    response = client.post("/players", data={"name": big})
+    assert response.status_code == 413
+    assert _count("players") == 0
+
+
+def test_absurd_player_list_length_rejected(client):
+    # F4: a list far longer than any real cup (> MAX_SCORE_ROWS) is rejected as
+    # a clean 4xx and nothing is persisted.
+    n = 60  # > MAX_SCORE_ROWS (50)
+    response = client.post(
+        "/cups",
+        data={
+            "date": "2026-03-15T20:00",
+            "player_ids[]": [str(i) for i in range(1, n + 1)],
+            "scores[]": [str(i) for i in range(1, n + 1)],
+            "lines[]": ["0"] * n,
+        },
+        follow_redirects=True,
+    )
+    assert response.status_code < 500
+    assert _count("cups") == 0
