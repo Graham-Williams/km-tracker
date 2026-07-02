@@ -163,6 +163,31 @@ as defense-in-depth (full operator docs in `DEPLOY.md` → "Public access harden
 Dependency added for JWT verification: **`PyJWT[crypto]`** (in `requirements.txt`,
 so it ships in the Docker image). Config env vars are documented in `.env.example`.
 
+### Hardening test coverage
+
+Both hooks have dedicated offline unit tests (no network; a real RS256 keypair
+is generated in-process and the JWKS fetch is monkeypatched):
+
+- `tests/test_cf_access.py` — CF Access JWT verification: valid/expired/wrong-aud/
+  wrong-issuer/bad-signature/malformed/kid-less/HS256-confusion tokens, static
+  exemption, JWKS caching + unknown-`kid` throttling + key rotation + fail-closed.
+- `tests/test_csrf.py` — Origin/Referer pinning: matching vs. cross-origin,
+  `null` Origin, port mismatch, `APP_HOST`/`APP_ORIGIN` pinning, safe methods,
+  JSON endpoints, kill switch.
+- `tests/test_hostile_input.py` — malformed/hostile input on the main POST
+  endpoints. **Contains strict `xfail` tests documenting known input-validation
+  bugs (BUG-1 … BUG-10 in the module docstring): unhandled
+  `ValueError`/`OverflowError`/`sqlite3.InterfaceError` on non-numeric or
+  oversized form/JSON values → 500 in production; one path
+  (`/cup-session/new` with non-numeric `player_ids[]`) also leaks an open
+  write transaction ("database is locked").** When fixing any of these in
+  `app.py`, the matching xfail turns XPASS and will fail the suite — remove
+  the marker as part of the fix.
+- `tests/test_session_flow_abuse.py` — out-of-order/double-submit session
+  flows: double score submit (no duplicate scores / double line adjustments),
+  acting on completed/cancelled cups, veto/race counters never exceed limits,
+  duplicate race-number conflict, skipped steps.
+
 ## UI / Design System
 
 As of the `feature/ui-makeover` work, the app has a shared design system instead of per-template inline `<style>` blocks.
