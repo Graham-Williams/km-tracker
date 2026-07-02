@@ -333,8 +333,9 @@ def update_player(player_id):
     has_line = request.form.get("has_line") == "on"
     line = request.form.get("line", "0").strip()
     try:
-        line = int(line)
+        line = parse_int_field(line)
     except ValueError:
+        conn.close()
         flash("Line must be a number.")
         return redirect(url_for("edit_player", player_id=player_id))
     if not has_line:
@@ -429,7 +430,11 @@ def create_cup():
     else:
         date_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:00")
 
-    scores_data = parse_scores_from_form(request.form)
+    try:
+        scores_data = parse_scores_from_form(request.form)
+    except InvalidInput as e:
+        flash(str(e))
+        return redirect(url_for("new_cup"))
     if not scores_data:
         flash("A cup must have at least one player with a score.")
         return redirect(url_for("new_cup"))
@@ -535,13 +540,19 @@ def update_cup(cup_id):
         flash("Invalid date format.")
         return redirect(url_for("edit_cup", cup_id=cup_id))
 
-    scores_data = parse_scores_from_form(request.form)
+    try:
+        scores_data = parse_scores_from_form(request.form)
+    except InvalidInput as e:
+        conn.close()
+        flash(str(e))
+        return redirect(url_for("edit_cup", cup_id=cup_id))
     if scores_data:
         for s in scores_data:
             s["line_score"] = s["score"] + s["line"]
         lines_by_id = {s["player_id"]: s["line"] for s in scores_data}
         error = validate_scores(scores_data, lines_by_id)
         if error:
+            conn.close()
             flash(error)
             return redirect(url_for("edit_cup", cup_id=cup_id))
 
@@ -600,12 +611,42 @@ def validate_scores(scores_data, lines_by_id=None):
     return None
 
 
+# SQLite stores INTEGER as a signed 64-bit value. Anything outside this range
+# raises OverflowError when bound as a query parameter, so we reject it up front.
+SQLITE_MIN_INT = -(2**63)
+SQLITE_MAX_INT = 2**63 - 1
+
+
+class InvalidInput(Exception):
+    """Raised when hostile/malformed form input can't be parsed into valid data.
+
+    Views catch this and turn it into a flash + redirect (a clean 4xx-style
+    response) instead of letting a ValueError/OverflowError bubble up as a 500.
+    """
+
+
+def parse_int_field(raw):
+    """Parse a form value into an int that fits SQLite's signed 64-bit range.
+
+    Raises ValueError on non-numeric input (from int()) or on a value outside
+    the range SQLite's INTEGER column can hold (which would otherwise raise
+    OverflowError only later, mid-transaction, at parameter-binding time).
+    """
+    value = int(raw)
+    if not (SQLITE_MIN_INT <= value <= SQLITE_MAX_INT):
+        raise ValueError("integer out of range for SQLite INTEGER")
+    return value
+
+
 def parse_scores_from_form(form):
     """Extract score data from form submission.
 
     Expects form fields: player_ids[], scores[], lines[] (optional), tiebreakers[] (list of player_ids).
     Returns list of dicts with keys: player_id, score, line, won_tiebreaker.
     Skips players with empty score fields.
+
+    Raises InvalidInput if a player_id or score is non-numeric or out of the
+    SQLite INTEGER range, so callers can reject the request cleanly.
     """
     player_ids = form.getlist("player_ids[]")
     raw_scores = form.getlist("scores[]")
@@ -618,13 +659,19 @@ def parse_scores_from_form(form):
             continue
         line_val = 0
         if i < len(lines) and lines[i].strip() != "":
+            # Lenient: an unparseable / out-of-range line is treated as no line.
             try:
-                line_val = int(lines[i].strip())
+                line_val = parse_int_field(lines[i].strip())
             except ValueError:
-                pass
+                line_val = 0
+        try:
+            player_id = parse_int_field(pid)
+            score = parse_int_field(raw)
+        except ValueError:
+            raise InvalidInput("Player IDs and scores must be valid whole numbers.")
         scores_data.append({
-            "player_id": int(pid),
-            "score": int(raw),
+            "player_id": player_id,
+            "score": score,
             "line": line_val,
             "won_tiebreaker": str(pid) in tiebreaker_ids,
         })
@@ -783,16 +830,24 @@ def create_score():
         flash("Cup, player, and score are required.")
         return redirect(url_for("scores"))
 
+    try:
+        cup_id = parse_int_field(cup_id)
+        player_id = parse_int_field(player_id)
+        score = parse_int_field(score)
+    except ValueError:
+        flash("Cup, player, and score must be valid whole numbers.")
+        return redirect(url_for("scores"))
+
     conn = get_connection()
     try:
         player = conn.execute(
-            "SELECT line FROM players WHERE id = ?", (int(player_id),)
+            "SELECT line FROM players WHERE id = ?", (player_id,)
         ).fetchone()
         player_line = player["line"] if player else 0
-        line_score_val = int(score) + player_line
+        line_score_val = score + player_line
         conn.execute(
             "INSERT INTO scores (cup_id, player_id, score, line, line_score, won_tiebreaker) VALUES (?, ?, ?, ?, ?, ?)",
-            (int(cup_id), int(player_id), int(score), player_line, line_score_val, won_tiebreaker or None),
+            (cup_id, player_id, score, player_line, line_score_val, won_tiebreaker or None),
         )
         conn.commit()
     except sqlite3.IntegrityError:
@@ -833,14 +888,21 @@ def update_score(score_id):
         return redirect(url_for("edit_score", score_id=score_id))
 
     try:
+        score_int = parse_int_field(score_val)
+    except ValueError:
+        conn.close()
+        flash("Score must be a valid whole number.")
+        return redirect(url_for("edit_score", score_id=score_id))
+
+    try:
         player = conn.execute(
             "SELECT line FROM players WHERE id = ?", (existing["player_id"],)
         ).fetchone()
         player_line = player["line"] if player else 0
-        line_score_val = int(score_val) + player_line
+        line_score_val = score_int + player_line
         conn.execute(
             "UPDATE scores SET score = ?, line = ?, line_score = ?, won_tiebreaker = ? WHERE id = ?",
-            (int(score_val), player_line, line_score_val, won_tiebreaker or None, score_id),
+            (score_int, player_line, line_score_val, won_tiebreaker or None, score_id),
         )
         conn.commit()
     finally:
@@ -898,6 +960,16 @@ def cup_session_create():
         flash("Select at least one player.")
         return redirect(url_for("cup_session_new"))
 
+    # Validate player ids BEFORE opening a write transaction. Doing the int()
+    # parse inside the transaction (after the cup INSERT) meant a bad id threw
+    # mid-transaction and leaked an open, uncommitted connection -> later writes
+    # on the worker hit "database is locked".
+    try:
+        player_id_ints = [parse_int_field(pid) for pid in player_ids]
+    except ValueError:
+        flash("Invalid player selection.")
+        return redirect(url_for("cup_session_new"))
+
     edition = request.form.get("game_edition", DEFAULT_EDITION)
     if edition not in TRACK_SETS:
         edition = DEFAULT_EDITION
@@ -910,17 +982,17 @@ def cup_session_create():
             (date_utc, edition),
         )
         cup_id = cursor.lastrowid
-        for pid in player_ids:
+        for pid in player_id_ints:
             conn.execute(
                 "INSERT INTO cup_players (cup_id, player_id) VALUES (?, ?)",
-                (cup_id, int(pid)),
+                (cup_id, pid),
             )
         conn.commit()
     except sqlite3.IntegrityError:
         flash("Could not create cup session.")
-        conn.close()
         return redirect(url_for("cup_session_new"))
-    conn.close()
+    finally:
+        conn.close()
     return redirect(url_for("cup_session_race", cup_id=cup_id))
 
 
@@ -1017,6 +1089,11 @@ def cup_session_half_veto(cup_id):
         return jsonify({"error": "Cup not found"}), 404
 
     if player_id is not None:
+        # Only scalar values can be bound as a SQL parameter; a JSON list/dict
+        # would raise sqlite3.InterfaceError. Reject non-scalar types cleanly.
+        if isinstance(player_id, bool) or not isinstance(player_id, (int, str)):
+            conn.close()
+            return jsonify({"error": "Invalid player_id"}), 400
         cp = conn.execute(
             "SELECT half_veto_count FROM cup_players WHERE cup_id = ? AND player_id = ?",
             (cup_id, player_id),
@@ -1070,7 +1147,9 @@ def cup_session_voto(cup_id):
 def cup_session_next_race(cup_id):
     data = request.get_json()
     map_name = data.get("map") if data else None
-    if not map_name:
+    # Must be a non-empty string: a non-scalar (list/dict) would raise
+    # sqlite3.InterfaceError when bound as a parameter.
+    if not isinstance(map_name, str) or not map_name.strip():
         return jsonify({"error": "Map name required"}), 400
 
     conn = get_connection()
@@ -1189,7 +1268,12 @@ def cup_session_submit(cup_id):
     else:
         date_utc = None
 
-    scores_data = parse_scores_from_form(request.form)
+    try:
+        scores_data = parse_scores_from_form(request.form)
+    except InvalidInput as e:
+        conn.close()
+        flash(str(e))
+        return redirect(url_for("cup_session_complete", cup_id=cup_id))
     if not scores_data:
         flash("At least one player must have a score.")
         conn.close()

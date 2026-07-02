@@ -175,14 +175,27 @@ is generated in-process and the JWKS fetch is monkeypatched):
   `null` Origin, port mismatch, `APP_HOST`/`APP_ORIGIN` pinning, safe methods,
   JSON endpoints, kill switch.
 - `tests/test_hostile_input.py` — malformed/hostile input on the main POST
-  endpoints. **Contains strict `xfail` tests documenting known input-validation
-  bugs (BUG-1 … BUG-10 in the module docstring): unhandled
-  `ValueError`/`OverflowError`/`sqlite3.InterfaceError` on non-numeric or
-  oversized form/JSON values → 500 in production; one path
-  (`/cup-session/new` with non-numeric `player_ids[]`) also leaks an open
-  write transaction ("database is locked").** When fixing any of these in
-  `app.py`, the matching xfail turns XPASS and will fail the suite — remove
-  the marker as part of the fix.
+  endpoints. Bad input must return a 4xx / flash+redirect, never a 500, and
+  never persist bad state. **The input-validation bugs it documents (BUG-1 …
+  BUG-10, listed in the module docstring) are now FIXED** — all cases pass as
+  ordinary tests (no `xfail` remaining). The hardening in `app.py`:
+  - `parse_int_field()` + the `InvalidInput` exception centralize "parse a form
+    field to a valid int or reject cleanly." It calls `int()` (catches
+    non-numeric) and range-checks against SQLite's signed 64-bit INTEGER
+    (`SQLITE_MIN_INT`/`SQLITE_MAX_INT`) so an oversized value is rejected with a
+    400/flash instead of raising `OverflowError` mid-transaction.
+  - `parse_scores_from_form()` raises `InvalidInput` on a bad `player_ids[]` /
+    `scores[]`; `create_cup`, `update_cup`, and `cup_session_submit` catch it
+    (closing their conn first where one is open) and flash+redirect.
+  - `create_score` / `update_score` / `update_player` validate ids/scores/line
+    via `parse_int_field` before binding, and always close the connection on the
+    error path.
+  - `cup_session_create` validates `player_ids[]` **before** the cup INSERT and
+    wraps the write in `try/finally: conn.close()`, so a bad id can no longer
+    leak an open write transaction (the old "database is locked" bug).
+  - JSON endpoints type-check scalars: `half-veto` rejects a non-scalar
+    `player_id` (list/dict) with 400; `next-race` requires `map` to be a
+    non-empty string. Both previously raised `sqlite3.InterfaceError` → 500.
 - `tests/test_session_flow_abuse.py` — out-of-order/double-submit session
   flows: double score submit (no duplicate scores / double line adjustments),
   acting on completed/cancelled cups, veto/race counters never exceed limits,

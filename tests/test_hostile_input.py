@@ -6,36 +6,27 @@ never a 500, and must not persist bad state.
 Note on mechanics: the client fixture runs with TESTING=True, so an unhandled
 exception in a view propagates into the test instead of rendering a 500 page.
 A test that dies with ValueError/OverflowError/InterfaceError therefore
-corresponds to a 500 Internal Server Error in production. Those cases are
-real app bugs and are marked xfail (strict) below — do not "fix" the tests;
-fix the app and the xfails will flag as XPASS.
+corresponds to a 500 Internal Server Error in production.
 
-KNOWN BUGS COVERED HERE (each -> 500 in production):
-  BUG-1  POST /cups: non-numeric scores[] -> ValueError in
-         parse_scores_from_form (int(raw), app.py ~627)
-  BUG-2  POST /cups: non-numeric player_ids[] -> ValueError (int(pid),
-         app.py ~626)
-  BUG-3  POST /cups: score > 2**63-1 -> OverflowError binding to SQLite,
-         raised mid-transaction (leaks an open write transaction)
-  BUG-4  POST /scores: non-numeric score / cup_id / player_id -> ValueError
-         (int() calls in create_score, app.py ~789-795)
-  BUG-5  POST /scores/<id>/edit: non-numeric score -> ValueError
-         (int(score_val) in update_score, app.py ~840)
-  BUG-6  POST /cup-session/new: non-numeric player_ids[] -> ValueError
-         (int(pid), app.py ~916) — ALSO leaks an open write transaction
-         (cup INSERT happened, conn never closed), so subsequent writes on
-         that worker hit "database is locked"
-  BUG-7  POST /cup-session/<id>/complete: non-numeric scores[] -> ValueError
-         (same parse_scores_from_form path as BUG-1)
+HARDENING HISTORY: the cases below (BUG-1 .. BUG-10) previously produced a 500
+in production and were marked xfail. They have since been fixed in app.py by
+defensive parsing (parse_int_field / InvalidInput), SQLite-INTEGER range
+checks, JSON scalar/type validation, and always-close connection handling.
+These are now ordinary passing tests that assert the hardened behavior.
+
+CASES COVERED HERE (previously -> 500, now handled gracefully):
+  BUG-1  POST /cups: non-numeric scores[]
+  BUG-2  POST /cups: non-numeric player_ids[]
+  BUG-3  POST /cups: score > 2**63-1 (SQLite INTEGER overflow, mid-transaction)
+  BUG-4  POST /scores: non-numeric score / cup_id / player_id
+  BUG-5  POST /scores/<id>/edit: non-numeric score
+  BUG-6  POST /cup-session/new: non-numeric player_ids[] (also used to leak an
+         open write transaction -> "database is locked" on later writes)
+  BUG-7  POST /cup-session/<id>/complete: non-numeric scores[]
   BUG-8  POST /cup-session/<id>/half-veto: JSON player_id of non-scalar type
-         (e.g. a list) -> sqlite3.InterfaceError binding the parameter
   BUG-9  POST /cup-session/<id>/next-race: JSON map of non-string type
-         (e.g. an object) -> sqlite3.InterfaceError binding the parameter
-  BUG-10 POST /players/<id>/edit: line > 2**63-1 passes the int() check but
-         -> OverflowError binding to SQLite
+  BUG-10 POST /players/<id>/edit: line > 2**63-1 (SQLite INTEGER overflow)
 """
-
-import pytest
 
 from db import get_connection
 from helpers import create_player
@@ -108,10 +99,6 @@ def test_player_id_non_integer_in_url_404(client):
     assert client.post("/players/abc/edit", data={"name": "x"}).status_code == 404
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG-10: huge line value passes int() but overflows SQLite INTEGER -> 500",
-)
 def test_update_player_huge_line_rejected_gracefully(client):
     create_player(client, "Alice")
     response = client.post(
@@ -188,10 +175,6 @@ def test_update_nonexistent_cup_404(client):
     assert client.post("/cups/424242/edit", data={"date": "2026-03-15T20:00"}).status_code == 404
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG-1: non-numeric scores[] -> ValueError in parse_scores_from_form -> 500",
-)
 def test_cup_non_numeric_score_rejected_gracefully(client):
     create_player(client, "Alice")
     response = client.post(
@@ -203,10 +186,6 @@ def test_cup_non_numeric_score_rejected_gracefully(client):
     assert _count("cups") == 0
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG-2: non-numeric player_ids[] -> ValueError in parse_scores_from_form -> 500",
-)
 def test_cup_non_numeric_player_id_rejected_gracefully(client):
     create_player(client, "Alice")
     response = client.post(
@@ -218,10 +197,6 @@ def test_cup_non_numeric_player_id_rejected_gracefully(client):
     assert _count("cups") == 0
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG-3: score beyond SQLite INTEGER range -> OverflowError mid-transaction -> 500",
-)
 def test_cup_score_beyond_sqlite_integer_rejected_gracefully(client):
     create_player(client, "Alice")
     response = client.post(
@@ -284,10 +259,6 @@ def test_update_nonexistent_score_404(client):
     assert client.post("/scores/424242/edit", data={"score": "5"}).status_code == 404
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG-4: non-numeric score -> ValueError in create_score -> 500",
-)
 def test_score_non_numeric_score_rejected_gracefully(client):
     _make_completed_cup(client)
     response = client.post(
@@ -297,10 +268,6 @@ def test_score_non_numeric_score_rejected_gracefully(client):
     assert _count("scores") == 1
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG-4: non-numeric cup_id -> ValueError in create_score -> 500",
-)
 def test_score_non_numeric_cup_id_rejected_gracefully(client):
     _make_completed_cup(client)
     response = client.post(
@@ -310,10 +277,6 @@ def test_score_non_numeric_cup_id_rejected_gracefully(client):
     assert _count("scores") == 1
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG-5: non-numeric score -> ValueError in update_score -> 500",
-)
 def test_update_score_non_numeric_rejected_gracefully(client):
     _make_completed_cup(client)
     response = client.post("/scores/1/edit", data={"score": "abc"}, follow_redirects=True)
@@ -340,13 +303,6 @@ def test_session_create_with_nonexistent_player_not_persisted(client):
     assert _count("cup_players") == 0
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "BUG-6: non-numeric player_ids[] -> ValueError in cup_session_create -> 500; "
-        "also leaks an open write transaction (cup INSERT uncommitted, conn not closed)"
-    ),
-)
 def test_session_create_non_numeric_player_id_rejected_gracefully(client):
     create_player(client, "Alice")
     response = client.post(
@@ -356,10 +312,6 @@ def test_session_create_non_numeric_player_id_rejected_gracefully(client):
     assert _count("cups", "status = 'in_progress'") == 0
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG-7: non-numeric scores[] on session submit -> ValueError (parse_scores_from_form) -> 500",
-)
 def test_session_submit_non_numeric_score_rejected_gracefully(client):
     cup_id = _start_session(client)
     response = client.post(
@@ -422,20 +374,12 @@ def test_next_race_absurdly_long_map_name_no_crash(client):
     assert client.get(f"/cup-session/{cup_id}").status_code == 200
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG-8: non-scalar JSON player_id -> sqlite3.InterfaceError binding parameter -> 500",
-)
 def test_half_veto_non_scalar_player_id_rejected_gracefully(client):
     cup_id = _start_session(client)
     response = client.post(f"/cup-session/{cup_id}/half-veto", json={"player_id": [1]})
     assert 400 <= response.status_code < 500
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG-9: non-string JSON map -> sqlite3.InterfaceError binding parameter -> 500",
-)
 def test_next_race_non_string_map_rejected_gracefully(client):
     cup_id = _start_session(client)
     response = client.post(f"/cup-session/{cup_id}/next-race", json={"map": {"nested": "object"}})
