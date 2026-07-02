@@ -35,3 +35,27 @@ def test_staging_prefix_applies_to_overridden_titles(client, monkeypatch):
     monkeypatch.setattr(app_module, "IS_STAGING", True)
     response = client.get("/cups")
     assert "<title>[STG] Cups — KM Tracker</title>" in response.get_data(as_text=True)
+
+
+FAVICON_FILES = [
+    "favicon{}.ico",
+    "favicon-32x32{}.png",
+    "android-chrome-192x192{}.png",
+    "apple-touch-icon{}.png",
+]
+
+
+def test_favicons_default_in_production(client):
+    html = client.get("/").get_data(as_text=True)
+    for template in FAVICON_FILES:
+        assert template.format("") in html
+        assert template.format("-staging") not in html
+
+
+def test_favicons_staging_variants_in_staging(client, monkeypatch):
+    monkeypatch.setattr(app_module, "APP_ENV", "staging")
+    monkeypatch.setattr(app_module, "IS_STAGING", True)
+    html = client.get("/").get_data(as_text=True)
+    for template in FAVICON_FILES:
+        assert template.format("-staging") in html
+        assert template.format("") not in html

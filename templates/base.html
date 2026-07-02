@@ -14,10 +14,12 @@
       })();
     </script>
     <title>{% if is_staging %}[STG] {% endif %}{% block title %}KM Tracker{% endblock %}</title>
-    <link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}" sizes="16x16 32x32 48x48">
-    <link rel="icon" type="image/png" sizes="32x32" href="{{ url_for('static', filename='favicon-32x32.png') }}">
-    <link rel="icon" type="image/png" sizes="192x192" href="{{ url_for('static', filename='android-chrome-192x192.png') }}">
-    <link rel="apple-touch-icon" href="{{ url_for('static', filename='apple-touch-icon.png') }}">
+    {# Env-specific favicons: Baby Peach on staging, Spiny Shell on prod/default. #}
+    {% set icon_suffix = '-staging' if is_staging else '' %}
+    <link rel="icon" href="{{ url_for('static', filename='favicon' ~ icon_suffix ~ '.ico') }}" sizes="16x16 32x32 48x48">
+    <link rel="icon" type="image/png" sizes="32x32" href="{{ url_for('static', filename='favicon-32x32' ~ icon_suffix ~ '.png') }}">
+    <link rel="icon" type="image/png" sizes="192x192" href="{{ url_for('static', filename='android-chrome-192x192' ~ icon_suffix ~ '.png') }}">
+    <link rel="apple-touch-icon" href="{{ url_for('static', filename='apple-touch-icon' ~ icon_suffix ~ '.png') }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/app.css') }}">
     {% block styles %}{% endblock %}
 </head>
