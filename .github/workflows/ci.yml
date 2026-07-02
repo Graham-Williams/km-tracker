@@ -18,7 +18,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r requirements-dev.txt
 
       - name: Install Playwright browsers
         run: playwright install --with-deps chromium
@@ -28,3 +28,61 @@ jobs:
 
       - name: Run e2e tests
         run: pytest tests/e2e/ -v
+
+  docker-e2e:
+    runs-on: ubuntu-latest
+
+    # Production requires these via the `:?` guard in docker-compose.yml. In CI
+    # they're throwaway values: SECRET_KEY just needs to be non-empty, and
+    # TUNNEL_TOKEN only has to satisfy compose interpolation — the cloudflared
+    # service is never started here (we bring up only `app`).
+    env:
+      SECRET_KEY: ci-test-secret
+      TUNNEL_TOKEN: ci-unused
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and start container
+        run: |
+          mkdir -p data
+          # Match the non-root container UID (appuser=10001) so init_db() can
+          # write the bind-mounted SQLite volume. Mirrors the chown step in DEPLOY.md.
+          sudo chown -R 10001:10001 data
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d --build app
+
+      - name: Wait for app readiness
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8080 > /dev/null 2>&1; then
+              echo "App is ready"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "App failed to start"
+          docker compose logs
+          exit 1
+
+      - name: Allow host access to DB volume
+        run: sudo chmod -R a+rw data
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Install Playwright browsers
+        run: playwright install --with-deps chromium
+
+      - name: Run e2e tests against Docker container
+        run: pytest tests/e2e/ -v
+        env:
+          E2E_BASE_URL: http://localhost:8080
+          DB_PATH: ./data/km_tracker.db
+
+      - name: Tear down
+        if: always()
+        run: docker compose down

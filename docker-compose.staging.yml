@@ -1,0 +1,38 @@
+# Staging override — a SECOND app container serving a fake-data playground at
+# staging-km.graham-williams.com, reachable only through the same Cloudflare
+# tunnel as prod (no host port published).
+#
+# NOTE: a single-level subdomain (staging-km, not staging.km) is deliberate —
+# Cloudflare's free Universal SSL cert only covers graham-williams.com and
+# *.graham-williams.com (one label). A two-level host like staging.km.* would
+# need paid Advanced Certificate Manager, so we use staging-km instead.
+#
+# Design:
+#   - Separate DB file on the same ./data volume: km_tracker.staging.db. Prod's
+#     km_tracker.db is never touched by staging.
+#   - Separate Cloudflare Access application, hence a SEPARATE per-app AUD
+#     (STAGING_CF_ACCESS_AUD from the box .env). Do NOT reuse the prod AUD.
+#   - Same compose network as the existing cloudflared, so the tunnel can reach
+#     it at http://staging-app:8080 (set that as the Service on the staging
+#     Public Hostname in the Cloudflare dashboard).
+#
+# Deploy prod + staging together:
+#   docker compose -f docker-compose.yml -f docker-compose.access.yml \
+#     -f docker-compose.staging.yml up -d --build
+#
+# First bring-up seeds the staging DB:
+#   docker compose -f docker-compose.yml -f docker-compose.access.yml \
+#     -f docker-compose.staging.yml exec staging-app \
+#     python scripts/seed_staging.py --reset
+services:
+  staging-app:
+    build: .
+    volumes:
+      - ./data:/data
+    environment:
+      - DB_PATH=/data/km_tracker.staging.db
+      - SECRET_KEY=${SECRET_KEY:?SECRET_KEY must be set}
+      - APP_HOST=${STAGING_APP_HOST:-staging-km.graham-williams.com}
+      - CF_ACCESS_TEAM_DOMAIN=${CF_ACCESS_TEAM_DOMAIN}
+      - CF_ACCESS_AUD=${STAGING_CF_ACCESS_AUD}
+    restart: unless-stopped

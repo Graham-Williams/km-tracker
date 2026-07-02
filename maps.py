@@ -181,8 +181,8 @@ TRACK_SETS = {
 
 # Human-readable labels for display.
 EDITION_LABELS = {
-    "wii": "Mario Kart Wii",
-    "mk8dx": "Mario Kart 8 Deluxe",
+    "wii": "Wii",
+    "mk8dx": "Switch",
 }
 
 DEFAULT_EDITION = "wii"

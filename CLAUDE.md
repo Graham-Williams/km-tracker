@@ -21,6 +21,130 @@ This is a public GitHub repo — keep all committed content professional and gen
 - **Testing:** pytest (Flask test client for unit/integration, Playwright for e2e)
 - **Port:** 8080 (5000 conflicts with macOS AirPlay Receiver)
 - **Network access:** Binds to `0.0.0.0` so other devices on the local network can reach it
+- **Deployment:** Docker container with gunicorn (see `Dockerfile`, `docker-compose.yml`). The `app` container runs as a **non-root user (UID 10001)** and publishes **no host port** — the `cloudflared` connector reaches it over the compose network at `http://app:8080`. Because `./data` is bind-mounted, the host dir must be `chown`'d to UID 10001 before first launch (see `DEPLOY.md`). Local dev still uses `python app.py` directly (debug off by default; set `FLASK_DEBUG=1` to enable). Can be self-hosted on a headless Linux box via Docker + a Cloudflare named tunnel (`cloudflared` service in compose, image pinned to a released tag), gated behind Cloudflare Access. `SECRET_KEY` and `TUNNEL_TOKEN` come from a gitignored `.env` (`cloudflared` reads `TUNNEL_TOKEN` from env, not the command line; see `.env.example`). Full runbook in `DEPLOY.md`
+- **Dependencies:** `requirements.txt` = prod (flask, python-dotenv, gunicorn); `requirements-dev.txt` = prod + test deps (pytest, playwright)
+
+## Self-Hosted Deployment & Backups
+
+The app is self-hosted on a headless Ubuntu Server box ("personalserver"), running
+via Docker Compose. The box **tracks `main`**.
+
+### Deploy procedure (box)
+
+Until the Cloudflare tunnel is fully set up, deploy = pull + rebuild + restart with
+the CI override (which publishes the host port so the box is reachable on the LAN):
+
+```bash
+cd /home/graham/km-tracker
+git pull
+docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d --build app
+```
+
+(Once the tunnel is live, drop the `docker-compose.ci.yml` override — the tunnel
+reaches the app over the internal network and no host port should be published.)
+
+> **DEPLOY-SAFETY RULE — never restart/redeploy while a cup is in progress.**
+> A live cup session is mid-write state (`cups.status = 'in_progress'`). Restarting
+> the container mid-cup can lose or corrupt that session's progress. **Before any
+> restart/redeploy, check that zero cups are in progress and only proceed when the
+> count is 0:**
+>
+> ```bash
+> sqlite3 data/km_tracker.db \
+>   "SELECT COUNT(*) FROM cups WHERE status='in_progress' AND deleted_at IS NULL;"
+> ```
+>
+> If it returns anything other than `0`, do **not** restart — wait until the cup is
+> finished (or coordinate with whoever's running game night).
+
+### Backups
+
+Automated by `scripts/backup.sh` on the **host** (not in the container), driven by
+the `deploy/km-backup.{service,timer}` systemd units:
+
+- **Local snapshots:** consistent SQLite online-backup snapshots into `data/backups/`,
+  deduplicated by sha256, pruned to the newest `LOCAL_RETENTION` (default 100). The
+  timer fires every 5 minutes.
+- **Off-box copies:** pushed to Google Drive via `rclone` on a throttled cadence
+  (only when the DB changed and ≥ `DRIVE_PUSH_INTERVAL_MIN` minutes — default 15 —
+  since the last push), pruned to the newest `DRIVE_RETENTION` (default 50).
+- The local half always runs even if the Drive push can't (rclone unconfigured →
+  reports the error, exits non-zero, but local snapshots are unaffected).
+- Config: gitignored `.env.backup` (template: `.env.backup.example`). **No secrets in
+  the repo** — the rclone OAuth token lives only in `~/.config/rclone/rclone.conf`.
+
+Full setup/runbook (rclone headless auth, systemd install, restore) is in `DEPLOY.md`
+→ "Automated backups".
+
+### Staging environment
+
+A hosted **staging** playground runs at **`staging-km.graham-williams.com`** — a safe
+place to try changes/UI with **fake data only** (no real game-night data). It's a
+**second `app` container** (`staging-app`) on the same box, behind the **same
+Cloudflare tunnel**, but isolated from prod by design:
+
+- **Separate DB:** `data/km_tracker.staging.db` (prod's `km_tracker.db` is never
+  touched). Same `./data` volume; driven purely by the `DB_PATH` env var.
+- **Separate Cloudflare Access app → separate AUD.** Staging has its own Access
+  application, so its own AUD, supplied via the box `.env` as
+  `STAGING_CF_ACCESS_AUD` — **never reuse the prod `CF_ACCESS_AUD`.**
+- Compose override: `docker-compose.staging.yml` (layers on `docker-compose.yml` +
+  `docker-compose.access.yml`). No host port published — reachable only via the tunnel.
+
+Deploy prod + staging together:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.access.yml \
+  -f docker-compose.staging.yml up -d --build
+```
+
+**Reseed staging on demand** (wipes + repopulates fake data; deterministic set of
+6 obviously-fake players + 12 cups incl. one in-progress):
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.access.yml \
+  -f docker-compose.staging.yml exec staging-app \
+  python scripts/seed_staging.py --reset
+```
+
+`scripts/seed_staging.py` has a **hard safety rail**: it refuses to run unless the
+target DB's basename contains `"staging"` (override only with `--force`), so it can
+never wipe the prod DB. The **never-redeploy-mid-cup** rule still applies to the
+prod container. Full runbook (Cloudflare dashboard steps, first bring-up) is in
+`DEPLOY.md` → "Staging environment".
+
+> Note: `docker-compose.access.yml` also wires the prod Access env vars
+> (`APP_HOST`, `CF_ACCESS_TEAM_DOMAIN`, `CF_ACCESS_AUD`) onto the base `app`
+> service, so the prod deploy command is now
+> `docker compose -f docker-compose.yml -f docker-compose.access.yml up -d --build`.
+
+## Security Hardening (public access)
+
+The app is exposed publicly at `km.graham-williams.com` behind a Cloudflare
+tunnel + Cloudflare Access. Two `before_request` hooks in `app.py` back up Access
+as defense-in-depth (full operator docs in `DEPLOY.md` → "Public access hardening"):
+
+- **CSRF — Origin/Referer host check (`csrf_origin_check`).** On every
+  `POST`/`PUT`/`PATCH`/`DELETE`, rejects (403) requests whose `Origin` (else
+  `Referer`) host ≠ the app's own host. Requests with neither header (curl, the
+  Flask **test client**, non-browser callers) are allowed; safe methods are never
+  checked. This covers both the HTML `<form>` POSTs and the JSON/`fetch`
+  endpoints (`spin`, `voto`, `half-veto`, `next-race`) without touching templates
+  or JS. Expected host = `APP_HOST` / `APP_ORIGIN` env if set, else the request
+  `Host` (Cloudflare forwards the real hostname, so no config needed). **On by
+  default;** set `CSRF_PROTECTION=0` to disable for local dev. Playwright e2e
+  issues same-origin requests, so it passes unchanged.
+- **Cloudflare Access JWT verification (`cloudflare_access_check`).** Enforced
+  **only when both `CF_ACCESS_TEAM_DOMAIN` and `CF_ACCESS_AUD` are set** (unset →
+  skipped, so dev/tailnet keep working). Requires + validates the RS256 Access
+  token from the `Cf-Access-Jwt-Assertion` header (fallback: `CF_Authorization`
+  cookie): signature checked against the team JWKS
+  (`https://<TEAM_DOMAIN>/cdn-cgi/access/certs`, fetched with stdlib `urllib`,
+  cached in-process, auto-refreshed on unknown `kid`), plus `aud`/issuer/expiry.
+  Missing/invalid → 403. `/static/*` is exempt.
+
+Dependency added for JWT verification: **`PyJWT[crypto]`** (in `requirements.txt`,
+so it ships in the Docker image). Config env vars are documented in `.env.example`.
 
 ## UI / Design System
 
@@ -133,6 +257,7 @@ Running list of features under consideration. Not commitments — ideas to pull 
 - **Bet tracking** — players typically bet on cups or sessions. Record who bet what, who won, and settlement status. Schema TBD.
 - **Screenshot-based score entry** — upload a photo of the end-of-cup scoreboard, auto-parse scores (OCR + vision). Mapping scores to players should be straightforward once extraction works.
 - **Stale veto forfeit** — enforce the "use it or lose it" rule: entering race 3 with 3 unused half-vetoes auto-forfeits one. (Next feature up.)
+- **Record cup completion time, not start time** — live cup sessions currently stamp `cups.date` when the session starts (`status = 'in_progress'`). For accurate session history the timestamp should reflect when the cup finishes. Options: update `date` at completion, or add a separate `completed_at` column and keep `date` as start. Note the `UNIQUE` constraint on `date` — a schema change may be needed.
 - **Soft-delete everywhere** — extend the `deleted_at` pattern (already on `cups`) to all tables so nothing is truly deleted. Helpful for debugging.
 - **Visual refresh (mobile-first)** — clean, minimal, flat design. Mobile-first. Explore wheel animation library during this refactor.
 - **Friendly URL** — custom domain or hostname instead of raw IP on local network.

@@ -18,7 +18,7 @@ A tracker and suite of tools for Kario Mart game nights.
 
 ```bash
 python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
+.venv/bin/pip install -r requirements-dev.txt
 ```
 
 ### Running the App
@@ -101,6 +101,34 @@ E2e tests use [Playwright](https://playwright.dev/python/) to drive a real brows
 ```bash
 .venv/bin/playwright install chromium
 ```
+
+## Running with Docker
+
+Build and start the container:
+
+```bash
+docker compose up --build
+```
+
+The SQLite database is persisted to a `data/` directory via a volume mount.
+
+`SECRET_KEY` is **required** — compose will refuse to start without it. Put it
+(and `TUNNEL_TOKEN` for the tunnel) in a gitignored `.env` file rather than passing
+secrets inline on the command line (which leaks them into your shell history). Copy
+`.env.example` to `.env` and fill in the values; see [DEPLOY.md](DEPLOY.md) for how
+to generate them. `.env` is gitignored — never commit it.
+
+To stop:
+
+```bash
+docker compose down
+```
+
+### Hosting / Deployment
+
+To self-host on a headless Linux box and expose it to the internet via a Cloudflare
+named tunnel (gated behind Cloudflare Access), see [DEPLOY.md](DEPLOY.md). The compose
+file includes a `cloudflared` service for this; secrets come from a gitignored `.env`.
 
 ## License
 

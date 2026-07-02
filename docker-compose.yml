@@ -1,0 +1,23 @@
+services:
+  app:
+    build: .
+    # No host port is published. The cloudflared connector reaches the app over
+    # the compose network at http://app:8080, so nothing needs to be exposed on
+    # the host. Publishing 8080 on the host would bypass Cloudflare Access on the
+    # LAN. For local debugging only you could add `- "127.0.0.1:8080:8080"` under
+    # a `ports:` block, but the tunnel does not need it.
+    volumes:
+      - ./data:/data
+    environment:
+      - DB_PATH=/data/km_tracker.db
+      - SECRET_KEY=${SECRET_KEY:?SECRET_KEY must be set}
+    restart: unless-stopped
+
+  cloudflared:
+    image: cloudflare/cloudflared:2026.6.1
+    command: tunnel --no-autoupdate run
+    environment:
+      - TUNNEL_TOKEN=${TUNNEL_TOKEN:?TUNNEL_TOKEN must be set}
+    restart: unless-stopped
+    depends_on:
+      - app
