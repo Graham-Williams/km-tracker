@@ -83,6 +83,62 @@ def test_no_edition_has_duplicate_courses():
         assert len(courses) == len(set(courses)), f"duplicates in {edition}"
 
 
+def test_mk8dx_courses_match_onscreen_cup_order():
+    # The 1-based list position must equal the number players count off the
+    # cup-select screen (6 cups per row). These anchors pin the cup boundaries,
+    # especially the interleaved DLC cups: Egg (#17) and Crossing (#21) sit in
+    # row 1 before Shell (#25), and Triforce (#41)/Bell (#45) end row 2.
+    from maps import TRACK_SETS
+    mk8dx = TRACK_SETS["mk8dx"]
+    expected = {
+        1: "Mario Kart Stadium",   # Mushroom cup, race 1
+        5: "Mario Circuit",        # Flower
+        9: "Sunshine Airport",     # Star
+        13: "Cloudtop Cruise",     # Special
+        17: "GCN Yoshi Circuit",   # Egg (interleaved into row 1)
+        21: "GCN Baby Park",       # Crossing (interleaved into row 1)
+        25: "Wii Moo Moo Meadows",  # Shell (row 2 starts here)
+        29: "GCN Dry Dry Desert",  # Banana
+        33: "DS Wario Stadium",    # Leaf
+        37: "DS Tick-Tock Clock",  # Lightning
+        41: "Wii Wario's Gold Mine",  # Triforce (row 2)
+        45: "3DS Neo Bowser City",  # Bell (row 2)
+        49: "Tour Paris Promenade",  # Golden Dash, first Booster cup
+        96: "Wii Rainbow Road",    # Spiny cup, last course
+    }
+    for number, name in expected.items():
+        assert mk8dx[number - 1] == name, f"course #{number} should be {name}"
+
+
+def test_wii_courses_match_onscreen_cup_order():
+    from maps import TRACK_SETS
+    wii = TRACK_SETS["wii"]
+    expected = {
+        1: "Luigi Circuit",      # Mushroom
+        5: "Mario Circuit",      # Flower
+        9: "Daisy Circuit",      # Star
+        13: "Dry Dry Ruins",     # Special
+        17: "GCN Peach Beach",   # Shell (row 2)
+        32: "N64 Bowser's Castle",  # Lightning cup, last course
+    }
+    for number, name in expected.items():
+        assert wii[number - 1] == name, f"course #{number} should be {name}"
+
+
+def test_race_page_shows_course_numbers(client):
+    # The wheel/override UI shows the on-screen number next to each course, but
+    # the raw name must still be available to the JS for storage + played-map
+    # matching. Verify both: numbered label in the override dropdown, and the
+    # raw (unnumbered) name in the COURSES array fed to the wheel.
+    _setup_players(client)
+    _create_session(client, edition="mk8dx")
+    page = client.get("/cup-session/1").get_data(as_text=True)
+    assert "Mario Kart Stadium (1)" in page      # Mushroom race 1
+    assert "GCN Yoshi Circuit (17)" in page       # Egg cup, the interleave anchor
+    assert '"Mario Kart Stadium"' in page          # raw name still in JS COURSES
+    assert '"Mario Kart Stadium (1)"' not in page  # number never in the raw array
+
+
 def test_new_session_defaults_to_wii(client):
     _setup_players(client)
     _create_session(client)

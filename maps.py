@@ -50,6 +50,11 @@ WII_COURSES = [
 # organized by their 24 cups.
 MK8DX_COURSES = [
     # --- Base game (48) ---
+    # Course order matches the on-screen cup-select grid (6 cups per row) so a
+    # course's 1-based list position equals the number players count off the
+    # screen. Base rows: row 1 = Mushroom, Flower, Star, Special, Egg, Crossing;
+    # row 2 = Shell, Banana, Leaf, Lightning, Triforce, Bell. (The DLC cups
+    # Egg/Crossing/Triforce/Bell are interleaved into rows 1-2, not appended.)
     # Mushroom Cup
     "Mario Kart Stadium",
     "Water Park",
@@ -70,6 +75,16 @@ MK8DX_COURSES = [
     "Bone-Dry Dunes",
     "Bowser's Castle",
     "Rainbow Road",
+    # Egg Cup
+    "GCN Yoshi Circuit",
+    "Excitebike Arena",
+    "Dragon Driftway",
+    "Mute City",
+    # Crossing Cup
+    "GCN Baby Park",
+    "GBA Cheese Land",
+    "Wild Woods",
+    "Animal Crossing",
     # Shell Cup
     "Wii Moo Moo Meadows",
     "GBA Mario Circuit",
@@ -90,21 +105,11 @@ MK8DX_COURSES = [
     "3DS Piranha Plant Slide",
     "Wii Grumble Volcano",
     "N64 Rainbow Road",
-    # Egg Cup
-    "GCN Yoshi Circuit",
-    "Excitebike Arena",
-    "Dragon Driftway",
-    "Mute City",
     # Triforce Cup
     "Wii Wario's Gold Mine",
     "SNES Rainbow Road",
     "Ice Ice Outpost",
     "Hyrule Circuit",
-    # Crossing Cup
-    "GCN Baby Park",
-    "GBA Cheese Land",
-    "Wild Woods",
-    "Animal Crossing",
     # Bell Cup
     "3DS Neo Bowser City",
     "GBA Ribbon Road",
