@@ -85,6 +85,23 @@ Cloudflare tunnel**, but isolated from prod by design:
 
 - **Separate DB:** `data/km_tracker.staging.db` (prod's `km_tracker.db` is never
   touched). Same `./data` volume; driven purely by the `DB_PATH` env var.
+- **Environment awareness (`APP_ENV`):** the app reads `APP_ENV` once at startup
+  (`app.py`). Unset/unrecognized → `production` (safe default — prod needs no
+  config). `docker-compose.staging.yml` sets `APP_ENV=staging` on `staging-app`
+  (and `docker-compose.yml` sets `APP_ENV=production` explicitly on prod). A
+  context processor exposes `app_env` and `is_staging` to **all** templates for
+  environment-specific tweaks. Current uses (both in `base.html`, so they apply
+  to every page): the browser tab title is prefixed `[STG] ` on staging (outside
+  the `title` block); prod title is unchanged (`KM Tracker`). And the **favicon
+  is environment-specific** — staging serves Baby Peach icons, prod/default
+  serves the winged blue Spiny Shell. Two parallel icon sets live in `static/`:
+  the defaults (`favicon.ico` multi-size 16/32/48, `favicon-32x32.png`,
+  `android-chrome-192x192.png`, `apple-touch-icon.png` — 180px composited on
+  the violet accent `#7c3aed` since iOS blackens transparency) and `-staging`
+  suffixed twins; `base.html` picks via a Jinja `icon_suffix` variable
+  (`'-staging' if is_staging else ''`). All PNGs are metadata-free (pixel data
+  only). The prod `.ico`/32px use a tighter crop on the shell body (full winged
+  artwork is illegible at 16px); the large prod icons use the full artwork.
 - **Separate Cloudflare Access app → separate AUD.** Staging has its own Access
   application, so its own AUD, supplied via the box `.env` as
   `STAGING_CF_ACCESS_AUD` — **never reuse the prod `CF_ACCESS_AUD`.**
@@ -165,7 +182,9 @@ The **accent** color is themeable independently of the rest of the palette; **de
 - **To add a theme:** (1) add a `[data-theme="name"]` block in the light themes section of `app.css` and a mirrored one inside the dark `@media` block (set accent/hover/soft, and gradient if it's a gradient theme); (2) add a `.theme-option` button with a hardcoded swatch color in `base.html`'s `.theme-options`. No JS changes needed — the picker reads all `.theme-option`s generically.
 
 ### base.html blocks
-- `{% block title %}` — `<title>` text (default "KM Tracker").
+- `{% block title %}` — `<title>` text (default "KM Tracker"). On staging
+  (`APP_ENV=staging`) base.html prefixes `[STG] ` outside the block, so every
+  page's tab title gets it automatically — don't add it per-page.
 - `{% block back %}` — optional back-link; put `<a class="back-link" href="/">← Home</a>` here.
 - `{% block header %}` — whole header region (override only for a custom header). By default renders `<h1 class="page-title">{% block heading %}{% endblock %}</h1>` + `{% block subtitle %}{% endblock %}`.
   - `{% block heading %}` — page H1 text.

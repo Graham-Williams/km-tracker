@@ -30,6 +30,7 @@ services:
     volumes:
       - ./data:/data
     environment:
+      - APP_ENV=staging
       - DB_PATH=/data/km_tracker.staging.db
       - SECRET_KEY=${SECRET_KEY:?SECRET_KEY must be set}
       - APP_HOST=${STAGING_APP_HOST:-staging-km.graham-williams.com}

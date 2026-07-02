@@ -9,6 +9,8 @@ services:
     volumes:
       - ./data:/data
     environment:
+      # Explicit for clarity — "production" is also the app's default when unset.
+      - APP_ENV=production
       - DB_PATH=/data/km_tracker.db
       - SECRET_KEY=${SECRET_KEY:?SECRET_KEY must be set}
     restart: unless-stopped
