@@ -275,6 +275,12 @@ cloudflared (one tunnel) ─┤
 
 ### Deploy (prod + staging together)
 
+> **This command rebuilds and RESTARTS PROD.** Use it only for prod deploys
+> (from `main`, and never mid-cup — see the rule at the end of this section).
+> To update **staging only** — e.g. to preview a feature branch — do **not**
+> run this; use the scoped procedure in "Deploy staging only" below, which
+> leaves the prod container untouched.
+
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.access.yml \
   -f docker-compose.staging.yml up -d --build
@@ -293,6 +299,79 @@ else — including unset — behaves as production, so the prod container needs 
 configuration (`docker-compose.yml` sets `APP_ENV=production` explicitly for
 clarity). Both values are baked into the compose files, not the box `.env`, so
 a normal redeploy picks them up automatically.
+
+### Deploy staging only (branch preview — leaves prod running)
+
+Staging doesn't build from the main checkout. The box carries a **box-local,
+untracked** compose override, `docker-compose.staging-preview.yml` (it lives
+only at `/home/graham/km-tracker` on the box and is not in git), whose job is
+to point the `staging-app` **build context** at a **linked git worktree**:
+
+```yaml
+# /home/graham/km-tracker/docker-compose.staging-preview.yml  (box-local, untracked)
+services:
+  staging-app:
+    build:
+      context: /home/graham/km-tracker-staging
+```
+
+Two checkouts of the same repo:
+
+- `/home/graham/km-tracker` — the **main checkout**. Stays on `main`; prod
+  deploys build from here.
+- `/home/graham/km-tracker-staging` — a linked worktree (`git worktree add`),
+  kept on a **detached HEAD** of whatever ref staging is previewing. Detached
+  because git refuses to check out, in a worktree, a branch that's already
+  checked out in the main checkout (and vice versa).
+
+**Step by step**, to put `<branch>` on staging:
+
+```bash
+# 1. Fetch (the worktree shares the main checkout's object store, so one
+#    fetch covers both):
+git -C /home/graham/km-tracker fetch origin
+
+# 2. Point the staging worktree at the ref (detached HEAD):
+git -C /home/graham/km-tracker-staging checkout --detach origin/<branch>
+
+# 3. From the MAIN checkout — never the worktree — rebuild/restart ONLY
+#    the staging-app service:
+cd /home/graham/km-tracker
+docker compose -f docker-compose.yml -f docker-compose.access.yml \
+  -f docker-compose.staging.yml -f docker-compose.staging-preview.yml \
+  up -d --build --no-deps staging-app
+
+# 4. Verify prod was untouched — the prod app container's uptime must be
+#    unchanged (still "Up X hours/days", not "Up N seconds"):
+docker compose ps
+```
+
+`--no-deps staging-app` scopes the `up` to that single service: `app` and
+`cloudflared` are neither rebuilt nor restarted, so this is safe even while a
+cup is in progress on prod.
+
+**Gotchas:**
+
+- **Run the `up` from `/home/graham/km-tracker`, never from the worktree.**
+  `docker-compose.staging.yml` bind-mounts `./data` relative to the compose
+  project directory — run it from the worktree and staging's DB mount silently
+  points at `/home/graham/km-tracker-staging/data` instead of the real
+  `./data`. A different directory is also a different compose *project name*,
+  so compose would create a duplicate set of containers instead of updating
+  the existing ones.
+- **Compose config is read from the main checkout, not the worktree.** The
+  worktree only supplies the *build context* (app code); the `-f` files come
+  from `/home/graham/km-tracker`. If the previewed branch changes compose
+  config itself (e.g. adds an env var like `APP_ENV`, changes a service), the
+  main checkout's compose files won't have it. Temporarily flip the main
+  checkout to the previewed branch for the `up`, then **flip it back to
+  `main` immediately** — prod deploys assume the main checkout is on `main`:
+
+  ```bash
+  git -C /home/graham/km-tracker checkout <branch>   # pick up compose changes
+  # ... run the scoped `up` from step 3 ...
+  git -C /home/graham/km-tracker checkout main       # ALWAYS flip back
+  ```
 
 ### First bring-up — seed the staging DB
 
@@ -328,9 +407,11 @@ arg; without `--reset` it refuses to seed a DB that already has data (no
 double-seeding).
 
 > The **"never restart/redeploy while a cup is in progress"** rule still applies —
-> redeploying with the command above rebuilds and restarts the **prod** `app`
-> container too. Check `cups.status='in_progress'` on the prod DB is `0` first
-> (see CLAUDE.md → deploy-safety rule).
+> redeploying with the full-stack command in "Deploy (prod + staging together)"
+> rebuilds and restarts the **prod** `app` container too. Check
+> `cups.status='in_progress'` on the prod DB is `0` first (see CLAUDE.md →
+> deploy-safety rule). Staging-only deploys via the scoped
+> `--no-deps staging-app` procedure don't touch prod.
 
 ## Automated backups
 
