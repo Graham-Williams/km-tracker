@@ -1298,17 +1298,19 @@ def cup_session_next_race(cup_id):
     # Recording race N-1 means the player is now entering race N. When that's the
     # stale-veto check race, forfeit a half-veto from anyone who's hoarded them
     # all. The flash renders on the page reload the client does after this call.
-    if race_number == STALE_VETO_CHECK_RACE - 1:
-        forfeited = apply_stale_veto_forfeit(conn, cup_id)
-        if forfeited:
-            flash(
-                "Stale veto forfeit — "
-                + ", ".join(forfeited)
-                + f" hadn't used a half-veto by race {STALE_VETO_CHECK_RACE} and lost one.",
-                "info",
-            )
-
-    conn.close()
+    # try/finally so an unexpected error here can't leak the connection.
+    try:
+        if race_number == STALE_VETO_CHECK_RACE - 1:
+            forfeited = apply_stale_veto_forfeit(conn, cup_id)
+            if forfeited:
+                flash(
+                    "Stale veto forfeit — "
+                    + ", ".join(forfeited)
+                    + f" hadn't used a half-veto by race {STALE_VETO_CHECK_RACE} and lost one.",
+                    "info",
+                )
+    finally:
+        conn.close()
     complete = race_number >= MAX_RACES
     return jsonify({"race_number": race_number, "complete": complete})
 
