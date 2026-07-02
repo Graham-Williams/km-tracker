@@ -84,14 +84,17 @@
     <div>
         <div class="section-heading">Scores</div>
         <div id="score-rows">
+        {# Lines are a Wii-only mechanic; Switch cups are lineless. #}
+        {% set lines_on = cup.game_edition == 'wii' %}
         {% for player in players %}
         {% set existing = existing_scores.get(player.player_id) %}
-        <div class="score-row" data-player-id="{{ player.player_id }}" data-player-line="{{ player.line }}" data-has-line="{{ player.has_line|int }}">
+        {% set show_line = player.has_line and lines_on %}
+        <div class="score-row" data-player-id="{{ player.player_id }}" data-player-line="{{ player.line }}" data-has-line="{{ show_line|int }}">
             <span class="score-name">{{ player.name }}</span>
             <span class="score-place"></span>
             <input type="hidden" name="player_ids[]" value="{{ player.player_id }}">
-            <input type="number" name="scores[]" placeholder="{% if player.has_line %}Raw{% else %}Pts{% endif %}" min="0" class="score-input" {% if existing %}value="{{ existing.score }}"{% endif %}>
-            {% if player.has_line %}
+            <input type="number" name="scores[]" placeholder="{% if show_line %}Raw{% else %}Pts{% endif %}" min="0" class="score-input" {% if existing %}value="{{ existing.score }}"{% endif %}>
+            {% if show_line %}
             <input type="number" name="lines[]" value="{% if existing %}{{ existing.line }}{% else %}{{ player.line }}{% endif %}" class="line-input">
             <input type="number" name="line_scores[]" placeholder="Line" class="line-score-input">
             {% else %}

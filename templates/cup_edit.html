@@ -77,15 +77,18 @@
 
     <h2 class="section-heading">Scores</h2>
     <div id="score-rows">
+    {# Lines are a Wii-only mechanic; Switch cups are lineless. #}
+    {% set lines_on = cup.game_edition == 'wii' %}
     {% for player in players %}
     {% set s = scores_by_player.get(player.id) %}
-    <div class="score-row" data-player-id="{{ player.id }}" data-player-line="{{ player.line }}" data-has-line="{{ player.has_line|int }}">
+    {% set show_line = player.has_line and lines_on %}
+    <div class="score-row" data-player-id="{{ player.id }}" data-player-line="{{ player.line }}" data-has-line="{{ show_line|int }}">
         <span class="score-name">{{ player.name }}</span>
         <span class="score-place"></span>
         <input type="hidden" name="player_ids[]" value="{{ player.id }}">
-        <input type="number" name="scores[]" placeholder="{% if player.has_line %}Raw{% else %}Pts{% endif %}" min="0" class="score-input"
+        <input type="number" name="scores[]" placeholder="{% if show_line %}Raw{% else %}Pts{% endif %}" min="0" class="score-input"
                value="{{ s.score if s else '' }}">
-        {% if player.has_line %}
+        {% if show_line %}
         <input type="number" name="lines[]" value="{{ s.score_line if s else player.line }}" class="line-input">
         <input type="number" name="line_scores[]" placeholder="Line" class="line-score-input"
                value="{{ s.score + (s.score_line if s else player.line) if s else '' }}">
@@ -126,6 +129,9 @@
         { id: {{ p.id }}, name: "{{ p.name }}", line: {{ p.line }}, hasLine: {{ p.has_line|int }} }{% if not loop.last %},{% endif %}
         {% endfor %}
     ];
+
+    // Lines are Wii-only; on a Switch cup, added players get no line UI either.
+    var linesOn = {{ (cup.game_edition == 'wii')|int }};
 
     function getActivePlayerIds() {
         var ids = new Set();
@@ -365,16 +371,16 @@
             div.className = "score-row";
             div.dataset.playerId = pid;
             div.dataset.playerLine = player.line;
-            div.dataset.hasLine = player.hasLine;
-            var lineStr = player.line >= 0 ? "+" + player.line : "" + player.line;
-            var lineHtml = player.hasLine
+            var showLine = player.hasLine && linesOn;
+            div.dataset.hasLine = showLine ? 1 : 0;
+            var lineHtml = showLine
                 ? '<input type="number" name="lines[]" value="' + player.line + '" class="line-input"><input type="number" name="line_scores[]" placeholder="Line" class="line-score-input">'
                 : '<input type="hidden" name="lines[]" value="0">';
             div.innerHTML =
                 '<span class="score-name">' + player.name + '</span>' +
                 '<span class="score-place"></span>' +
                 '<input type="hidden" name="player_ids[]" value="' + pid + '">' +
-                '<input type="number" name="scores[]" placeholder="' + (player.hasLine ? 'Raw' : 'Pts') + '" min="0" class="score-input">' +
+                '<input type="number" name="scores[]" placeholder="' + (showLine ? 'Raw' : 'Pts') + '" min="0" class="score-input">' +
                 lineHtml +
                 '<label class="tb-wrapper disabled"><input type="checkbox" name="tiebreakers[]" value="' + pid + '" disabled> TB</label>' +
                 '<button type="button" class="remove-btn" title="Remove player">&times;</button>';

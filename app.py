@@ -435,7 +435,9 @@ def create_cup():
             flash("Invalid date format.")
             return redirect(url_for("cups"))
     else:
-        date_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:00")
+        # Second precision (not :00) so same-minute auto-dated cups don't collide
+        # on the cups.date UNIQUE constraint (issue #32).
+        date_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
     try:
         scores_data = parse_scores_from_form(request.form)
@@ -488,7 +490,7 @@ def create_cup():
 def edit_cup(cup_id):
     conn = get_connection()
     cup = conn.execute(
-        "SELECT id, date, notes FROM cups WHERE id = ? AND deleted_at IS NULL",
+        "SELECT id, date, notes, game_edition FROM cups WHERE id = ? AND deleted_at IS NULL",
         (cup_id,),
     ).fetchone()
     if cup is None:
@@ -556,6 +558,9 @@ def update_cup(cup_id):
         flash(str(e))
         return redirect(url_for("edit_cup", cup_id=cup_id))
     if scores_data:
+        # Switch (mk8dx) cups are lineless — drop any submitted line (incl. from
+        # the add-player path) before validation or storage.
+        zero_lines_if_lineless(conn, cup_id, scores_data)
         for s in scores_data:
             s["line_score"] = s["score"] + s["line"]
         lines_by_id = {s["player_id"]: s["line"] for s in scores_data}
@@ -755,13 +760,40 @@ def calculate_placements(scores_with_lines):
     return sorted_scores
 
 
-def apply_line_adjustments(conn, cup_id, scores_data):
-    """Apply line adjustments for a 3-player cup.
+def cup_uses_lines(conn, cup_id):
+    """Whether a cup uses the line handicap. Lines are a Wii-only mechanic;
+    Switch (mk8dx) — and any non-Wii edition — cups are lineless."""
+    row = conn.execute(
+        "SELECT game_edition FROM cups WHERE id = ?", (cup_id,)
+    ).fetchone()
+    return row is not None and row["game_edition"] == "wii"
 
-    Only applies if exactly 3 players. Returns list of changes for display,
-    or empty list if no adjustments were made.
+
+def zero_lines_if_lineless(conn, cup_id, scores_data):
+    """For a lineless (non-Wii) cup, force every score's line to 0 so line_score
+    equals the raw score. This is the authoritative server-side guard behind the
+    hidden line UI: a crafted POST carrying non-zero lines[] on a Switch cup must
+    not persist a handicap in scores.line / line_score."""
+    if cup_uses_lines(conn, cup_id):
+        return
+    for s in scores_data:
+        s["line"] = 0
+        s["line_score"] = s["score"]
+
+
+def apply_line_adjustments(conn, cup_id, scores_data):
+    """Apply line adjustments for a 3-player Wii cup.
+
+    Only applies if exactly 3 players AND the cup is a Wii cup. Lines are a
+    Wii-only mechanic — Switch (mk8dx) cups stay lineless, so they never create
+    line_changes or adjust players.line. Returns list of changes for display, or
+    empty list if no adjustments were made.
     """
     if len(scores_data) != 3:
+        return []
+
+    # Lines apply to Wii only; Switch cups are lineless.
+    if not cup_uses_lines(conn, cup_id):
         return []
 
     # Fetch has_line flag and current player line for each player
@@ -1023,7 +1055,9 @@ def cup_session_create():
     if edition not in TRACK_SETS:
         edition = DEFAULT_EDITION
 
-    date_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:00")
+    # Use second precision (not :00) so two sessions started in the same minute
+    # don't collide on the cups.date UNIQUE constraint (issue #32).
+    date_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     conn = get_connection()
     try:
         cursor = conn.execute(
@@ -1333,6 +1367,9 @@ def cup_session_submit(cup_id):
         conn.close()
         return redirect(url_for("cup_session_complete", cup_id=cup_id))
 
+    # Switch (mk8dx) cups are lineless — drop any submitted line before it can
+    # reach validation or storage.
+    zero_lines_if_lineless(conn, cup_id, scores_data)
     for s in scores_data:
         s["line_score"] = s["score"] + s["line"]
     lines_by_id = {s["player_id"]: s["line"] for s in scores_data}
