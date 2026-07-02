@@ -337,6 +337,13 @@ The app supports multiple Mario Kart editions per cup session. The track list di
 
 **Cup date / same-minute creates (issue #32, fixed):** `cups.date` is `DATETIME NOT NULL UNIQUE`. Auto-dated creates (`create_cup` default + `cup_session_create`) now stamp **second** precision (`%H:%M:%S`, not the old `%H:%M:00`), so starting/cancelling/restarting cups within the same minute no longer collides on the UNIQUE constraint. User-entered dates (`datetime-local`, minute resolution) still collide by design — that's the intended "a cup already exists at that time" guard for manual cups. Residual edge: two auto-creates in the same *second* still collide (not human-reachable; a `created_at`-column schema change would be the bulletproof fix if ever needed).
 
+## Cup Session Rules (vetoes)
+
+Per-cup mechanics for skipping a spun course, edition-agnostic (apply to Wii and Switch alike):
+- **Half-veto** — per-player (`cup_players.half_veto_count`, cap `MAX_HALF_VETOES=3`), a **coin-flip** (50/50) attempt to skip the course; `POST /cup-session/<id>/half-veto`.
+- **Voto** — shared per-cup pool (`cups.voto_count`, cap `MAX_VOTOES=4`), a **guaranteed** skip; `POST /cup-session/<id>/voto`.
+- **Stale veto forfeit ("use it or lose it"):** a **one-time** check when **entering race `STALE_VETO_CHECK_RACE = 3`**. `apply_stale_veto_forfeit()` runs inside `cup_session_next_race` right after race 2 is recorded (recording race N−1 = entering race N): every player still holding **all** their half-vetoes (`half_veto_count == 0`) forfeits one (→ count 1, 2 left). Players who've used any are untouched; votoes are never affected. Idempotent (only `count == 0` rows bump, so re-running can't forfeit twice). A `flash(..., "info")` names who forfeited; it renders on the page reload the race-page JS does after `next-race`. Tests: `test_stale_veto_forfeit_*` in `tests/test_cup_session.py`.
+
 ## Planned Features
 
 Running list of features under consideration. Not commitments — ideas to pull from when planning new work.
@@ -344,7 +351,6 @@ Running list of features under consideration. Not commitments — ideas to pull 
 - **Group cups by session** — a "session" is a game night containing multiple cups played back-to-back. Add a parent Session entity so the UI can show "Game Night 2026-04-12: 4 cups" rather than a flat list.
 - **Bet tracking** — players typically bet on cups or sessions. Record who bet what, who won, and settlement status. Schema TBD.
 - **Screenshot-based score entry** — upload a photo of the end-of-cup scoreboard, auto-parse scores (OCR + vision). Mapping scores to players should be straightforward once extraction works.
-- **Stale veto forfeit** — enforce the "use it or lose it" rule: entering race 3 with 3 unused half-vetoes auto-forfeits one. (Next feature up.)
 - **Record cup completion time, not start time** — live cup sessions currently stamp `cups.date` when the session starts (`status = 'in_progress'`). For accurate session history the timestamp should reflect when the cup finishes. Options: update `date` at completion, or add a separate `completed_at` column and keep `date` as start. Note the `UNIQUE` constraint on `date` — a schema change may be needed.
 - **Soft-delete everywhere** — extend the `deleted_at` pattern (already on `cups`) to all tables so nothing is truly deleted. Helpful for debugging.
 - **Visual refresh (mobile-first)** — clean, minimal, flat design. Mobile-first. Explore wheel animation library during this refactor.

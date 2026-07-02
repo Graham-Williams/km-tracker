@@ -1316,3 +1316,70 @@ def test_two_sessions_same_minute_after_cancel(client, monkeypatch):
     n = conn.execute("SELECT COUNT(*) AS n FROM cups").fetchone()["n"]
     conn.close()
     assert n == 2  # both cups created — no same-minute UNIQUE collision
+
+
+# =============================================================================
+# Stale veto forfeit — "use it or lose it" one-time check entering race 3
+# =============================================================================
+
+
+def _record_race(client, cup_id, map_name):
+    return client.post(f"/cup-session/{cup_id}/next-race", json={"map": map_name})
+
+
+def test_stale_veto_forfeit_applies_entering_race_3(client):
+    # A player holding all 3 half-vetoes when entering race 3 forfeits one.
+    _setup_players(client)
+    _create_session(client, ["1", "2"])
+    _record_race(client, 1, "A")  # race 1 recorded — no check yet
+    conn = get_connection()
+    before = [r["half_veto_count"] for r in conn.execute(
+        "SELECT half_veto_count FROM cup_players WHERE cup_id = 1 ORDER BY player_id")]
+    conn.close()
+    assert before == [0, 0]
+
+    _record_race(client, 1, "B")  # race 2 recorded → entering race 3 → forfeit fires
+    conn = get_connection()
+    after = [r["half_veto_count"] for r in conn.execute(
+        "SELECT half_veto_count FROM cup_players WHERE cup_id = 1 ORDER BY player_id")]
+    conn.close()
+    assert after == [1, 1]  # each used none → forfeited one (2 half-vetoes left)
+
+
+def test_stale_veto_forfeit_skips_players_who_used_vetoes(client):
+    # A player who already used a half-veto is not forfeited.
+    _setup_players(client)
+    _create_session(client, ["1", "2"])
+    client.post("/cup-session/1/half-veto", json={"player_id": 1})  # player 1 uses two
+    client.post("/cup-session/1/half-veto", json={"player_id": 1})
+    _record_race(client, 1, "A")
+    _record_race(client, 1, "B")  # entering race 3
+    conn = get_connection()
+    counts = {r["player_id"]: r["half_veto_count"] for r in conn.execute(
+        "SELECT player_id, half_veto_count FROM cup_players WHERE cup_id = 1")}
+    conn.close()
+    assert counts[1] == 2  # already used some → untouched by the forfeit
+    assert counts[2] == 1  # used none → forfeited one
+
+
+def test_stale_veto_forfeit_fires_only_once(client):
+    # The check is one-time (entering race 3); playing races 3 and 4 doesn't
+    # forfeit again.
+    _setup_players(client)
+    _create_session(client, ["1", "2"])
+    for m in ["A", "B", "C", "D"]:  # all four races
+        _record_race(client, 1, m)
+    conn = get_connection()
+    counts = [r["half_veto_count"] for r in conn.execute(
+        "SELECT half_veto_count FROM cup_players WHERE cup_id = 1 ORDER BY player_id")]
+    conn.close()
+    assert counts == [1, 1]  # exactly one forfeited each, not more
+
+
+def test_stale_veto_forfeit_flashes_on_race_page(client):
+    _setup_players(client)
+    _create_session(client, ["1", "2"])
+    _record_race(client, 1, "A")
+    _record_race(client, 1, "B")  # triggers forfeit + flash
+    page = client.get("/cup-session/1").get_data(as_text=True)
+    assert "Stale veto forfeit" in page
