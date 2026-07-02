@@ -243,7 +243,21 @@ Per-feature Claude context lives in `.claude/features/` — gitignored, personal
 
 The format is: one `context.md` per feature directory, using `.claude/features/TEMPLATE.md` as a starting point. Read the relevant feature context before working on a feature.
 
-Note: since `.claude/` is gitignored, recreate it on a new machine as needed — the convention is described here.
+Note: `.claude/` is gitignored **except `.claude/skills/`** (shared, committed tooling — see below). Personal per-feature context under `.claude/features/` stays local; recreate it on a new machine as needed — the convention is described here.
+
+## Claude Code Skills
+
+Reusable agent skills live in `.claude/skills/` and **are committed** (a `.gitignore` negation re-includes that path while the rest of `.claude/` stays personal/local). They're shared tooling any session can invoke.
+
+### `break-staging` — adversarial exploratory QA (staging only)
+
+`.claude/skills/break-staging/SKILL.md` — an on-demand red-team sweep that tries to break the **staging** instance before changes reach prod. It's the exploratory-QA step of the autonomous coding pipeline: run it **after a staging deploy / feature preview** to hammer the app, then feed its findings back as regression tests.
+
+- **What it does:** fans out parallel subagents across every endpoint — hostile/malformed input, out-of-order & double-submit session flows (spin/veto/voto/next-race/complete against the state machine), concurrent request pairs against the same in-progress cup (racing the non-atomic counter guards), plus a direct **staging-DB invariant audit** (counter caps, score/line-change consistency, referential integrity). Reports each finding with severity, a concrete repro, observed-vs-expected, and a **proposed pytest regression test** (using the `client` fixture + `tests/helpers.py`).
+- **Change-awareness / focus-fire:** before the broad sweep it diffs what's deployed on staging against prod/`main` (deployed-commit and `git diff origin/main...HEAD`), maps the changed routes/columns/migrations/UI, and runs a **dedicated heavier attack pass on that currently-deployed-but-unmerged feature** (new enum values, migration backfill gaps, validation bypasses, broken old invariants) on top of the broad sweep — findings for the changed surface get their own report heading so it's obvious whether the new work is safe.
+- **Staging-only guardrails (non-negotiable):** proves the target is staging (DB basename contains `staging`, `APP_ENV=staging`/`[STG]` title, `staging-app` service) before touching anything; before its first reseed it **fingerprints the staging DB against the deterministic seed baseline** (the seed leaves one in-progress fake cup, so a bare in-progress count can't be used) and **aborts only if the state looks like a *real* human session** — extra/real cups or non-seed player names — never stomping an active session; never touches the prod `app` container, `km_tracker.db`, or `km.graham-williams.com`; **reseeds `scripts/seed_staging.py --reset` before and after** so staging is left clean.
+- **Access path:** the public `staging-km.graham-williams.com` is behind Cloudflare Access (email PIN, un-automatable) and the app enforces an Access JWT server-side, so the skill reaches staging **on the box** over Tailscale SSH (box SSH target + repo path are **not committed** — the executing agent gets them from local memory / private DEPLOY notes) by launching a **throwaway one-off container** from the `staging-app` service with `CSRF_PROTECTION=0` + `CF_ACCESS_*` unset, publishing loopback `127.0.0.1:18080`, sharing the `./data` volume so it hits the real staging DB — without rebuilding/restarting the live `staging-app` or prod. Optional `ssh -L` port-forward lets an agent drive it (incl. Playwright) from its own machine.
+- **It informs only** — it does not fix bugs or open PRs; a follow-up session turns accepted findings into tests + fixes.
 
 ## UI Testing
 
