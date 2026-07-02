@@ -1195,3 +1195,92 @@ def test_session_and_manual_cups_coexist(client):
     data = response.data.decode()
     assert "manual cup" in data
     assert "session cup" in data
+
+
+# =============================================================================
+# Lines are Wii-only; Switch (mk8dx) cups stay lineless
+# =============================================================================
+
+
+def _setup_line_players(client):
+    create_player(client, "Alice", has_line=True)
+    create_player(client, "Bob", has_line=True)
+    create_player(client, "Carol", has_line=True)
+
+
+def test_mk8dx_cup_stays_lineless(client):
+    # A 3-player Switch cup must not create line_changes or adjust players.line,
+    # even for players who have a line, and its scores store line=0/line_score=score.
+    _setup_line_players(client)
+    _create_session(client, ["1", "2", "3"], edition="mk8dx")
+    _submit_scores(
+        client, cup_id=1, player_ids=["1", "2", "3"],
+        scores=["100", "90", "80"], lines=["0", "0", "0"],
+    )
+    conn = get_connection()
+    lc = conn.execute("SELECT COUNT(*) AS n FROM line_changes WHERE cup_id = 1").fetchone()["n"]
+    player_lines = [r["line"] for r in conn.execute("SELECT line FROM players ORDER BY id").fetchall()]
+    score_rows = conn.execute("SELECT score, line, line_score FROM scores WHERE cup_id = 1").fetchall()
+    conn.close()
+    assert lc == 0                       # no line-change records for Switch
+    assert player_lines == [0, 0, 0]     # player line balances untouched
+    for s in score_rows:
+        assert s["line"] == 0 and s["line_score"] == s["score"]
+
+
+def test_wii_cup_still_applies_lines(client):
+    # Contrast: the same 3-player cup on Wii DOES record line changes — the
+    # edition gate must not over-reach and disable lines for Wii.
+    _setup_line_players(client)
+    _create_session(client, ["1", "2", "3"], edition="wii")
+    _submit_scores(
+        client, cup_id=1, player_ids=["1", "2", "3"],
+        scores=["100", "90", "80"], lines=["0", "0", "0"],
+    )
+    conn = get_connection()
+    lc = conn.execute("SELECT COUNT(*) AS n FROM line_changes WHERE cup_id = 1").fetchone()["n"]
+    conn.close()
+    assert lc == 3                       # one record per line player (1st/2nd/3rd)
+
+
+def test_mk8dx_complete_page_hides_line_inputs(client):
+    # The Switch complete page shows no line-entry UI even for has_line players.
+    _setup_line_players(client)
+    _create_session(client, ["1", "2", "3"], edition="mk8dx")
+    page = client.get("/cup-session/1/complete").get_data(as_text=True)
+    # Match the rendered input element, not the .line-input CSS rule in <style>.
+    assert 'class="line-input"' not in page
+
+
+def test_wii_complete_page_shows_line_inputs(client):
+    # Contrast: the Wii complete page still shows line inputs for has_line players.
+    _setup_line_players(client)
+    _create_session(client, ["1", "2", "3"], edition="wii")
+    page = client.get("/cup-session/1/complete").get_data(as_text=True)
+    assert 'class="line-input"' in page
+
+
+def test_two_sessions_same_minute_after_cancel(client, monkeypatch):
+    # Issue #32: start a session, cancel it, and start another within the same
+    # clock minute — must not collide on the cups.date UNIQUE constraint.
+    import app as appmod
+    from datetime import datetime, timedelta, timezone
+
+    class _DT(datetime):
+        _n = 0
+
+        @classmethod
+        def now(cls, tz=None):
+            cls._n += 1
+            # Distinct seconds within the same minute on each call.
+            return datetime(2030, 1, 1, 12, 0, 0, tzinfo=timezone.utc) + timedelta(seconds=cls._n)
+
+    monkeypatch.setattr(appmod, "datetime", _DT)
+    _setup_players(client)
+    _create_session(client, ["1", "2"])
+    client.post("/cup-session/1/cancel", follow_redirects=True)
+    _create_session(client, ["1", "2"])
+    conn = get_connection()
+    n = conn.execute("SELECT COUNT(*) AS n FROM cups").fetchone()["n"]
+    conn.close()
+    assert n == 2  # both cups created — no same-minute UNIQUE collision

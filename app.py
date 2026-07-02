@@ -435,7 +435,9 @@ def create_cup():
             flash("Invalid date format.")
             return redirect(url_for("cups"))
     else:
-        date_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:00")
+        # Second precision (not :00) so same-minute auto-dated cups don't collide
+        # on the cups.date UNIQUE constraint (issue #32).
+        date_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
     try:
         scores_data = parse_scores_from_form(request.form)
@@ -488,7 +490,7 @@ def create_cup():
 def edit_cup(cup_id):
     conn = get_connection()
     cup = conn.execute(
-        "SELECT id, date, notes FROM cups WHERE id = ? AND deleted_at IS NULL",
+        "SELECT id, date, notes, game_edition FROM cups WHERE id = ? AND deleted_at IS NULL",
         (cup_id,),
     ).fetchone()
     if cup is None:
@@ -756,12 +758,21 @@ def calculate_placements(scores_with_lines):
 
 
 def apply_line_adjustments(conn, cup_id, scores_data):
-    """Apply line adjustments for a 3-player cup.
+    """Apply line adjustments for a 3-player Wii cup.
 
-    Only applies if exactly 3 players. Returns list of changes for display,
-    or empty list if no adjustments were made.
+    Only applies if exactly 3 players AND the cup is a Wii cup. Lines are a
+    Wii-only mechanic — Switch (mk8dx) cups stay lineless, so they never create
+    line_changes or adjust players.line. Returns list of changes for display, or
+    empty list if no adjustments were made.
     """
     if len(scores_data) != 3:
+        return []
+
+    # Lines apply to Wii only; Switch cups are lineless.
+    cup = conn.execute(
+        "SELECT game_edition FROM cups WHERE id = ?", (cup_id,)
+    ).fetchone()
+    if cup is None or cup["game_edition"] != "wii":
         return []
 
     # Fetch has_line flag and current player line for each player
@@ -1023,7 +1034,9 @@ def cup_session_create():
     if edition not in TRACK_SETS:
         edition = DEFAULT_EDITION
 
-    date_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:00")
+    # Use second precision (not :00) so two sessions started in the same minute
+    # don't collide on the cups.date UNIQUE constraint (issue #32).
+    date_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     conn = get_connection()
     try:
         cursor = conn.execute(

@@ -34,8 +34,9 @@ def test_create_cup_defaults_to_utc_now(client):
         mock_dt.now.return_value = fake_now
         mock_dt.strptime = datetime.strptime
         response = create_cup(client)
-    # Seconds should be truncated to :00
-    assert b"2026-03-15 20:30:00" in response.data
+    # Seconds are preserved (not truncated to :00) so same-minute creates don't
+    # collide on the cups.date UNIQUE constraint (issue #32).
+    assert b"2026-03-15 20:30:45" in response.data
     assert b"No cups yet" not in response.data
 
 
