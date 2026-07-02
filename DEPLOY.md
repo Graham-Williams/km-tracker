@@ -283,8 +283,16 @@ docker compose -f docker-compose.yml -f docker-compose.access.yml \
 `docker-compose.access.yml` layers the Access env vars (`APP_HOST`,
 `CF_ACCESS_TEAM_DOMAIN`, `CF_ACCESS_AUD`) onto the prod `app`;
 `docker-compose.staging.yml` adds the `staging-app` service with its own
-`DB_PATH`, `APP_HOST=staging-km.graham-williams.com`, and
-`CF_ACCESS_AUD=${STAGING_CF_ACCESS_AUD}`.
+`DB_PATH`, `APP_HOST=staging-km.graham-williams.com`,
+`CF_ACCESS_AUD=${STAGING_CF_ACCESS_AUD}`, and `APP_ENV=staging`.
+
+`APP_ENV` tells the app which environment it is: `staging` prefixes the browser
+tab title with `[STG] ` (and is exposed to all templates as
+`app_env`/`is_staging` for future environment-specific differences). Anything
+else — including unset — behaves as production, so the prod container needs no
+configuration (`docker-compose.yml` sets `APP_ENV=production` explicitly for
+clarity). Both values are baked into the compose files, not the box `.env`, so
+a normal redeploy picks them up automatically.
 
 ### First bring-up — seed the staging DB
 

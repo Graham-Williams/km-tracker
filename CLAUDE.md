@@ -84,6 +84,14 @@ Cloudflare tunnel**, but isolated from prod by design:
 
 - **Separate DB:** `data/km_tracker.staging.db` (prod's `km_tracker.db` is never
   touched). Same `./data` volume; driven purely by the `DB_PATH` env var.
+- **Environment awareness (`APP_ENV`):** the app reads `APP_ENV` once at startup
+  (`app.py`). Unset/unrecognized → `production` (safe default — prod needs no
+  config). `docker-compose.staging.yml` sets `APP_ENV=staging` on `staging-app`
+  (and `docker-compose.yml` sets `APP_ENV=production` explicitly on prod). A
+  context processor exposes `app_env` and `is_staging` to **all** templates for
+  environment-specific tweaks. Current use: the browser tab title is prefixed
+  `[STG] ` on staging (in `base.html`, outside the `title` block, so it applies
+  to every page); prod title is unchanged (`KM Tracker`).
 - **Separate Cloudflare Access app → separate AUD.** Staging has its own Access
   application, so its own AUD, supplied via the box `.env` as
   `STAGING_CF_ACCESS_AUD` — **never reuse the prod `CF_ACCESS_AUD`.**
@@ -164,7 +172,9 @@ The **accent** color is themeable independently of the rest of the palette; **de
 - **To add a theme:** (1) add a `[data-theme="name"]` block in the light themes section of `app.css` and a mirrored one inside the dark `@media` block (set accent/hover/soft, and gradient if it's a gradient theme); (2) add a `.theme-option` button with a hardcoded swatch color in `base.html`'s `.theme-options`. No JS changes needed — the picker reads all `.theme-option`s generically.
 
 ### base.html blocks
-- `{% block title %}` — `<title>` text (default "KM Tracker").
+- `{% block title %}` — `<title>` text (default "KM Tracker"). On staging
+  (`APP_ENV=staging`) base.html prefixes `[STG] ` outside the block, so every
+  page's tab title gets it automatically — don't add it per-page.
 - `{% block back %}` — optional back-link; put `<a class="back-link" href="/">← Home</a>` here.
 - `{% block header %}` — whole header region (override only for a custom header). By default renders `<h1 class="page-title">{% block heading %}{% endblock %}</h1>` + `{% block subtitle %}{% endblock %}`.
   - `{% block heading %}` — page H1 text.

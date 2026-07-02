@@ -13,7 +13,7 @@
         } catch(e){}
       })();
     </script>
-    <title>{% block title %}KM Tracker{% endblock %}</title>
+    <title>{% if is_staging %}[STG] {% endif %}{% block title %}KM Tracker{% endblock %}</title>
     <link rel="icon" href="{{ url_for('static', filename='favicon.ico') }}" sizes="16x16 32x32 48x48">
     <link rel="icon" type="image/png" sizes="32x32" href="{{ url_for('static', filename='favicon-32x32.png') }}">
     <link rel="icon" type="image/png" sizes="192x192" href="{{ url_for('static', filename='android-chrome-192x192.png') }}">

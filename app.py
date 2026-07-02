@@ -27,6 +27,26 @@ app.secret_key = os.environ.get("SECRET_KEY") or secrets.token_hex(32)
 
 
 # ---------------------------------------------------------------------------
+# Environment awareness (staging vs production)
+#
+# APP_ENV is read once at startup. Unset or unrecognized -> "production", the
+# safe default (the prod container doesn't need to set it). The staging
+# container sets APP_ENV=staging (docker-compose.staging.yml). Both values are
+# exposed to every template so environment-specific tweaks (titles, banners,
+# etc.) stay easy.
+# ---------------------------------------------------------------------------
+
+APP_ENV = (os.environ.get("APP_ENV") or "production").strip().lower() or "production"
+IS_STAGING = APP_ENV == "staging"
+
+
+@app.context_processor
+def inject_app_env():
+    """Make the deployment environment available in all templates."""
+    return {"app_env": APP_ENV, "is_staging": IS_STAGING}
+
+
+# ---------------------------------------------------------------------------
 # Security hardening: CSRF (Origin/Referer) + Cloudflare Access JWT verification
 #
 # The app is single-origin and sits behind Cloudflare Access. The Access auth
