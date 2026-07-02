@@ -47,8 +47,10 @@ Thumbs.db
 *.swp
 *.swo
 
-# Claude Code local context (personal pairing notes, not shared tooling)
-.claude/
+# Claude Code local context (personal pairing notes, not shared tooling) — but
+# shared, reusable skills under .claude/skills/ ARE committed tooling.
+.claude/*
+!.claude/skills/
 
 # Logs
 *.log
