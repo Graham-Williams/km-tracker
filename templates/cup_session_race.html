@@ -177,6 +177,7 @@
             <option value="{{ loop.index0 }}">{{ course }} ({{ loop.index }})</option>
             {% endfor %}
         </select>
+        <button id="mute-btn" class="btn btn-ghost btn-sm" aria-label="Toggle sound" aria-pressed="false">🔊</button>
     </div>
     <div class="controls">
         {% if current_race < max_races %}
@@ -475,6 +476,20 @@
             var btn = document.getElementById("next-race-btn") || document.getElementById("complete-btn");
             if (btn) btn.disabled = true;
             if (spinBtn) spinBtn.disabled = false;
+        }
+
+        // --- Mute toggle ---
+        var muteBtn = document.getElementById("mute-btn");
+        if (muteBtn) {
+            var renderMute = function() {
+                muteBtn.textContent = SFX.muted ? "🔇" : "🔊";
+                muteBtn.setAttribute("aria-pressed", SFX.muted ? "true" : "false");
+            };
+            renderMute();
+            muteBtn.addEventListener("click", function() {
+                SFX.toggleMute();
+                renderMute();
+            });
         }
 
         // --- Half Veto ---
