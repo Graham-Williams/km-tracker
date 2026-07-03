@@ -267,6 +267,11 @@
 
     <script src="{{ url_for('static', filename='js/sfx.js') }}"></script>
     <script>
+        // Fallback: a dropped /static/js/sfx.js request must never break the
+        // page — degrade to silence, not ReferenceErrors. Every SFX call site
+        // below works against this no-op stub when the file didn't load.
+        var SFX = window.SFX || { tick: function(){}, whoosh: function(){}, success: function(){}, fail: function(){}, toggleMute: function(){ return false; }, muted: false };
+
         var CUP_ID = {{ cup.id }};
         var COURSES = {{ all_courses|tojson }};
         var PLAYED_MAPS = {{ played_maps|tojson }};
