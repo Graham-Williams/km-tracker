@@ -264,6 +264,7 @@
     <a class="cancel-link" onclick="openModal('cancel-modal')">Cancel Cup</a>
 
 
+    <script src="{{ url_for('static', filename='js/sfx.js') }}"></script>
     <script>
         var CUP_ID = {{ cup.id }};
         var COURSES = {{ all_courses|tojson }};
@@ -370,6 +371,23 @@
             var startTime = null;
             var startRotation = totalRotation;
 
+            // Wheel tick state: one SFX.tick() per slice-boundary crossing,
+            // throttled to >=30ms between ticks (early in a spin the wheel
+            // crosses several slices per frame — MK8DX has 96 slices — and
+            // an unthrottled tick per crossing would flood audio nodes).
+            var lastTickSlice = Math.floor(startRotation / SLICE_ANGLE);
+            var lastTickTime = 0;
+
+            function maybeTick(rotation, timestamp) {
+                var slice = Math.floor(rotation / SLICE_ANGLE);
+                if (slice === lastTickSlice) return;
+                lastTickSlice = slice;
+                if (timestamp - lastTickTime >= 30) {
+                    lastTickTime = timestamp;
+                    SFX.tick();
+                }
+            }
+
             function animate(timestamp) {
                 if (!startTime) startTime = timestamp;
                 var elapsed = timestamp - startTime;
@@ -393,6 +411,7 @@
                     return;
                 }
 
+                maybeTick(current, timestamp);
                 canvas.style.transform = "translateY(-50%) rotate(" + current + "deg)";
                 requestAnimationFrame(animate);
             }
@@ -500,15 +519,21 @@
                     // Start flipping
                     requestAnimationFrame(function() {
                         coin.classList.add("flipping");
+                        SFX.whoosh();
                     });
-                    // Swap to result on the last flip (at ~92% of 1.2s = ~1.1s)
+                    // Swap to result on the last flip (at ~92% of 1.2s = ~1.1s).
+                    // The result sound fires here too — synced with what the
+                    // eye sees, never at fetch-response time (that would leak
+                    // the outcome early).
                     setTimeout(function() {
                         if (data.success) {
                             coin.textContent = "✓";
                             coin.classList.add("success");
+                            SFX.success();
                         } else {
                             coin.textContent = "✗";
                             coin.classList.add("fail");
+                            SFX.fail();
                         }
                     }, 1100);
                     // Show message and OK button after animation
