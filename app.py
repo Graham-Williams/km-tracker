@@ -1005,6 +1005,34 @@ def delete_score(score_id):
 MAX_RACES = 4
 MAX_HALF_VETOES = 3
 MAX_VOTOES = 4
+# "Use it or lose it": a one-time check applied when entering this race. A player
+# who still holds ALL their half-vetoes at this point forfeits one.
+STALE_VETO_CHECK_RACE = 3
+
+
+def apply_stale_veto_forfeit(conn, cup_id):
+    """One-time half-veto forfeit when entering race STALE_VETO_CHECK_RACE.
+
+    Each player still holding all their half-vetoes (half_veto_count == 0, i.e.
+    used none in the earlier races) forfeits one. Players who have used at least
+    one are untouched, and votoes are never affected. Commits and returns the
+    names of players who forfeited (for a flash message), or []. Idempotent: a
+    player already at count >= 1 is skipped, so re-running never forfeits twice.
+    """
+    rows = conn.execute(
+        "SELECT p.name FROM cup_players cp JOIN players p ON cp.player_id = p.id "
+        "WHERE cp.cup_id = ? AND cp.half_veto_count = 0 ORDER BY p.name",
+        (cup_id,),
+    ).fetchall()
+    if not rows:
+        return []
+    conn.execute(
+        "UPDATE cup_players SET half_veto_count = half_veto_count + 1 "
+        "WHERE cup_id = ? AND half_veto_count = 0",
+        (cup_id,),
+    )
+    conn.commit()
+    return [r["name"] for r in rows]
 
 
 @app.route("/cup-session/new")
@@ -1267,7 +1295,22 @@ def cup_session_next_race(cup_id):
         conn.close()
         return jsonify({"error": "Race already recorded"}), 400
 
-    conn.close()
+    # Recording race N-1 means the player is now entering race N. When that's the
+    # stale-veto check race, forfeit a half-veto from anyone who's hoarded them
+    # all. The flash renders on the page reload the client does after this call.
+    # try/finally so an unexpected error here can't leak the connection.
+    try:
+        if race_number == STALE_VETO_CHECK_RACE - 1:
+            forfeited = apply_stale_veto_forfeit(conn, cup_id)
+            if forfeited:
+                flash(
+                    "Stale veto forfeit — "
+                    + ", ".join(forfeited)
+                    + f" hadn't used a half-veto by race {STALE_VETO_CHECK_RACE} and lost one.",
+                    "info",
+                )
+    finally:
+        conn.close()
     complete = race_number >= MAX_RACES
     return jsonify({"race_number": race_number, "complete": complete})
 

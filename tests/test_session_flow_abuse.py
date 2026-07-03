@@ -233,6 +233,15 @@ def test_veto_on_completed_cup_rejected_counters_unchanged(client):
     _play_races(client, cup_id)
     _submit(client, cup_id)
 
+    # Snapshot counters after play (the stale-veto forfeit may have adjusted
+    # half_veto_count at race 3) so we assert the *rejected* calls don't mutate.
+    conn = get_connection()
+    voto_before = conn.execute("SELECT voto_count FROM cups WHERE id = ?", (cup_id,)).fetchone()[0]
+    half_before = conn.execute(
+        "SELECT half_veto_count FROM cup_players WHERE cup_id = ? AND player_id = 1", (cup_id,)
+    ).fetchone()[0]
+    conn.close()
+
     assert client.post(f"/cup-session/{cup_id}/voto").status_code == 404
     assert client.post(f"/cup-session/{cup_id}/half-veto", json={"player_id": 1}).status_code == 404
 
@@ -242,8 +251,8 @@ def test_veto_on_completed_cup_rejected_counters_unchanged(client):
         "SELECT half_veto_count FROM cup_players WHERE cup_id = ? AND player_id = 1", (cup_id,)
     ).fetchone()[0]
     conn.close()
-    assert voto == 0
-    assert half == 0
+    assert voto == voto_before
+    assert half == half_before
 
 
 def test_veto_on_cancelled_cup_rejected(client):
