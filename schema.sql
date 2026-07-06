@@ -3,7 +3,9 @@ CREATE TABLE IF NOT EXISTS players (
     name TEXT NOT NULL UNIQUE,
     default_cup BOOLEAN NOT NULL DEFAULT 1,
     line INTEGER NOT NULL DEFAULT 0,
-    has_line BOOLEAN NOT NULL DEFAULT 0
+    has_line BOOLEAN NOT NULL DEFAULT 0,
+    default_character_wii TEXT,     -- character this player mains in MK Wii (photo score matching)
+    default_character_switch TEXT   -- character this player mains in MK8 Deluxe (photo score matching)
 );
 
 CREATE TABLE IF NOT EXISTS cups (
@@ -44,6 +46,15 @@ CREATE TABLE IF NOT EXISTS line_changes (
     FOREIGN KEY (cup_id) REFERENCES cups(id),
     FOREIGN KEY (player_id) REFERENCES players(id),
     UNIQUE(cup_id, player_id)
+);
+
+CREATE TABLE IF NOT EXISTS cup_photos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    cup_id INTEGER NOT NULL,
+    image BLOB NOT NULL,
+    mime_type TEXT NOT NULL,
+    created_at DATETIME NOT NULL,
+    FOREIGN KEY (cup_id) REFERENCES cups(id)
 );
 
 CREATE TABLE IF NOT EXISTS scores (

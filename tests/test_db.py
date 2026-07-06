@@ -93,6 +93,95 @@ def test_migration_adds_game_edition_to_existing_db(db_path):
     assert row["game_edition"] == "wii"  # existing row backfilled
 
 
+def test_migration_adds_default_character_columns_to_existing_db(db_path):
+    """A players table created without the default-character columns gets them
+    (NULL for existing rows) and the migration is idempotent."""
+    # Simulate a pre-migration DB: players table without the character columns.
+    conn = get_connection(db_path)
+    conn.execute(
+        "CREATE TABLE players (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "name TEXT NOT NULL UNIQUE, default_cup BOOLEAN NOT NULL DEFAULT 1, "
+        "line INTEGER NOT NULL DEFAULT 0, has_line BOOLEAN NOT NULL DEFAULT 0)"
+    )
+    conn.execute("INSERT INTO players (name) VALUES ('Alice')")
+    conn.commit()
+    conn.close()
+
+    init_db(db_path)
+    init_db(db_path)  # idempotent — must not error on second run
+
+    conn = get_connection(db_path)
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(players)")}
+    assert "default_character_wii" in cols
+    assert "default_character_switch" in cols
+    row = conn.execute(
+        "SELECT default_character_wii, default_character_switch FROM players WHERE id = 1"
+    ).fetchone()
+    conn.close()
+    assert row["default_character_wii"] is None
+    assert row["default_character_switch"] is None
+
+
+def test_cup_photos_table(db_path):
+    init_db(db_path)
+    conn = get_connection(db_path)
+    columns = {row["name"]: row for row in conn.execute("PRAGMA table_info(cup_photos)")}
+    assert {"id", "cup_id", "image", "mime_type", "created_at"} <= set(columns)
+    assert columns["image"]["notnull"] == 1
+    assert columns["mime_type"]["notnull"] == 1
+    assert columns["created_at"]["notnull"] == 1
+    # FK enforcement: a photo can't reference a nonexistent cup.
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "INSERT INTO cup_photos (cup_id, image, mime_type, created_at) "
+            "VALUES (999, X'FFD8', 'image/jpeg', '2026-01-01 00:00:00')"
+        )
+    conn.close()
+
+
+def test_fresh_db_matches_migrated_db(tmp_path):
+    """A fresh DB from schema.sql must have the same tables/columns as an old
+    pre-migration DB brought forward by run_migrations."""
+    fresh_path = str(tmp_path / "fresh.db")
+    migrated_path = str(tmp_path / "migrated.db")
+
+    init_db(fresh_path)
+
+    # Old DB: pre-game_edition cups, pre-character players, no cup_photos.
+    conn = get_connection(migrated_path)
+    conn.execute(
+        "CREATE TABLE players (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "name TEXT NOT NULL UNIQUE, default_cup BOOLEAN NOT NULL DEFAULT 1, "
+        "line INTEGER NOT NULL DEFAULT 0, has_line BOOLEAN NOT NULL DEFAULT 0)"
+    )
+    conn.execute(
+        "CREATE TABLE cups (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "date DATETIME NOT NULL UNIQUE, notes TEXT, deleted_at DATETIME, "
+        "status TEXT NOT NULL DEFAULT 'completed', voto_count INTEGER NOT NULL DEFAULT 0)"
+    )
+    conn.commit()
+    conn.close()
+    init_db(migrated_path)
+
+    def snapshot(path):
+        conn = get_connection(path)
+        tables = [
+            row["name"]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name NOT LIKE 'sqlite_%' ORDER BY name"
+            )
+        ]
+        cols = {
+            t: {row["name"] for row in conn.execute(f"PRAGMA table_info({t})")}
+            for t in tables
+        }
+        conn.close()
+        return tables, cols
+
+    assert snapshot(fresh_path) == snapshot(migrated_path)
+
+
 def test_scores_columns(db_path):
     init_db(db_path)
     conn = get_connection(db_path)
