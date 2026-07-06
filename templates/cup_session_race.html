@@ -178,6 +178,7 @@
             {% endfor %}
         </select>
         <button id="mute-btn" class="btn btn-ghost btn-sm" aria-label="Toggle sound" aria-pressed="false">🔊</button>
+        <button id="skip-anim-btn" class="btn btn-ghost btn-sm" aria-label="Toggle skip animations" aria-pressed="false">🎬</button>
     </div>
     <div class="controls">
         {% if current_race < max_races %}
@@ -284,6 +285,13 @@
         var currentIndex = null;
         var isSpinning = false;
         var totalRotation = 0;
+        // Skip-animations ("instant mode"): persisted per-browser in
+        // localStorage under "km-skip-anim", same pattern as SFX's "km-muted".
+        var SKIP_ANIM_KEY = "km-skip-anim";
+        var skipAnim = (function () {
+            try { return localStorage.getItem(SKIP_ANIM_KEY) === "1"; }
+            catch (e) { return false; }
+        })();
 
         // Display label for a course: raw name plus its 1-based on-screen number,
         // e.g. "Water Park (19)". Display-only — never sent to the server.
@@ -358,14 +366,30 @@
 
         drawWheel();
 
+        // The rotation (>= totalRotation, no extra revolutions) that parks
+        // targetIndex's slice center under the pointer. Shared by the
+        // animated spin (which adds whole extra revolutions on top) and the
+        // instant skip-animations path (which jumps straight to it).
+        function rotationForIndex(targetIndex) {
+            var sliceCenter = targetIndex * SLICE_ANGLE + SLICE_ANGLE / 2;
+            var targetAngle = (270 - sliceCenter + 360) % 360;
+            return totalRotation + (targetAngle - (totalRotation % 360) + 360) % 360;
+        }
+
+        // Instant-mode counterpart of spinToIndex: render the same final
+        // wheel position immediately — no animation, no ticks.
+        function snapToIndex(targetIndex) {
+            if (!canvas) return;
+            totalRotation = rotationForIndex(targetIndex);
+            canvas.style.transform = "translateY(-50%) rotate(" + totalRotation + "deg)";
+        }
+
         function spinToIndex(targetIndex, callback) {
             if (!canvas) return;
             isSpinning = true;
 
-            var sliceCenter = targetIndex * SLICE_ANGLE + SLICE_ANGLE / 2;
-            var targetAngle = (270 - sliceCenter + 360) % 360;
             var extraSpins = (2 + Math.floor(Math.random() * 2)) * 360; // 2-3 rotations — slower, more dramatic
-            var endRotation = totalRotation + extraSpins + (targetAngle - (totalRotation % 360) + 360) % 360;
+            var endRotation = rotationForIndex(targetIndex) + extraSpins;
 
             // ~25% chance of bounce-back: overshoot by one slice then drift back
             var willBounce = Math.random() < 0.25;
@@ -429,6 +453,27 @@
         function openModal(id) { document.getElementById(id).classList.add("active"); }
         function closeModal(id) { document.getElementById(id).classList.remove("active"); }
 
+        // Shared finalization for a landed course: show the result label and
+        // unlock the veto / next-race controls. Both the animated spin and
+        // the instant skip-animations path end here.
+        function finalizeSpinResult() {
+            document.getElementById("wheel-label").textContent = currentLabel();
+            document.getElementById("wheel-label").classList.add("visible");
+            enableVetoControls();
+            enableNextRace();
+        }
+
+        // Land the wheel on targetIndex: animated spin normally, or an
+        // immediate snap + reveal when skip-animations is on.
+        function landOnIndex(targetIndex) {
+            if (skipAnim) {
+                snapToIndex(targetIndex);
+                finalizeSpinResult();
+            } else {
+                spinToIndex(targetIndex, finalizeSpinResult);
+            }
+        }
+
         // --- Spin ---
         var spinBtn = document.getElementById("spin-btn");
         if (spinBtn) {
@@ -441,12 +486,7 @@
                         if (data.error) { alert(data.error); spinBtn.disabled = false; return; }
                         currentMap = data.map;
                         currentIndex = data.index;
-                        spinToIndex(data.index, function() {
-                            document.getElementById("wheel-label").textContent = currentLabel();
-                            document.getElementById("wheel-label").classList.add("visible");
-                            enableVetoControls();
-                            enableNextRace();
-                        });
+                        landOnIndex(data.index);
                     });
             });
         }
@@ -497,6 +537,22 @@
             });
         }
 
+        // --- Skip-animations toggle (instant mode) ---
+        var skipBtn = document.getElementById("skip-anim-btn");
+        if (skipBtn) {
+            var renderSkip = function() {
+                skipBtn.textContent = skipAnim ? "⚡" : "🎬";
+                skipBtn.setAttribute("aria-pressed", skipAnim ? "true" : "false");
+            };
+            renderSkip();
+            skipBtn.addEventListener("click", function() {
+                skipAnim = !skipAnim;
+                try { localStorage.setItem(SKIP_ANIM_KEY, skipAnim ? "1" : "0"); }
+                catch (e) {}
+                renderSkip();
+            });
+        }
+
         // --- Half Veto ---
         var hvBtn = document.getElementById("half-veto-btn");
         if (hvBtn) {
@@ -525,27 +581,15 @@
                         var remainSpan = li.querySelector(".veto-remaining");
                         if (remainSpan && data.remaining !== null) remainSpan.textContent = data.remaining + " left";
                     }
-                    // Show coin flip animation
+                    // Show coin flip result
                     var coin = document.getElementById("coin");
                     var msgEl = document.getElementById("coin-message");
                     var okBtn = document.getElementById("coin-ok-btn");
-                    // Reset coin state
-                    coin.className = "coin";
-                    coin.textContent = "?";
-                    msgEl.textContent = "";
-                    msgEl.className = "coin-result";
-                    okBtn.style.display = "none";
-                    openModal("coin-modal");
-                    // Start flipping
-                    requestAnimationFrame(function() {
-                        coin.classList.add("flipping");
-                        SFX.whoosh();
-                    });
-                    // Swap to result on the last flip (at ~92% of 1.2s = ~1.1s).
-                    // The result sound fires here too — synced with what the
-                    // eye sees, never at fetch-response time (that would leak
-                    // the outcome early).
-                    setTimeout(function() {
+                    // Reveal step 1: the coin face + win/fail jingle. The
+                    // jingle fires at the moment of the visual reveal —
+                    // with the last flip when animated, immediately in
+                    // instant mode — never before the eye sees the result.
+                    function revealCoinFace() {
                         if (data.success) {
                             coin.textContent = "✓";
                             coin.classList.add("success");
@@ -555,9 +599,9 @@
                             coin.classList.add("fail");
                             SFX.fail();
                         }
-                    }, 1100);
-                    // Show message and OK button after animation
-                    setTimeout(function() {
+                    }
+                    // Reveal step 2: the message + OK button.
+                    function revealCoinMessage() {
                         if (data.success) {
                             msgEl.textContent = "So skipped";
                             msgEl.className = "coin-result success";
@@ -566,7 +610,33 @@
                             msgEl.className = "coin-result fail";
                         }
                         okBtn.style.display = "";
-                    }, 1300);
+                    }
+                    // Reset coin state
+                    coin.className = "coin";
+                    coin.textContent = "?";
+                    msgEl.textContent = "";
+                    msgEl.className = "coin-result";
+                    okBtn.style.display = "none";
+                    openModal("coin-modal");
+                    if (skipAnim) {
+                        // Instant mode: no flip animation, no whoosh — but
+                        // the result jingle still plays with the reveal.
+                        revealCoinFace();
+                        revealCoinMessage();
+                    } else {
+                        // Start flipping
+                        requestAnimationFrame(function() {
+                            coin.classList.add("flipping");
+                            SFX.whoosh();
+                        });
+                        // Swap to result on the last flip (at ~92% of 1.2s =
+                        // ~1.1s) — synced with what the eye sees, never at
+                        // fetch-response time (that would leak the outcome
+                        // early).
+                        setTimeout(revealCoinFace, 1100);
+                        // Show message and OK button after animation
+                        setTimeout(revealCoinMessage, 1300);
+                    }
                     okBtn.onclick = function() {
                         closeModal("coin-modal");
                         if (data.success) resetForRespin();
@@ -609,12 +679,7 @@
                 currentMap = COURSES[idx];
                 currentIndex = idx;
                 spinBtn.disabled = true;
-                spinToIndex(idx, function() {
-                    document.getElementById("wheel-label").textContent = currentLabel();
-                    document.getElementById("wheel-label").classList.add("visible");
-                    enableVetoControls();
-                    enableNextRace();
-                });
+                landOnIndex(idx);
                 manualSelect.value = "";
             });
         }
