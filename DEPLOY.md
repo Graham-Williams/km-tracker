@@ -304,22 +304,22 @@ a normal redeploy picks them up automatically.
 
 Staging doesn't build from the main checkout. The box carries a **box-local,
 untracked** compose override, `docker-compose.staging-preview.yml` (it lives
-only at `/home/graham/km-tracker` on the box and is not in git), whose job is
+only at `/home/<user>/km-tracker` on the box and is not in git), whose job is
 to point the `staging-app` **build context** at a **linked git worktree**:
 
 ```yaml
-# /home/graham/km-tracker/docker-compose.staging-preview.yml  (box-local, untracked)
+# /home/<user>/km-tracker/docker-compose.staging-preview.yml  (box-local, untracked)
 services:
   staging-app:
     build:
-      context: /home/graham/km-tracker-staging
+      context: /home/<user>/km-tracker-staging
 ```
 
 Two checkouts of the same repo:
 
-- `/home/graham/km-tracker` — the **main checkout**. Stays on `main`; prod
+- `/home/<user>/km-tracker` — the **main checkout**. Stays on `main`; prod
   deploys build from here.
-- `/home/graham/km-tracker-staging` — a linked worktree (`git worktree add`),
+- `/home/<user>/km-tracker-staging` — a linked worktree (`git worktree add`),
   kept on a **detached HEAD** of whatever ref staging is previewing. Detached
   because git refuses to check out, in a worktree, a branch that's already
   checked out in the main checkout (and vice versa).
@@ -329,14 +329,14 @@ Two checkouts of the same repo:
 ```bash
 # 1. Fetch (the worktree shares the main checkout's object store, so one
 #    fetch covers both):
-git -C /home/graham/km-tracker fetch origin
+git -C /home/<user>/km-tracker fetch origin
 
 # 2. Point the staging worktree at the ref (detached HEAD):
-git -C /home/graham/km-tracker-staging checkout --detach origin/<branch>
+git -C /home/<user>/km-tracker-staging checkout --detach origin/<branch>
 
 # 3. From the MAIN checkout — never the worktree — rebuild/restart ONLY
 #    the staging-app service:
-cd /home/graham/km-tracker
+cd /home/<user>/km-tracker
 docker compose -f docker-compose.yml -f docker-compose.access.yml \
   -f docker-compose.staging.yml -f docker-compose.staging-preview.yml \
   up -d --build --no-deps staging-app
@@ -352,25 +352,25 @@ cup is in progress on prod.
 
 **Gotchas:**
 
-- **Run the `up` from `/home/graham/km-tracker`, never from the worktree.**
+- **Run the `up` from `/home/<user>/km-tracker`, never from the worktree.**
   `docker-compose.staging.yml` bind-mounts `./data` relative to the compose
   project directory — run it from the worktree and staging's DB mount silently
-  points at `/home/graham/km-tracker-staging/data` instead of the real
+  points at `/home/<user>/km-tracker-staging/data` instead of the real
   `./data`. A different directory is also a different compose *project name*,
   so compose would create a duplicate set of containers instead of updating
   the existing ones.
 - **Compose config is read from the main checkout, not the worktree.** The
   worktree only supplies the *build context* (app code); the `-f` files come
-  from `/home/graham/km-tracker`. If the previewed branch changes compose
+  from `/home/<user>/km-tracker`. If the previewed branch changes compose
   config itself (e.g. adds an env var like `APP_ENV`, changes a service), the
   main checkout's compose files won't have it. Temporarily flip the main
   checkout to the previewed branch for the `up`, then **flip it back to
   `main` immediately** — prod deploys assume the main checkout is on `main`:
 
   ```bash
-  git -C /home/graham/km-tracker checkout <branch>   # pick up compose changes
+  git -C /home/<user>/km-tracker checkout <branch>   # pick up compose changes
   # ... run the scoped `up` from step 3 ...
-  git -C /home/graham/km-tracker checkout main       # ALWAYS flip back
+  git -C /home/<user>/km-tracker checkout main       # ALWAYS flip back
   ```
 
 ### First bring-up — seed the staging DB
@@ -523,7 +523,7 @@ copy** — you don't need to make it manually.
 ### 3. Configure the backup
 
 ```bash
-cd /home/graham/km-tracker
+cd /home/<user>/km-tracker
 cp .env.backup.example .env.backup
 # Edit .env.backup — at minimum confirm RCLONE_DEST=gdrive:km-tracker-backups
 chmod 600 .env.backup   # the script refuses to source it if group/other-writable
@@ -540,7 +540,10 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now km-backup.timer
 ```
 
-The units assume the repo at `/home/graham/km-tracker` and run as user `graham`.
+The units assume the repo at `/home/<user>/km-tracker` and run as user `<user>` —
+edit the `User=` line and the `ExecStart` path in `deploy/km-backup.service` to
+match your box before the `cp` above (or edit the installed copy, then
+`daemon-reload`).
 
 ### 5. Verify
 
