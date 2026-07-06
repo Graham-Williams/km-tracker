@@ -84,6 +84,13 @@ Edit `.env` and fill in:
 
 - `TUNNEL_TOKEN` — you'll get this in Step 4.
 
+- `ANTHROPIC_API_KEY` — **optional.** Enables photo score extraction (reading a
+  photographed standings screen via the Claude API). Leave blank and the app
+  degrades gracefully: the score forms offer attach-only photo mode and manual
+  entry is unaffected. Both compose files pass it through to the prod **and**
+  staging containers (staging parity — same key), so setting it in the box
+  `.env` enables it everywhere after the next `up -d`.
+
 `.env` is gitignored — never commit it.
 
 Then create the data directory and give it to the container user **before the first

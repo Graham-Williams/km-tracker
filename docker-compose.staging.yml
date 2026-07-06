@@ -36,4 +36,6 @@ services:
       - APP_HOST=${STAGING_APP_HOST:-staging-km.graham-williams.com}
       - CF_ACCESS_TEAM_DOMAIN=${CF_ACCESS_TEAM_DOMAIN}
       - CF_ACCESS_AUD=${STAGING_CF_ACCESS_AUD}
+      # Optional — photo score extraction (same key as prod; staging parity).
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
     restart: unless-stopped
