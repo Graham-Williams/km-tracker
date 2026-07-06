@@ -324,6 +324,12 @@ a:hover {
   transform: translateY(1px);
 }
 
+.btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  pointer-events: none; /* no hover/active treatment while disabled */
+}
+
 .btn-primary {
   background: var(--color-accent-gradient);
   color: var(--color-accent-contrast);
@@ -659,6 +665,39 @@ input[type="checkbox"] {
 /* The author display rule above would otherwise beat the UA [hidden] rule. */
 .photo-attach-status[hidden] {
   display: none;
+}
+
+/* Extraction-in-flight spinner — sits inline beside the .photo-status text
+   while the /extract-scores fetch is running (photo_score.js toggles the
+   hidden attribute). Pure CSS animation; static ring under reduced motion. */
+.photo-extract-spinner {
+  display: inline-block;
+  width: 0.9em;
+  height: 0.9em;
+  vertical-align: -0.1em;
+  margin-right: var(--space-1);
+  border: 2px solid var(--color-border-strong);
+  border-top-color: var(--color-accent);
+  border-radius: 50%;
+  animation: photo-extract-spin 0.8s linear infinite;
+}
+
+/* The author display rule above would otherwise beat the UA [hidden] rule. */
+.photo-extract-spinner[hidden] {
+  display: none;
+}
+
+@keyframes photo-extract-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .photo-extract-spinner {
+    animation: none;
+    border-color: var(--color-accent); /* solid accent ring, no motion */
+  }
 }
 
 /* ---------- Empty state ---------- */
