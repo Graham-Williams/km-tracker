@@ -229,10 +229,14 @@ must not regress:
   (placements/lines are computed at completion, not on ad-hoc inserts). Note the
   standalone score form/tests therefore target an in-progress cup
   (`helpers.start_inprogress_cup`).
-- **`next-race` course validation (#41):** the submitted `map` must be in
-  `courses_for(cup.game_edition)`; arbitrary or off-edition names → 400, no race
-  recorded. Keeps history/stats clean. (Placeholder map names in tests must be
-  real courses now — e.g. "Coconut Mall", not "A".)
+- **Course validation, BOTH write paths (#41):** the submitted `map` must be in
+  `courses_for(cup.game_edition)`. (1) `cup_session_next_race` → 400, no race
+  recorded on a bad name. (2) `cup_session_submit` (completion form) also
+  re-writes race maps via `race_N` fields — each submitted (non-empty) override
+  is validated the same way and rejected with flash+redirect (no write, cup
+  stays in_progress) if off-edition/arbitrary. Both doors keep history/stats
+  clean. (Placeholder map names in tests must be real courses now — e.g.
+  "Coconut Mall", not "A".)
 - **Atomic cup completion (#39):** `cup_session_submit` transitions status with a
   conditional `UPDATE cups SET status='completed' WHERE id=? AND status='in_progress'`
   and applies scores/line adjustments ONLY if `rowcount == 1`. Concurrent

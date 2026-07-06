@@ -146,6 +146,38 @@ def test_next_race_accepts_valid_edition_course(client):
     assert _count("races", "cup_id = ? AND map = 'Coconut Mall'", (cup_id,)) == 1
 
 
+def test_complete_form_rejects_off_edition_race_map_override(client):
+    # Second door for #41: the completion form re-writes race maps via race_N
+    # fields. A crafted/stale POST with an off-edition/arbitrary course must be
+    # rejected cleanly and must NOT persist the bogus name into race history.
+    cup_id = _start_session(client, ("1", "2"), edition="wii")
+    client.post(f"/cup-session/{cup_id}/next-race", json={"map": "Coconut Mall"})  # race 1
+
+    resp = client.post(
+        f"/cup-session/{cup_id}/complete",
+        data={
+            "notes": "",
+            "tz_offset": "",
+            "race_1": "Mario Kart Stadium",  # mk8dx-only course on a Wii cup
+            "player_ids[]": ["1", "2"],
+            "scores[]": ["100", "80"],
+            "lines[]": ["0", "0"],
+        },
+        follow_redirects=False,
+    )
+    assert resp.status_code < 500  # clean rejection (flash+redirect), not a 500
+    conn = get_connection()
+    race_map = conn.execute(
+        "SELECT map FROM races WHERE cup_id = ? AND race_number = 1", (cup_id,)
+    ).fetchone()["map"]
+    status = conn.execute(
+        "SELECT status FROM cups WHERE id = ?", (cup_id,)
+    ).fetchone()["status"]
+    conn.close()
+    assert race_map == "Coconut Mall"  # bogus override never persisted
+    assert status == "in_progress"  # rejected before completion
+
+
 # =============================================================================
 # #45 — misaligned player_ids[] / scores[] must not misattribute scores
 # =============================================================================

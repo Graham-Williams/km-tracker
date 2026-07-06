@@ -1430,17 +1430,26 @@ def cup_session_complete(cup_id):
 def cup_session_submit(cup_id):
     conn = get_connection()
     cup = conn.execute(
-        "SELECT id, status FROM cups WHERE id = ? AND status = 'in_progress'",
+        "SELECT id, status, game_edition FROM cups WHERE id = ? AND status = 'in_progress'",
         (cup_id,),
     ).fetchone()
     if cup is None:
         conn.close()
         abort(404)
 
-    # Update races if edited
+    # Update races if edited. Validate each edited map against this cup's edition
+    # (issue #41 — second door): the completion form lets you override race maps,
+    # and a crafted/stale POST could otherwise persist an arbitrary or off-edition
+    # course name straight into history, polluting stats. Only submitted (non-empty)
+    # values are checked; unchanged/empty fields are skipped as before.
+    edition_courses = courses_for(cup["game_edition"])
     for i in range(1, MAX_RACES + 1):
         new_map = request.form.get(f"race_{i}")
         if new_map:
+            if new_map not in edition_courses:
+                conn.close()
+                flash("Invalid course for this edition.")
+                return redirect(url_for("cup_session_complete", cup_id=cup_id))
             conn.execute(
                 "UPDATE races SET map = ? WHERE cup_id = ? AND race_number = ?",
                 (new_map, cup_id, i),
