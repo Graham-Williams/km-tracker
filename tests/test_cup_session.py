@@ -1331,14 +1331,14 @@ def test_stale_veto_forfeit_applies_entering_race_3(client):
     # A player holding all 3 half-vetoes when entering race 3 forfeits one.
     _setup_players(client)
     _create_session(client, ["1", "2"])
-    _record_race(client, 1, "A")  # race 1 recorded — no check yet
+    _record_race(client, 1, "Coconut Mall")  # race 1 recorded — no check yet
     conn = get_connection()
     before = [r["half_veto_count"] for r in conn.execute(
         "SELECT half_veto_count FROM cup_players WHERE cup_id = 1 ORDER BY player_id")]
     conn.close()
     assert before == [0, 0]
 
-    _record_race(client, 1, "B")  # race 2 recorded → entering race 3 → forfeit fires
+    _record_race(client, 1, "Rainbow Road")  # race 2 recorded → entering race 3 → forfeit fires
     conn = get_connection()
     after = [r["half_veto_count"] for r in conn.execute(
         "SELECT half_veto_count FROM cup_players WHERE cup_id = 1 ORDER BY player_id")]
@@ -1352,8 +1352,8 @@ def test_stale_veto_forfeit_skips_players_who_used_vetoes(client):
     _create_session(client, ["1", "2"])
     client.post("/cup-session/1/half-veto", json={"player_id": 1})  # player 1 uses two
     client.post("/cup-session/1/half-veto", json={"player_id": 1})
-    _record_race(client, 1, "A")
-    _record_race(client, 1, "B")  # entering race 3
+    _record_race(client, 1, "Coconut Mall")
+    _record_race(client, 1, "Rainbow Road")  # entering race 3
     conn = get_connection()
     counts = {r["player_id"]: r["half_veto_count"] for r in conn.execute(
         "SELECT player_id, half_veto_count FROM cup_players WHERE cup_id = 1")}
@@ -1367,7 +1367,7 @@ def test_stale_veto_forfeit_fires_only_once(client):
     # forfeit again.
     _setup_players(client)
     _create_session(client, ["1", "2"])
-    for m in ["A", "B", "C", "D"]:  # all four races
+    for m in ["Coconut Mall", "Rainbow Road", "Moo Moo Meadows", "Koopa Cape"]:  # all four races
         _record_race(client, 1, m)
     conn = get_connection()
     counts = [r["half_veto_count"] for r in conn.execute(
@@ -1379,7 +1379,7 @@ def test_stale_veto_forfeit_fires_only_once(client):
 def test_stale_veto_forfeit_flashes_on_race_page(client):
     _setup_players(client)
     _create_session(client, ["1", "2"])
-    _record_race(client, 1, "A")
-    _record_race(client, 1, "B")  # triggers forfeit + flash
+    _record_race(client, 1, "Coconut Mall")
+    _record_race(client, 1, "Rainbow Road")  # triggers forfeit + flash
     page = client.get("/cup-session/1").get_data(as_text=True)
     assert "Stale veto forfeit" in page

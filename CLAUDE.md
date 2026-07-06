@@ -213,6 +213,41 @@ is generated in-process and the JWKS fetch is monkeypatched):
   flows: double score submit (no duplicate scores / double line adjustments),
   acting on completed/cancelled cups, veto/race counters never exceed limits,
   duplicate race-number conflict, skipped steps.
+- `tests/test_data_integrity.py` — regression tests for the data-integrity
+  batch (issues #36/#39/#40/#41/#45); see "Data-integrity guards" below.
+
+### Data-integrity guards (issues #36, #39, #40, #41, #45)
+
+Stat-corrupting / crash holes found by `break-staging`, now guarded. These are
+validation/atomicity fixes only — no data migration. Contracts a future agent
+must not regress:
+
+- **Standalone `POST /scores` (#40):** `create_score` writes ONLY to a cup that
+  is `status='in_progress'` and not soft-deleted. A completed/cancelled/deleted/
+  nonexistent target is rejected with a flash + redirect (no 500, nothing
+  persisted) — a raw insert into a finalized cup would corrupt its standings
+  (placements/lines are computed at completion, not on ad-hoc inserts). Note the
+  standalone score form/tests therefore target an in-progress cup
+  (`helpers.start_inprogress_cup`).
+- **`next-race` course validation (#41):** the submitted `map` must be in
+  `courses_for(cup.game_edition)`; arbitrary or off-edition names → 400, no race
+  recorded. Keeps history/stats clean. (Placeholder map names in tests must be
+  real courses now — e.g. "Coconut Mall", not "A".)
+- **Atomic cup completion (#39):** `cup_session_submit` transitions status with a
+  conditional `UPDATE cups SET status='completed' WHERE id=? AND status='in_progress'`
+  and applies scores/line adjustments ONLY if `rowcount == 1`. Concurrent
+  completers: only one wins (the loser gets 409, applies nothing) — lines can't
+  shift twice, `line_changes` can't duplicate.
+- **Atomic veto/voto counters (#36):** increments go through `increment_voto()` /
+  `increment_half_veto()`, each a single cap-guarded conditional UPDATE
+  (`... WHERE ... AND count < CAP`) that returns the new count or `None` when
+  rejected. The cap check lives in the WHERE clause so concurrent requests can't
+  exceed `MAX_VOTOES` / `MAX_HALF_VETOES`. Routes use these helpers.
+- **Player/score pairing (#45):** `parse_scores_from_form` rejects a request
+  where `len(player_ids[]) != len(scores[])` (ambiguous positional pairing that
+  would misattribute scores). Client side, `cup_new.html` disables ALL of a
+  removed row's inputs together (`player_ids[]` + `lines[]` + score inputs), so
+  a removed player submits nothing and the arrays stay aligned.
 
 ## UI / Design System
 

@@ -1,13 +1,19 @@
 from app import validate_scores
 from db import get_connection
-from helpers import create_cup, create_player, create_score
+from helpers import create_player, create_score, start_inprogress_cup
 
 
 def setup_cup_with_players(client):
-    """Create two players and a cup with player 1's score."""
+    """Create two players and an in-progress cup with player 1's score.
+
+    Standalone scores can only target an in-progress cup (issue #40), so the
+    cup here is a live session (not a completed direct cup). Player 1's score is
+    inserted first so it keeps score id 1 (tests below rely on that ordering).
+    """
     create_player(client, "Alice")
     create_player(client, "Bob")
-    create_cup(client, player_id="1", score="50")
+    cup_id = start_inprogress_cup(client, ("1", "2"))
+    create_score(client, cup_id=cup_id, player_id=1, score=50)
 
 
 # --- validate_scores ---
@@ -214,8 +220,8 @@ def test_standalone_score_uses_player_current_line(client):
     create_player(client, "Bob")
     # Set Bob's line to +10
     client.post("/players/2/edit", data={"name": "Bob", "has_line": "on", "line": "10"})
-    create_cup(client, player_id="1", score="50")
-    create_score(client, cup_id=1, player_id=2, score=80)
+    cup_id = start_inprogress_cup(client, ("1", "2"))
+    create_score(client, cup_id=cup_id, player_id=2, score=80)
     conn = get_connection()
     score = conn.execute("SELECT line, line_score FROM scores WHERE player_id = 2").fetchone()
     conn.close()
@@ -227,14 +233,14 @@ def test_standalone_score_edit_uses_current_line(client):
     """Editing a standalone score recalculates line_score with player's current line."""
     create_player(client, "Alice")
     create_player(client, "Bob")
-    create_cup(client, player_id="1", score="50")
-    create_score(client, cup_id=1, player_id=2, score=80)
+    cup_id = start_inprogress_cup(client, ("1", "2"))
+    create_score(client, cup_id=cup_id, player_id=2, score=80)
     # Change Bob's line after score was created
     client.post("/players/2/edit", data={"name": "Bob", "has_line": "on", "line": "15"})
-    # Edit the score (ID 2)
-    client.post("/scores/2/edit", data={"score": "80"}, follow_redirects=True)
+    # Edit the score (Bob's is the only score, id 1)
+    client.post("/scores/1/edit", data={"score": "80"}, follow_redirects=True)
     conn = get_connection()
-    score = conn.execute("SELECT line, line_score FROM scores WHERE id = 2").fetchone()
+    score = conn.execute("SELECT line, line_score FROM scores WHERE id = 1").fetchone()
     conn.close()
     # Line_score recalculated with current line (15), not original (0)
     assert score["line"] == 15
