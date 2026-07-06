@@ -558,6 +558,10 @@ def create_cup():
         if photo:
             save_cup_photo(conn, cup_id, photo)
         conn.commit()
+        if photo:
+            # Confirm the photo made it — the attach is async client-side, so
+            # an explicit "photo saved" closes the loop on silent drops.
+            flash("Cup recorded — photo saved.", "success")
         if changes:
             player_names = {
                 r["id"]: r["name"]
@@ -598,6 +602,12 @@ def edit_cup(cup_id):
     all_players = conn.execute(
         "SELECT id, name, line, has_line FROM players ORDER BY name"
     ).fetchall()
+    has_photo = (
+        conn.execute(
+            "SELECT 1 FROM cup_photos WHERE cup_id = ? LIMIT 1", (cup_id,)
+        ).fetchone()
+        is not None
+    )
     conn.close()
     scores_by_player = {s["player_id"]: s for s in existing_scores}
     cup_players = [{"id": s["player_id"], "name": s["name"], "line": s["line"], "has_line": s["has_line"]} for s in existing_scores]
@@ -609,6 +619,7 @@ def edit_cup(cup_id):
         all_players=all_players,
         scores_by_player=scores_by_player,
         lines_by_id=lines_by_id,
+        has_photo=has_photo,
     )
 
 
@@ -1541,6 +1552,10 @@ def cup_session_submit(cup_id):
         if photo:
             save_cup_photo(conn, cup_id, photo)
         conn.commit()
+        if photo:
+            # Confirm the photo made it — the attach is async client-side, so
+            # an explicit "photo saved" closes the loop on silent drops.
+            flash("Cup recorded — photo saved.", "success")
         if changes:
             player_names = {
                 r["id"]: r["name"]

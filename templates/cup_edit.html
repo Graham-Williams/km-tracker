@@ -58,6 +58,13 @@
         border-radius: var(--radius-sm);
         margin-bottom: var(--space-3);
     }
+    .cup-photo {
+        display: block;
+        width: 100%;
+        max-height: 360px;
+        object-fit: contain;
+        border-radius: var(--radius-sm);
+    }
 </style>
 {% endblock %}
 
@@ -114,6 +121,15 @@
         <a href="{{ url_for('cups') }}" class="btn btn-ghost">Cancel</a>
     </div>
 </form>
+
+{% if has_photo %}
+<div class="card mt-4">
+    <div class="section-heading">Standings photo</div>
+    <a href="{{ url_for('cup_photo', cup_id=cup.id) }}" target="_blank" title="View full-size standings photo">
+        <img src="{{ url_for('cup_photo', cup_id=cup.id) }}" alt="Cup standings photo" loading="lazy" class="cup-photo">
+    </a>
+</div>
+{% endif %}
 
 <script>
     document.getElementById("tz-offset").value = new Date().getTimezoneOffset();

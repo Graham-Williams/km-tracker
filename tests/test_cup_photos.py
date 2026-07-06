@@ -272,6 +272,100 @@ def test_cups_page_shows_thumbnail_only_when_photo_exists(client):
     assert page.data.count(b"/cups/2/photo") == 0
 
 
+# --- "Photo saved" flash confirmation ---
+
+
+def test_manual_create_flash_confirms_photo_saved(client):
+    create_player(client, "Alice")
+    response = client.post(
+        "/cups",
+        data={
+            "date": "2026-03-15T20:00",
+            "player_ids[]": ["1"],
+            "scores[]": ["50"],
+            "lines[]": ["0"],
+            "photo_data": PHOTO_B64,
+            "photo_mime": "image/jpeg",
+        },
+        follow_redirects=True,
+    )
+    assert response.status_code == 200
+    assert b"photo saved" in response.data
+
+
+def test_manual_create_without_photo_has_no_photo_flash(client):
+    create_player(client, "Alice")
+    response = client.post(
+        "/cups",
+        data={"date": "2026-03-15T20:00", "player_ids[]": ["1"], "scores[]": ["50"], "lines[]": ["0"]},
+        follow_redirects=True,
+    )
+    assert response.status_code == 200
+    assert b"photo saved" not in response.data
+
+
+def test_session_submit_flash_confirms_photo_saved(client):
+    cup_id = _start_session(client)
+    response = client.post(
+        f"/cup-session/{cup_id}/complete",
+        data={
+            "player_ids[]": ["1", "2"],
+            "scores[]": ["60", "54"],
+            "lines[]": ["0", "0"],
+            "photo_data": PHOTO_B64,
+            "photo_mime": "image/jpeg",
+        },
+        follow_redirects=True,
+    )
+    assert response.status_code == 200
+    assert b"photo saved" in response.data
+
+
+def test_session_submit_without_photo_has_no_photo_flash(client):
+    cup_id = _start_session(client)
+    response = client.post(
+        f"/cup-session/{cup_id}/complete",
+        data={"player_ids[]": ["1", "2"], "scores[]": ["60", "54"], "lines[]": ["0", "0"]},
+        follow_redirects=True,
+    )
+    assert response.status_code == 200
+    assert b"photo saved" not in response.data
+
+
+# --- Photo on the cup edit page ---
+
+
+def test_cup_edit_shows_photo_when_present(client):
+    create_player(client, "Alice")
+    client.post(
+        "/cups",
+        data={
+            "date": "2026-03-15T20:00",
+            "player_ids[]": ["1"],
+            "scores[]": ["50"],
+            "lines[]": ["0"],
+            "photo_data": PHOTO_B64,
+            "photo_mime": "image/jpeg",
+        },
+    )
+    page = client.get("/cups/1/edit")
+    assert page.status_code == 200
+    assert b"/cups/1/photo" in page.data
+    assert b"Standings photo" in page.data
+
+
+def test_cup_edit_hides_photo_when_absent(client):
+    create_player(client, "Alice")
+    client.post(
+        "/cups",
+        data={"date": "2026-03-15T20:00", "player_ids[]": ["1"], "scores[]": ["50"], "lines[]": ["0"]},
+    )
+    page = client.get("/cups/1/edit")
+    assert page.status_code == 200
+    assert b"/cups/1/photo" not in page.data
+    assert b"Standings photo" not in page.data
+
+
 def test_newest_photo_wins_when_multiple(client):
     # Editing/resubmitting can attach a second photo; the serve route returns
     # the newest one.

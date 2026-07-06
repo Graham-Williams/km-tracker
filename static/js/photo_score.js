@@ -6,8 +6,19 @@
  * stores the base64 in the form's hidden photo_data field so the photo is
  * saved with the cup on submit, and — when extraction is enabled — POSTs it
  * to /extract-scores and pre-fills matching score inputs. It NEVER submits
- * the form; the human always reviews first. Manual entry works regardless of
- * what happens here.
+ * the form on its own; the human always reviews first. Manual entry works
+ * regardless of what happens here.
+ *
+ * Silent-drop guards (the photo attach is async, so a submit could otherwise
+ * race it or follow a failed decode without anyone noticing):
+ *   - The photo buttons ship disabled and are enabled + wired here — if this
+ *     script never loads, the picker simply can't open, so a pick can never
+ *     happen unguarded.
+ *   - A prominent attach indicator (.photo-attach-status) shows success
+ *     ("Photo attached ✓") or a tinted error on decode failure.
+ *   - A submit guard on the surrounding form: submit while a downscale is
+ *     pending is blocked and auto-resumed when it settles; submit after a
+ *     failed attach requires an explicit confirm() to proceed photoless.
  *
  * Usage (per page):
  *   initPhotoScore({
@@ -18,22 +29,46 @@
 window.initPhotoScore = function (opts) {
     var block = document.getElementById("photo-score");
     if (!block) return;
+    var attachEl = block.querySelector(".photo-attach-status");
     var statusEl = block.querySelector(".photo-status");
     var notesEl = block.querySelector(".photo-notes");
     var preview = block.querySelector(".photo-preview");
     var dataField = document.getElementById("photo-data");
     var mimeField = document.getElementById("photo-mime");
+    var form = block.closest("form");
 
     var MAX_EDGE = 1200;
     var JPEG_QUALITY = 0.8;
+    var DECODE_ERROR_MSG =
+        "Couldn't read that image — try taking the photo with the camera, " +
+        "or use a JPEG/PNG.";
 
     // Bumped every time a new photo is picked; async work carries the value it
     // started with and bails if a newer pick has superseded it, so a stale
     // extraction response can never overwrite the newer photo's results.
     var requestSeq = 0;
 
+    // Submit-guard state.
+    var pending = false;         // a downscale is in flight
+    var lastPickFailed = false;  // the most recent pick failed to attach
+    var waitingToSubmit = false; // a submit was blocked while pending
+
     function setStatus(msg) {
         statusEl.textContent = msg;
+    }
+
+    // kind: "success" | "error" | "pending" | null (null hides the indicator)
+    function setAttachState(kind, msg) {
+        attachEl.classList.remove("is-success", "is-error");
+        if (!kind) {
+            attachEl.hidden = true;
+            attachEl.textContent = "";
+            return;
+        }
+        if (kind === "success") attachEl.classList.add("is-success");
+        if (kind === "error") attachEl.classList.add("is-error");
+        attachEl.textContent = msg;
+        attachEl.hidden = false;
     }
 
     function downscale(file, cb) {
@@ -113,15 +148,40 @@ window.initPhotoScore = function (opts) {
         });
     }
 
+    // Called when the latest pick's downscale settles (success or failure).
+    // If a submit was blocked while pending, resume it — requestSubmit re-runs
+    // every submit handler (including the guard below, which now sees the
+    // settled state, and any tie-check confirms on the page).
+    function settled() {
+        pending = false;
+        if (!waitingToSubmit || !form) return;
+        waitingToSubmit = false;
+        if (form.requestSubmit) form.requestSubmit();
+        else form.submit();
+    }
+
     function handleFile(file) {
         if (!file) return;
         var seq = ++requestSeq;
-        setStatus("Processing photo…");
+        pending = true;
+        lastPickFailed = false;
+        waitingToSubmit = false; // a new pick supersedes a blocked submit
+        setAttachState("pending", "Processing photo…");
+        setStatus("");
         notesEl.textContent = "";
         downscale(file, function (dataUrl) {
             if (seq !== requestSeq) return; // superseded by a newer photo
             if (!dataUrl) {
-                setStatus("Couldn't read that image — try another file.");
+                // Failed decode: make sure no stale photo from an earlier
+                // pick rides along — the indicator says "no photo", so the
+                // form state must match.
+                dataField.value = "";
+                mimeField.value = "";
+                preview.removeAttribute("src");
+                preview.style.display = "none";
+                lastPickFailed = true;
+                setAttachState("error", DECODE_ERROR_MSG);
+                settled();
                 return;
             }
             var base64 = dataUrl.split(",")[1];
@@ -129,13 +189,25 @@ window.initPhotoScore = function (opts) {
             mimeField.value = "image/jpeg";
             preview.src = dataUrl;
             preview.style.display = "";
+            setAttachState("success", "Photo attached ✓ — it will be saved with the cup.");
             if (opts.extractUrl) {
                 extract(base64, seq);
-            } else {
-                setStatus("Photo attached — it will be saved with the cup.");
             }
+            settled();
         });
     }
+
+    // Wire the visible buttons to the hidden file inputs. The buttons ship
+    // disabled in the markup, so if this script fails to load the picker
+    // never opens — no pick can happen without the guards below in place.
+    block.querySelectorAll("button[data-photo-input]").forEach(function (btn) {
+        var input = document.getElementById(btn.getAttribute("data-photo-input"));
+        if (!input) return;
+        btn.disabled = false;
+        btn.addEventListener("click", function () {
+            input.click();
+        });
+    });
 
     ["photo-take", "photo-pick"].forEach(function (id) {
         var input = document.getElementById(id);
@@ -145,4 +217,23 @@ window.initPhotoScore = function (opts) {
             input.value = ""; // allow re-picking the same file
         });
     });
+
+    // Submit guard: never let the form race or silently drop the photo.
+    if (form) {
+        form.addEventListener("submit", function (e) {
+            if (pending) {
+                // Downscale still in flight — hold the submit and resume it
+                // automatically when the pick settles.
+                e.preventDefault();
+                waitingToSubmit = true;
+                setAttachState("pending", "Finishing photo — submitting in a moment…");
+                return;
+            }
+            if (lastPickFailed && !dataField.value) {
+                if (!confirm("Your photo didn't attach — submit without it?")) {
+                    e.preventDefault();
+                }
+            }
+        });
+    }
 };
