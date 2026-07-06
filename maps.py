@@ -184,6 +184,99 @@ TRACK_SETS = {
     "mk8dx": MK8DX_COURSES,
 }
 
+# Playable-character rosters, keyed by edition — used for the per-player
+# default-character pickers and for matching photo-extracted standings rows
+# to players. Names match the in-game spelling shown on results screens.
+
+WII_CHARACTERS = [
+    "Baby Mario",
+    "Baby Luigi",
+    "Baby Peach",
+    "Baby Daisy",
+    "Toad",
+    "Toadette",
+    "Koopa Troopa",
+    "Dry Bones",
+    "Mario",
+    "Luigi",
+    "Peach",
+    "Daisy",
+    "Yoshi",
+    "Birdo",
+    "Diddy Kong",
+    "Bowser Jr.",
+    "Wario",
+    "Waluigi",
+    "Donkey Kong",
+    "Bowser",
+    "King Boo",
+    "Rosalina",
+    "Funky Kong",
+    "Dry Bowser",
+    "Mii",
+]
+
+# Mario Kart 8 Deluxe — full roster incl. the Booster Course Pass additions
+# (Birdo, Petey Piranha, Wiggler, Kamek, Diddy Kong, Funky Kong, Pauline,
+# Peachette).
+MK8DX_CHARACTERS = [
+    "Mario",
+    "Luigi",
+    "Peach",
+    "Daisy",
+    "Peachette",
+    "Rosalina",
+    "Tanooki Mario",
+    "Cat Peach",
+    "Birdo",
+    "Yoshi",
+    "Toad",
+    "Koopa Troopa",
+    "Shy Guy",
+    "Lakitu",
+    "Toadette",
+    "King Boo",
+    "Petey Piranha",
+    "Wiggler",
+    "Kamek",
+    "Baby Mario",
+    "Baby Luigi",
+    "Baby Peach",
+    "Baby Daisy",
+    "Baby Rosalina",
+    "Metal Mario",
+    "Gold Mario",
+    "Pink Gold Peach",
+    "Wario",
+    "Waluigi",
+    "Donkey Kong",
+    "Diddy Kong",
+    "Funky Kong",
+    "Bowser",
+    "Dry Bones",
+    "Bowser Jr.",
+    "Dry Bowser",
+    "Pauline",
+    "Lemmy",
+    "Larry",
+    "Wendy",
+    "Ludwig",
+    "Iggy",
+    "Roy",
+    "Morton",
+    "Inkling Girl",
+    "Inkling Boy",
+    "Link",
+    "Villager",
+    "Isabelle",
+    "Mii",
+]
+
+CHARACTERS = {
+    "wii": WII_CHARACTERS,
+    "mk8dx": MK8DX_CHARACTERS,
+}
+
 # Human-readable labels for display.
 EDITION_LABELS = {
     "wii": "Wii",
@@ -201,6 +294,11 @@ def courses_for(edition):
 def edition_label(edition):
     """Return a human-readable label for an edition string."""
     return EDITION_LABELS.get(edition, EDITION_LABELS[DEFAULT_EDITION])
+
+
+def characters_for(edition):
+    """Return the character roster for an edition, falling back to the default."""
+    return CHARACTERS.get(edition, CHARACTERS[DEFAULT_EDITION])
 
 
 # Backward-compat: existing importers expect a flat `COURSES` = the Wii list.

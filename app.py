@@ -22,6 +22,7 @@ from maps import (
     DEFAULT_EDITION,
     EDITION_LABELS,
     TRACK_SETS,
+    characters_for,
     courses_for,
     edition_label,
 )
@@ -278,6 +279,20 @@ def index():
     return render_template("index.html", in_progress_cup=in_progress)
 
 
+def parse_default_character(form, field, edition):
+    """Return the submitted default character for an edition, or None if blank.
+
+    Raises InvalidInput if the value isn't in the edition's roster — the picker
+    is a <select>, so anything else is a crafted POST.
+    """
+    value = (form.get(field) or "").strip()
+    if not value:
+        return None
+    if value not in characters_for(edition):
+        raise InvalidInput("Unknown character selection.")
+    return value
+
+
 @app.route("/players")
 def players():
     conn = get_connection()
@@ -285,7 +300,12 @@ def players():
         "SELECT id, name, default_cup, line, has_line FROM players ORDER BY name"
     ).fetchall()
     conn.close()
-    return render_template("players.html", players=rows)
+    return render_template(
+        "players.html",
+        players=rows,
+        wii_characters=characters_for("wii"),
+        switch_characters=characters_for("mk8dx"),
+    )
 
 
 @app.route("/players", methods=["POST"])
@@ -296,11 +316,20 @@ def create_player():
         return redirect(url_for("players"))
     default_cup = request.form.get("default_cup") == "on"
     has_line = request.form.get("has_line") == "on"
+    try:
+        character_wii = parse_default_character(request.form, "default_character_wii", "wii")
+        character_switch = parse_default_character(
+            request.form, "default_character_switch", "mk8dx"
+        )
+    except InvalidInput as e:
+        flash(str(e))
+        return redirect(url_for("players"))
     conn = get_connection()
     try:
         conn.execute(
-            "INSERT INTO players (name, default_cup, has_line) VALUES (?, ?, ?)",
-            (name, default_cup, has_line),
+            "INSERT INTO players (name, default_cup, has_line, default_character_wii, default_character_switch) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (name, default_cup, has_line, character_wii, character_switch),
         )
         conn.commit()
     except sqlite3.IntegrityError:
@@ -314,12 +343,19 @@ def create_player():
 def edit_player(player_id):
     conn = get_connection()
     player = conn.execute(
-        "SELECT id, name, default_cup, line, has_line FROM players WHERE id = ?", (player_id,)
+        "SELECT id, name, default_cup, line, has_line, default_character_wii, default_character_switch "
+        "FROM players WHERE id = ?",
+        (player_id,),
     ).fetchone()
     conn.close()
     if player is None:
         abort(404)
-    return render_template("player_edit.html", player=player)
+    return render_template(
+        "player_edit.html",
+        player=player,
+        wii_characters=characters_for("wii"),
+        switch_characters=characters_for("mk8dx"),
+    )
 
 
 @app.route("/players/<int:player_id>/edit", methods=["POST"])
@@ -348,9 +384,19 @@ def update_player(player_id):
     if not has_line:
         line = 0
     try:
+        character_wii = parse_default_character(request.form, "default_character_wii", "wii")
+        character_switch = parse_default_character(
+            request.form, "default_character_switch", "mk8dx"
+        )
+    except InvalidInput as e:
+        conn.close()
+        flash(str(e))
+        return redirect(url_for("edit_player", player_id=player_id))
+    try:
         conn.execute(
-            "UPDATE players SET name = ?, default_cup = ?, line = ?, has_line = ? WHERE id = ?",
-            (name, default_cup, line, has_line, player_id),
+            "UPDATE players SET name = ?, default_cup = ?, line = ?, has_line = ?, "
+            "default_character_wii = ?, default_character_switch = ? WHERE id = ?",
+            (name, default_cup, line, has_line, character_wii, character_switch, player_id),
         )
         conn.commit()
     except sqlite3.IntegrityError:
