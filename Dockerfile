@@ -10,7 +10,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app.py db.py maps.py schema.sql ./
+COPY app.py db.py maps.py extraction.py schema.sql ./
 COPY templates/ templates/
 COPY static/ static/
 # scripts/ carries the staging seed helper (scripts/seed_staging.py), invoked via

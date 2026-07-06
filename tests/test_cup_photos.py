@@ -193,6 +193,52 @@ def test_cup_photo_served_with_stored_mime(client):
     assert response.data == PHOTO_BYTES
 
 
+def test_cup_photo_404_when_cup_soft_deleted(client):
+    create_player(client, "Alice")
+    client.post(
+        "/cups",
+        data={
+            "date": "2026-03-15T20:00",
+            "player_ids[]": ["1"],
+            "scores[]": ["50"],
+            "lines[]": ["0"],
+            "photo_data": PHOTO_B64,
+            "photo_mime": "image/jpeg",
+        },
+    )
+    assert client.get("/cups/1/photo").status_code == 200
+    client.post("/cups/1/delete")
+    assert client.get("/cups/1/photo").status_code == 404
+
+
+def test_cup_photo_sends_caching_headers_and_304(client):
+    create_player(client, "Alice")
+    client.post(
+        "/cups",
+        data={
+            "date": "2026-03-15T20:00",
+            "player_ids[]": ["1"],
+            "scores[]": ["50"],
+            "lines[]": ["0"],
+            "photo_data": PHOTO_B64,
+            "photo_mime": "image/jpeg",
+        },
+    )
+    response = client.get("/cups/1/photo")
+    assert response.status_code == 200
+    etag = response.headers.get("ETag")
+    assert etag
+    assert "max-age=86400" in response.headers.get("Cache-Control", "")
+    # Conditional revalidation: matching ETag -> 304 with no body.
+    conditional = client.get("/cups/1/photo", headers={"If-None-Match": etag})
+    assert conditional.status_code == 304
+    assert conditional.data == b""
+    # Non-matching ETag -> full response again.
+    fresh = client.get("/cups/1/photo", headers={"If-None-Match": '"nope"'})
+    assert fresh.status_code == 200
+    assert fresh.data == PHOTO_BYTES
+
+
 def test_cup_photo_404_when_absent(client):
     create_player(client, "Alice")
     client.post(

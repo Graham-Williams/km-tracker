@@ -27,6 +27,11 @@ window.initPhotoScore = function (opts) {
     var MAX_EDGE = 1200;
     var JPEG_QUALITY = 0.8;
 
+    // Bumped every time a new photo is picked; async work carries the value it
+    // started with and bails if a newer pick has superseded it, so a stale
+    // extraction response can never overwrite the newer photo's results.
+    var requestSeq = 0;
+
     function setStatus(msg) {
         statusEl.textContent = msg;
     }
@@ -67,7 +72,7 @@ window.initPhotoScore = function (opts) {
         return filled;
     }
 
-    function extract(base64) {
+    function extract(base64, seq) {
         setStatus("Reading scores from the photo…");
         var payload = opts.getPayload();
         payload.image = base64;
@@ -81,6 +86,7 @@ window.initPhotoScore = function (opts) {
                 return { ok: res.ok, status: res.status, body: body };
             });
         }).then(function (res) {
+            if (seq !== requestSeq) return; // superseded by a newer photo
             if (!res.ok) {
                 var msg = (res.body && res.body.error) ||
                     "Extraction failed (" + res.status + ")";
@@ -102,15 +108,18 @@ window.initPhotoScore = function (opts) {
             }
             notesEl.textContent = notes.join(" · ");
         }).catch(function () {
+            if (seq !== requestSeq) return; // superseded by a newer photo
             setStatus("Network error during extraction — photo is still attached; enter scores manually.");
         });
     }
 
     function handleFile(file) {
         if (!file) return;
+        var seq = ++requestSeq;
         setStatus("Processing photo…");
         notesEl.textContent = "";
         downscale(file, function (dataUrl) {
+            if (seq !== requestSeq) return; // superseded by a newer photo
             if (!dataUrl) {
                 setStatus("Couldn't read that image — try another file.");
                 return;
@@ -121,7 +130,7 @@ window.initPhotoScore = function (opts) {
             preview.src = dataUrl;
             preview.style.display = "";
             if (opts.extractUrl) {
-                extract(base64);
+                extract(base64, seq);
             } else {
                 setStatus("Photo attached — it will be saved with the cup.");
             }

@@ -1,5 +1,6 @@
 import base64
 import binascii
+import hashlib
 import json
 import os
 import random
@@ -1628,16 +1629,26 @@ def save_cup_photo(conn, cup_id, photo):
 
 @app.route("/cups/<int:cup_id>/photo")
 def cup_photo(cup_id):
-    """Serve the newest photo attached to a cup. 404 when there is none."""
+    """Serve the newest photo attached to a cup. 404 when there is none (or
+    the cup is soft-deleted). Sends ETag + Cache-Control and honors
+    If-None-Match with a 304, so /cups doesn't re-download every photo on
+    every visit.
+    """
     conn = get_connection()
     row = conn.execute(
-        "SELECT image, mime_type FROM cup_photos WHERE cup_id = ? ORDER BY id DESC LIMIT 1",
+        "SELECT p.image, p.mime_type FROM cup_photos p"
+        " JOIN cups c ON c.id = p.cup_id"
+        " WHERE p.cup_id = ? AND c.deleted_at IS NULL"
+        " ORDER BY p.id DESC LIMIT 1",
         (cup_id,),
     ).fetchone()
     conn.close()
     if row is None:
         abort(404)
-    return Response(row["image"], mimetype=row["mime_type"])
+    response = Response(row["image"], mimetype=row["mime_type"])
+    response.set_etag(hashlib.sha1(bytes(row["image"])).hexdigest())
+    response.headers["Cache-Control"] = "private, max-age=86400"
+    return response.make_conditional(request)
 
 
 def default_character_field(edition):
