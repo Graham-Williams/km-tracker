@@ -694,6 +694,13 @@ def parse_scores_from_form(form):
         or len(lines) > MAX_SCORE_ROWS
     ):
         raise InvalidInput("Too many players/scores submitted.")
+    # player_ids[] and scores[] are paired positionally (zip). If their counts
+    # differ, the pairing is ambiguous and would silently misattribute scores to
+    # the wrong player (issue #45 — e.g. a removed middle player whose hidden
+    # player_ids[] input still submitted while its scores[] input did not).
+    # Reject rather than guess.
+    if len(player_ids) != len(raw_scores):
+        raise InvalidInput("Player and score fields are misaligned.")
     scores_data = []
     for i, (pid, raw) in enumerate(zip(player_ids, raw_scores)):
         raw = raw.strip()
@@ -912,6 +919,17 @@ def create_score():
 
     conn = get_connection()
     try:
+        # Guard the target cup's state (issue #40): a standalone score may only
+        # be written to a cup that is actively in progress and not soft-deleted.
+        # Writing into a completed/cancelled cup corrupts its finalized standings
+        # (placements/lines are computed at completion, not on ad-hoc inserts),
+        # and a soft-deleted cup should accept nothing. Reject cleanly, not 500.
+        cup = conn.execute(
+            "SELECT status, deleted_at FROM cups WHERE id = ?", (cup_id,)
+        ).fetchone()
+        if cup is None or cup["deleted_at"] is not None or cup["status"] != "in_progress":
+            flash("Scores can only be added to a cup that is currently in progress.")
+            return redirect(url_for("scores"))
         player = conn.execute(
             "SELECT line FROM players WHERE id = ?", (player_id,)
         ).fetchone()
@@ -1008,6 +1026,49 @@ MAX_VOTOES = 4
 # "Use it or lose it": a one-time check applied when entering this race. A player
 # who still holds ALL their half-vetoes at this point forfeits one.
 STALE_VETO_CHECK_RACE = 3
+
+
+def increment_voto(conn, cup_id):
+    """Atomically bump a cup's shared voto counter if it's below the cap.
+
+    The cap check lives INSIDE the UPDATE's WHERE clause (issue #36), so a
+    read-check-write race can't push the counter past MAX_VOTOES: concurrent
+    callers serialize on the write, and only the ones that still see
+    voto_count < cap actually increment. Returns the new count, or None if the
+    increment was rejected (cup not in progress, or already at the cap). Does
+    not commit — the caller owns the transaction.
+    """
+    result = conn.execute(
+        "UPDATE cups SET voto_count = voto_count + 1 "
+        "WHERE id = ? AND status = 'in_progress' AND voto_count < ?",
+        (cup_id, MAX_VOTOES),
+    )
+    if result.rowcount == 0:
+        return None
+    return conn.execute(
+        "SELECT voto_count FROM cups WHERE id = ?", (cup_id,)
+    ).fetchone()["voto_count"]
+
+
+def increment_half_veto(conn, cup_id, player_id):
+    """Atomically bump a player's half-veto counter if it's below the cap.
+
+    Same atomic cap guard as increment_voto (issue #36): the cap check is in the
+    UPDATE's WHERE clause so concurrent increments can't exceed MAX_HALF_VETOES.
+    Returns the new count, or None if rejected (player not in this cup, or
+    already at the cap). Does not commit — the caller owns the transaction.
+    """
+    result = conn.execute(
+        "UPDATE cup_players SET half_veto_count = half_veto_count + 1 "
+        "WHERE cup_id = ? AND player_id = ? AND half_veto_count < ?",
+        (cup_id, player_id, MAX_HALF_VETOES),
+    )
+    if result.rowcount == 0:
+        return None
+    return conn.execute(
+        "SELECT half_veto_count FROM cup_players WHERE cup_id = ? AND player_id = ?",
+        (cup_id, player_id),
+    ).fetchone()["half_veto_count"]
 
 
 def apply_stale_veto_forfeit(conn, cup_id):
@@ -1217,15 +1278,14 @@ def cup_session_half_veto(cup_id):
             ).fetchone()
             if cp is None:
                 return jsonify({"error": "Player not in this cup"}), 400
-            if cp["half_veto_count"] >= MAX_HALF_VETOES:
+            # Atomic cap-guarded increment (issue #36): returns None if already
+            # at the cap (or lost a concurrent race), so the counter can never
+            # exceed MAX_HALF_VETOES.
+            new_count = increment_half_veto(conn, cup_id, player_id)
+            if new_count is None:
                 return jsonify({"error": "No half vetoes remaining"}), 400
-            conn.execute(
-                "UPDATE cup_players SET half_veto_count = half_veto_count + 1 "
-                "WHERE cup_id = ? AND player_id = ?",
-                (cup_id, player_id),
-            )
             conn.commit()
-            remaining = MAX_HALF_VETOES - cp["half_veto_count"] - 1
+            remaining = MAX_HALF_VETOES - new_count
         else:
             remaining = None
     finally:
@@ -1239,22 +1299,21 @@ def cup_session_half_veto(cup_id):
 def cup_session_voto(cup_id):
     conn = get_connection()
     cup = conn.execute(
-        "SELECT id, voto_count FROM cups WHERE id = ? AND status = 'in_progress'",
+        "SELECT id FROM cups WHERE id = ? AND status = 'in_progress'",
         (cup_id,),
     ).fetchone()
     if cup is None:
         conn.close()
         return jsonify({"error": "Cup not found"}), 404
 
-    if cup["voto_count"] >= MAX_VOTOES:
+    # Atomic cap-guarded increment (issue #36): the cap check is inside the
+    # UPDATE, so concurrent votoes can never push voto_count past MAX_VOTOES.
+    new_count = increment_voto(conn, cup_id)
+    if new_count is None:
         conn.close()
         return jsonify({"error": "No votoes remaining"}), 400
-
-    conn.execute(
-        "UPDATE cups SET voto_count = voto_count + 1 WHERE id = ?", (cup_id,)
-    )
     conn.commit()
-    remaining = MAX_VOTOES - cup["voto_count"] - 1
+    remaining = MAX_VOTOES - new_count
     conn.close()
     return jsonify({"remaining": remaining})
 
@@ -1270,11 +1329,18 @@ def cup_session_next_race(cup_id):
 
     conn = get_connection()
     cup = conn.execute(
-        "SELECT id FROM cups WHERE id = ? AND status = 'in_progress'", (cup_id,)
+        "SELECT id, game_edition FROM cups WHERE id = ? AND status = 'in_progress'", (cup_id,)
     ).fetchone()
     if cup is None:
         conn.close()
         return jsonify({"error": "Cup not found"}), 404
+
+    # Validate the course against this cup's edition (issue #41). Without this an
+    # arbitrary or off-edition course name gets persisted into races/history,
+    # polluting stats. Only names in the edition's track set are accepted.
+    if map_name not in courses_for(cup["game_edition"]):
+        conn.close()
+        return jsonify({"error": "Invalid course for this edition"}), 400
 
     race_count = conn.execute(
         "SELECT COUNT(*) as cnt FROM races WHERE cup_id = ?", (cup_id,)
@@ -1364,17 +1430,26 @@ def cup_session_complete(cup_id):
 def cup_session_submit(cup_id):
     conn = get_connection()
     cup = conn.execute(
-        "SELECT id, status FROM cups WHERE id = ? AND status = 'in_progress'",
+        "SELECT id, status, game_edition FROM cups WHERE id = ? AND status = 'in_progress'",
         (cup_id,),
     ).fetchone()
     if cup is None:
         conn.close()
         abort(404)
 
-    # Update races if edited
+    # Update races if edited. Validate each edited map against this cup's edition
+    # (issue #41 — second door): the completion form lets you override race maps,
+    # and a crafted/stale POST could otherwise persist an arbitrary or off-edition
+    # course name straight into history, polluting stats. Only submitted (non-empty)
+    # values are checked; unchanged/empty fields are skipped as before.
+    edition_courses = courses_for(cup["game_edition"])
     for i in range(1, MAX_RACES + 1):
         new_map = request.form.get(f"race_{i}")
         if new_map:
+            if new_map not in edition_courses:
+                conn.close()
+                flash("Invalid course for this edition.")
+                return redirect(url_for("cup_session_complete", cup_id=cup_id))
             conn.execute(
                 "UPDATE races SET map = ? WHERE cup_id = ? AND race_number = ?",
                 (new_map, cup_id, i),
@@ -1423,16 +1498,27 @@ def cup_session_submit(cup_id):
         return redirect(url_for("cup_session_complete", cup_id=cup_id))
 
     try:
+        # Complete atomically (issue #39). The status transition is guarded by
+        # `WHERE status = 'in_progress'` so that under two concurrent submits
+        # only ONE wins — the loser's UPDATE affects 0 rows. Scores and (the
+        # non-idempotent) line adjustments are applied ONLY if we won, so lines
+        # can never be shifted twice and line_changes can't be duplicated.
         if date_utc:
-            conn.execute(
-                "UPDATE cups SET notes = ?, date = ?, status = 'completed' WHERE id = ?",
+            result = conn.execute(
+                "UPDATE cups SET notes = ?, date = ?, status = 'completed' WHERE id = ? AND status = 'in_progress'",
                 (notes, date_utc, cup_id),
             )
         else:
-            conn.execute(
-                "UPDATE cups SET notes = ?, status = 'completed' WHERE id = ?",
+            result = conn.execute(
+                "UPDATE cups SET notes = ?, status = 'completed' WHERE id = ? AND status = 'in_progress'",
                 (notes, cup_id),
             )
+        if result.rowcount == 0:
+            # Lost the race: another request completed/cancelled this cup after
+            # our initial status check but before this write. Apply nothing.
+            conn.rollback()
+            conn.close()
+            abort(409)
         save_scores(conn, cup_id, scores_data)
         changes = apply_line_adjustments(conn, cup_id, scores_data)
         conn.commit()

@@ -27,18 +27,31 @@ def test_scores_page_shows_scores(page, base_url):
 
 
 def test_create_standalone_score(page, base_url):
-    """Create a third player, then add their score to an existing cup via standalone form."""
-    _setup_cup_with_player(page, base_url)
-    # Create a third player
+    """Add a standalone score to a live (in-progress) cup via the standalone form.
+
+    Standalone scores may only be written to an in-progress cup (issue #40 —
+    writing into a completed cup corrupts its finalized standings), so this test
+    targets a live cup session rather than a completed direct cup.
+    """
+    # Create players Alice and Bob (default_cup on), then Carol.
     page.goto(f"{base_url}/players")
+    page.fill('input[name="name"]', "Alice")
+    page.click('button[type="submit"]')
+    page.fill('input[name="name"]', "Bob")
+    page.click('button[type="submit"]')
     page.fill('input[name="name"]', "Carol")
     page.click('button[type="submit"]')
-    # Get cup_id and Carol's player_id from the DB
+    # Start a live cup session (Alice & Bob are pre-checked default players).
+    page.goto(f"{base_url}/cup-session/new")
+    page.click('button[type="submit"]')
+    # Get the in-progress cup_id and Carol's player_id from the DB.
     conn = get_connection()
-    cup = conn.execute("SELECT id FROM cups LIMIT 1").fetchone()
+    cup = conn.execute(
+        "SELECT id FROM cups WHERE status = 'in_progress' ORDER BY id DESC LIMIT 1"
+    ).fetchone()
     carol = conn.execute("SELECT id FROM players WHERE name = 'Carol'").fetchone()
     conn.close()
-    # Create standalone score
+    # Create standalone score against the live cup.
     page.goto(f"{base_url}/scores")
     page.fill('input[name="cup_id"]', str(cup["id"]))
     page.fill('input[name="player_id"]', str(carol["id"]))

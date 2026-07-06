@@ -327,6 +327,14 @@
             if (lineValInput) {
                 lineValInput.disabled = true;
             }
+            // Disable the hidden player_ids[] and lines[] inputs too (issue #45).
+            // A disabled score input doesn't submit, but if player_ids[]/lines[]
+            // still did, the positional player<->score pairing on the server
+            // would shift and misattribute scores. Disabling all row inputs
+            // together keeps player_ids[] and scores[] the same length.
+            row.querySelectorAll('input[name="player_ids[]"], input[name="lines[]"]').forEach(function(el) {
+                el.disabled = true;
+            });
             var cb = row.querySelector("input[type=checkbox]");
             cb.checked = false;
             cb.disabled = true;
@@ -352,6 +360,11 @@
             if (existingLineInput) existingLineInput.disabled = false;
             var existingLineValInput = existing.querySelector(".line-input");
             if (existingLineValInput) existingLineValInput.disabled = false;
+            // Re-enable the hidden player_ids[]/lines[] inputs disabled on remove
+            // (issue #45) so a re-added player submits again.
+            existing.querySelectorAll('input[name="player_ids[]"], input[name="lines[]"]').forEach(function(el) {
+                el.disabled = false;
+            });
         } else {
             var container = document.getElementById("score-rows");
             var div = document.createElement("div");

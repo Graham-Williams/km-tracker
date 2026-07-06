@@ -56,6 +56,21 @@ def create_cup_with_scores(client, date, player_scores, lines=None, tiebreaker_i
     return client.post("/cups", data=data, follow_redirects=True)
 
 
+def start_inprogress_cup(client, player_ids=("1", "2")):
+    """Start a live cup session (status='in_progress') and return its id.
+
+    Standalone scores (POST /scores) can only be written to an in-progress cup
+    (issue #40), so tests that exercise that endpoint need a live cup as target.
+    """
+    client.post("/cup-session/new", data={"player_ids[]": list(player_ids)})
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT id FROM cups WHERE status = 'in_progress' ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    conn.close()
+    return row["id"]
+
+
 def create_score(client, cup_id=1, player_id=2, score=100, won_tiebreaker=False):
     data = {
         "cup_id": str(cup_id),
