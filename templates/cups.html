@@ -60,6 +60,12 @@
                 {% endfor %}
             </div>
             {% endif %}
+            {% if cup.id in photo_cup_ids %}
+            <a href="{{ url_for('cup_photo', cup_id=cup.id) }}" target="_blank" title="View full-size standings photo">
+                <img src="{{ url_for('cup_photo', cup_id=cup.id) }}" alt="Cup standings photo" loading="lazy"
+                     style="width:96px;border-radius:var(--radius-sm);display:block;margin-top:var(--space-1);">
+            </a>
+            {% endif %}
         </div>
         <div class="list-actions">
             <a class="btn btn-sm btn-ghost" href="{{ url_for('edit_cup', cup_id=cup.id) }}">Edit</a>

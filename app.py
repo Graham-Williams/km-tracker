@@ -17,7 +17,17 @@ from collections import Counter
 import jwt
 from jwt.algorithms import RSAAlgorithm
 from dotenv import load_dotenv
-from flask import Flask, abort, flash, jsonify, redirect, render_template, request, url_for
+from flask import (
+    Flask,
+    Response,
+    abort,
+    flash,
+    jsonify,
+    redirect,
+    render_template,
+    request,
+    url_for,
+)
 
 from db import get_connection, get_db_path, init_db
 from extraction import ExtractionError, extract_standings, extraction_enabled
@@ -467,13 +477,27 @@ def cups():
             f"ORDER BY p.name",
             cup_ids,
         ).fetchall()
+        photo_cup_ids = {
+            r["cup_id"]
+            for r in conn.execute(
+                f"SELECT DISTINCT cup_id FROM cup_photos WHERE cup_id IN ({placeholders})",
+                cup_ids,
+            ).fetchall()
+        }
     else:
         lc_rows = []
+        photo_cup_ids = set()
     line_changes = {}
     for lc in lc_rows:
         line_changes.setdefault(lc["cup_id"], []).append(lc)
     conn.close()
-    return render_template("cups.html", cups=rows, results=results, line_changes=line_changes)
+    return render_template(
+        "cups.html",
+        cups=rows,
+        results=results,
+        line_changes=line_changes,
+        photo_cup_ids=photo_cup_ids,
+    )
 
 
 @app.route("/cups", methods=["POST"])
@@ -516,6 +540,12 @@ def create_cup():
         flash(error)
         return redirect(url_for("new_cup"))
 
+    try:
+        photo = parse_photo_from_form(request.form)
+    except InvalidInput as e:
+        flash(str(e))
+        return redirect(url_for("new_cup"))
+
     conn = get_connection()
     try:
         cursor = conn.execute(
@@ -524,6 +554,8 @@ def create_cup():
         cup_id = cursor.lastrowid
         save_scores(conn, cup_id, scores_data)
         changes = apply_line_adjustments(conn, cup_id, scores_data)
+        if photo:
+            save_cup_photo(conn, cup_id, photo)
         conn.commit()
         if changes:
             player_names = {
@@ -1482,6 +1514,16 @@ def cup_session_submit(cup_id):
         conn.close()
         return redirect(url_for("cup_session_complete", cup_id=cup_id))
 
+    # A malformed photo rejects the whole submit (flash + redirect) so the
+    # attached photo is never silently dropped. Saving the photo does NOT
+    # depend on extraction — fully manual scores with a photo work the same.
+    try:
+        photo = parse_photo_from_form(request.form)
+    except InvalidInput as e:
+        conn.close()
+        flash(str(e))
+        return redirect(url_for("cup_session_complete", cup_id=cup_id))
+
     try:
         if date_utc:
             conn.execute(
@@ -1495,6 +1537,8 @@ def cup_session_submit(cup_id):
             )
         save_scores(conn, cup_id, scores_data)
         changes = apply_line_adjustments(conn, cup_id, scores_data)
+        if photo:
+            save_cup_photo(conn, cup_id, photo)
         conn.commit()
         if changes:
             player_names = {
@@ -1557,6 +1601,43 @@ def decode_photo(image_b64, mime_type):
     if len(decoded) > MAX_PHOTO_BYTES:
         raise InvalidInput("Photo is too large.")
     return decoded
+
+
+def parse_photo_from_form(form):
+    """Return (bytes, mime_type) for a photo attached to a score form, or None
+    when no photo was attached. Raises InvalidInput on a malformed payload —
+    callers reject the whole submit with a flash (the photo is part of the
+    record; silently dropping it would lose data without telling anyone).
+    """
+    photo_data = (form.get("photo_data") or "").strip()
+    if not photo_data:
+        return None
+    mime_type = (form.get("photo_mime") or "").strip()
+    return decode_photo(photo_data, mime_type), mime_type
+
+
+def save_cup_photo(conn, cup_id, photo):
+    """Insert an attached photo for a cup (photo = (bytes, mime_type))."""
+    image, mime_type = photo
+    created_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    conn.execute(
+        "INSERT INTO cup_photos (cup_id, image, mime_type, created_at) VALUES (?, ?, ?, ?)",
+        (cup_id, image, mime_type, created_at),
+    )
+
+
+@app.route("/cups/<int:cup_id>/photo")
+def cup_photo(cup_id):
+    """Serve the newest photo attached to a cup. 404 when there is none."""
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT image, mime_type FROM cup_photos WHERE cup_id = ? ORDER BY id DESC LIMIT 1",
+        (cup_id,),
+    ).fetchone()
+    conn.close()
+    if row is None:
+        abort(404)
+    return Response(row["image"], mimetype=row["mime_type"])
 
 
 def default_character_field(edition):
