@@ -17,8 +17,13 @@
  *   - A prominent attach indicator (.photo-attach-status) shows success
  *     ("Photo attached ✓") or a tinted error on decode failure.
  *   - A submit guard on the surrounding form: submit while a downscale is
- *     pending is blocked and auto-resumed when it settles; submit after a
- *     failed attach requires an explicit confirm() to proceed photoless.
+ *     pending is blocked and auto-resumed when it settles; submit while the
+ *     extract fetch is in flight is blocked WITHOUT auto-resume (the user
+ *     must see and review the model-filled scores — never auto-submit them);
+ *     submit with every score empty is blocked client-side (the server would
+ *     reject it anyway, and the redirect would wipe the attached photo);
+ *     submit after a failed attach requires an explicit confirm() to proceed
+ *     photoless.
  *
  * Usage (per page):
  *   initPhotoScore({
@@ -50,6 +55,7 @@ window.initPhotoScore = function (opts) {
 
     // Submit-guard state.
     var pending = false;         // a downscale is in flight
+    var extracting = false;      // an /extract-scores fetch is in flight
     var lastPickFailed = false;  // the most recent pick failed to attach
     var waitingToSubmit = false; // a submit was blocked while pending
 
@@ -108,6 +114,7 @@ window.initPhotoScore = function (opts) {
     }
 
     function extract(base64, seq) {
+        extracting = true;
         setStatus("Reading scores from the photo…");
         var payload = opts.getPayload();
         payload.image = base64;
@@ -122,6 +129,7 @@ window.initPhotoScore = function (opts) {
             });
         }).then(function (res) {
             if (seq !== requestSeq) return; // superseded by a newer photo
+            extracting = false;
             if (!res.ok) {
                 var msg = (res.body && res.body.error) ||
                     "Extraction failed (" + res.status + ")";
@@ -144,6 +152,7 @@ window.initPhotoScore = function (opts) {
             notesEl.textContent = notes.join(" · ");
         }).catch(function () {
             if (seq !== requestSeq) return; // superseded by a newer photo
+            extracting = false;
             setStatus("Network error during extraction — photo is still attached; enter scores manually.");
         });
     }
@@ -164,6 +173,9 @@ window.initPhotoScore = function (opts) {
         if (!file) return;
         var seq = ++requestSeq;
         pending = true;
+        // A new pick supersedes any in-flight extraction: its response will
+        // bail on the seq check (and so never clears this flag itself).
+        extracting = false;
         lastPickFailed = false;
         waitingToSubmit = false; // a new pick supersedes a blocked submit
         setAttachState("pending", "Processing photo…");
@@ -218,6 +230,18 @@ window.initPhotoScore = function (opts) {
         });
     });
 
+    // True iff at least one submittable score field has a value — the same
+    // minimum the server enforces (disabled inputs aren't submitted, matching
+    // the removed-row handling on the manual form). Nothing more: all other
+    // validation stays server-side.
+    function hasAnyScore() {
+        var inputs = form.querySelectorAll(".score-input");
+        for (var i = 0; i < inputs.length; i++) {
+            if (!inputs[i].disabled && inputs[i].value.trim() !== "") return true;
+        }
+        return false;
+    }
+
     // Submit guard: never let the form race or silently drop the photo.
     if (form) {
         form.addEventListener("submit", function (e) {
@@ -227,6 +251,31 @@ window.initPhotoScore = function (opts) {
                 e.preventDefault();
                 waitingToSubmit = true;
                 setAttachState("pending", "Finishing photo — submitting in a moment…");
+                return;
+            }
+            if (extracting) {
+                // Extraction still in flight — block, but do NOT auto-resume:
+                // resuming would submit model-filled scores the user never
+                // saw, and this feature never auto-submits. The user reviews
+                // the filled scores and submits themselves. (A downscale
+                // auto-resume can land here — it just shows this message and
+                // waits for the user; no loop, since waitingToSubmit stays
+                // false.)
+                e.preventDefault();
+                setStatus(
+                    "Still reading scores from the photo — they'll fill in " +
+                    "shortly; review them, then submit."
+                );
+                return;
+            }
+            if (!hasAnyScore()) {
+                // The server rejects an all-empty submit with a flash +
+                // redirect that would wipe the attached photo and all form
+                // state — fail fast client-side instead.
+                e.preventDefault();
+                setStatus(
+                    "Enter scores first — or wait for the photo scores to fill in."
+                );
                 return;
             }
             if (lastPickFailed && !dataField.value) {
