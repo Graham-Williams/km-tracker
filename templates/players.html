@@ -12,6 +12,26 @@
     </div>
     <label class="check"><input type="checkbox" name="has_line"> Plays with a line</label>
     <label class="check"><input type="checkbox" name="default_cup" checked> Default on new cups</label>
+    <div class="field-row">
+        <div class="field">
+            <label for="character-wii">Default character — Wii</label>
+            <select name="default_character_wii" id="character-wii">
+                <option value="">None</option>
+                {% for character in wii_characters %}
+                <option value="{{ character }}">{{ character }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="field">
+            <label for="character-switch">Default character — Switch</label>
+            <select name="default_character_switch" id="character-switch">
+                <option value="">None</option>
+                {% for character in switch_characters %}
+                <option value="{{ character }}">{{ character }}</option>
+                {% endfor %}
+            </select>
+        </div>
+    </div>
 </form>
 
 {% if players %}

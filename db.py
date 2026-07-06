@@ -50,6 +50,16 @@ def run_migrations(conn):
             "ALTER TABLE cups ADD COLUMN game_edition TEXT NOT NULL DEFAULT 'wii'"
         )
 
+    # Add per-edition default-character columns for DBs created before
+    # photo score entry. Nullable — no default character until set.
+    player_columns = {row["name"] for row in conn.execute("PRAGMA table_info(players)")}
+    if "default_character_wii" not in player_columns:
+        conn.execute("ALTER TABLE players ADD COLUMN default_character_wii TEXT")
+    if "default_character_switch" not in player_columns:
+        conn.execute("ALTER TABLE players ADD COLUMN default_character_switch TEXT")
+    # The cup_photos table itself comes from schema.sql (CREATE TABLE IF NOT
+    # EXISTS), which init_db always runs before this — no migration step needed.
+
 
 def init_db(db_path=None):
     if db_path is None:

@@ -13,6 +13,9 @@ services:
       - APP_ENV=production
       - DB_PATH=/data/km_tracker.db
       - SECRET_KEY=${SECRET_KEY:?SECRET_KEY must be set}
+      # Optional — photo score extraction. Blank/unset disables the feature
+      # gracefully (attach-only photo mode; manual entry unaffected).
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
     restart: unless-stopped
 
   cloudflared:

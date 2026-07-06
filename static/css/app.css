@@ -629,6 +629,38 @@ input[type="checkbox"] {
   margin-bottom: var(--space-4);
 }
 
+/* ---------- Photo attach indicator (score forms) ---------- */
+/* Prominent success/error state for the async photo attach — the muted
+   .photo-status line is for extraction progress, not attach outcome. */
+.photo-attach-status {
+  display: inline-block;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  margin-top: var(--space-2);
+  font-size: 0.9rem;
+  font-weight: 600;
+  border: 1px solid var(--color-border);
+  background: var(--color-surface-2);
+  color: var(--color-muted);
+}
+
+.photo-attach-status.is-success {
+  background: var(--color-success-soft);
+  color: var(--color-success);
+  border-color: var(--color-success);
+}
+
+.photo-attach-status.is-error {
+  background: var(--color-danger-soft);
+  color: var(--color-danger);
+  border-color: var(--color-danger);
+}
+
+/* The author display rule above would otherwise beat the UA [hidden] rule. */
+.photo-attach-status[hidden] {
+  display: none;
+}
+
 /* ---------- Empty state ---------- */
 .empty {
   text-align: center;

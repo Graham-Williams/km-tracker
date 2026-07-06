@@ -92,17 +92,49 @@
         <button type="button" id="add-player-btn" class="btn btn-secondary btn-sm">Add</button>
     </div>
 
+    <div id="photo-score">
+        <div class="section-heading">{% if photo_extraction_enabled %}Score from photo{% else %}Attach photo{% endif %}</div>
+        <div class="field-row">
+            {# Buttons ship disabled; photo_score.js enables + wires them. If the
+               script fails to load, the picker can't open — so a photo can never
+               be picked without the attach/submit guards in place. #}
+            <button type="button" class="btn btn-secondary" data-photo-input="photo-take" disabled>Take photo</button>
+            <button type="button" class="btn btn-secondary" data-photo-input="photo-pick" disabled>Upload photo</button>
+        </div>
+        <input type="file" id="photo-take" accept="image/*" capture="environment" hidden>
+        <input type="file" id="photo-pick" accept="image/*" hidden>
+        <input type="hidden" name="photo_data" id="photo-data">
+        <input type="hidden" name="photo_mime" id="photo-mime">
+        <img class="photo-preview" alt="Standings photo preview" style="display:none; max-width:160px; border-radius: var(--radius-sm); margin-top: var(--space-2);">
+        <p class="photo-attach-status" hidden></p>
+        <p class="muted photo-status"></p>
+        <p class="muted photo-notes"></p>
+    </div>
+
     <div class="field-row">
         <button type="submit" class="btn btn-primary">Create Cup</button>
         <a href="{{ url_for('cups') }}" class="btn btn-ghost">Cancel</a>
     </div>
 </form>
 
+<script src="{{ url_for('static', filename='js/photo_score.js') }}"></script>
 <script>
     document.getElementById("tz-offset").value = new Date().getTimezoneOffset();
     var now = new Date();
     now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
     document.getElementById("cup-date").value = now.toISOString().slice(0, 16);
+
+    // Direct /cups/new cups have no edition picker and default to Wii.
+    initPhotoScore({
+        extractUrl: {% if photo_extraction_enabled %}"{{ url_for('extract_scores') }}"{% else %}null{% endif %},
+        getPayload: function () {
+            var ids = [];
+            document.querySelectorAll(".score-row:not(.removed)").forEach(function (row) {
+                ids.push(parseInt(row.dataset.playerId, 10));
+            });
+            return { edition: "wii", player_ids: ids };
+        }
+    });
 
     var allPlayers = [
         {% for p in all_players %}
@@ -391,6 +423,9 @@
     });
 
     document.getElementById("cup-form").addEventListener("submit", function(e) {
+        // Already blocked (e.g. the photo guard is waiting for a downscale) —
+        // don't stack a tie confirm on top; it re-runs on the resumed submit.
+        if (e.defaultPrevented) return;
         var data = getScoreGroups();
         var groups = data.groups;
         var unresolvedTie = false;

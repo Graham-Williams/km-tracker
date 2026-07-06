@@ -277,3 +277,111 @@ def test_edit_player_line_shown_on_form(client):
     conn.close()
     response = client.get("/players/1/edit")
     assert b'value="9"' in response.data
+
+
+# --- Default characters (photo score entry) ---
+
+
+def _get_characters(player_id=1):
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT default_character_wii, default_character_switch FROM players WHERE id = ?",
+        (player_id,),
+    ).fetchone()
+    conn.close()
+    return row["default_character_wii"], row["default_character_switch"]
+
+
+def test_edit_sets_default_characters(client):
+    create_player(client, "Alice")
+    response = client.post(
+        "/players/1/edit",
+        data={
+            "name": "Alice",
+            "default_character_wii": "Funky Kong",
+            "default_character_switch": "Isabelle",
+        },
+        follow_redirects=True,
+    )
+    assert response.status_code == 200
+    assert _get_characters() == ("Funky Kong", "Isabelle")
+
+
+def test_edit_blank_characters_allowed(client):
+    create_player(client, "Alice")
+    client.post(
+        "/players/1/edit",
+        data={
+            "name": "Alice",
+            "default_character_wii": "Yoshi",
+            "default_character_switch": "Yoshi",
+        },
+    )
+    # Clearing back to blank persists NULL.
+    client.post(
+        "/players/1/edit",
+        data={"name": "Alice", "default_character_wii": "", "default_character_switch": ""},
+    )
+    assert _get_characters() == (None, None)
+
+
+def test_edit_invalid_character_rejected(client):
+    create_player(client, "Alice")
+    response = client.post(
+        "/players/1/edit",
+        data={"name": "Alice", "default_character_wii": "Master Chief"},
+        follow_redirects=True,
+    )
+    assert response.status_code == 200
+    assert b"Unknown character" in response.data
+    assert _get_characters() == (None, None)
+
+
+def test_edit_character_from_wrong_edition_rejected(client):
+    # Isabelle is MK8DX-only; she can't be a Wii default.
+    create_player(client, "Alice")
+    response = client.post(
+        "/players/1/edit",
+        data={"name": "Alice", "default_character_wii": "Isabelle"},
+        follow_redirects=True,
+    )
+    assert b"Unknown character" in response.data
+    assert _get_characters() == (None, None)
+
+
+def test_create_with_default_characters(client):
+    response = client.post(
+        "/players",
+        data={
+            "name": "Alice",
+            "default_character_wii": "Toad",
+            "default_character_switch": "Shy Guy",
+        },
+        follow_redirects=True,
+    )
+    assert response.status_code == 200
+    assert _get_characters() == ("Toad", "Shy Guy")
+
+
+def test_create_with_invalid_character_rejected(client):
+    response = client.post(
+        "/players",
+        data={"name": "Alice", "default_character_wii": "Sonic"},
+        follow_redirects=True,
+    )
+    assert b"Unknown character" in response.data
+    conn = get_connection()
+    count = conn.execute("SELECT COUNT(*) FROM players").fetchone()[0]
+    conn.close()
+    assert count == 0
+
+
+def test_edit_page_shows_character_pickers(client):
+    create_player(client, "Alice")
+    client.post(
+        "/players/1/edit",
+        data={"name": "Alice", "default_character_wii": "Funky Kong"},
+    )
+    page = client.get("/players/1/edit")
+    assert b"Default character" in page.data
+    assert b'value="Funky Kong" selected' in page.data

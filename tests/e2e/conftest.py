@@ -64,6 +64,7 @@ def _reset_db(_server):
     conn.execute("DELETE FROM cup_players")
     conn.execute("DELETE FROM scores")
     conn.execute("DELETE FROM line_changes")
+    conn.execute("DELETE FROM cup_photos")
     conn.execute("DELETE FROM cups")
     conn.execute("DELETE FROM players")
     conn.commit()

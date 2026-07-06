@@ -1,3 +1,6 @@
+import base64
+import binascii
+import hashlib
 import json
 import os
 import random
@@ -15,13 +18,25 @@ from collections import Counter
 import jwt
 from jwt.algorithms import RSAAlgorithm
 from dotenv import load_dotenv
-from flask import Flask, abort, flash, jsonify, redirect, render_template, request, url_for
+from flask import (
+    Flask,
+    Response,
+    abort,
+    flash,
+    jsonify,
+    redirect,
+    render_template,
+    request,
+    url_for,
+)
 
 from db import get_connection, get_db_path, init_db
+from extraction import ExtractionError, extract_standings, extraction_enabled
 from maps import (
     DEFAULT_EDITION,
     EDITION_LABELS,
     TRACK_SETS,
+    characters_for,
     courses_for,
     edition_label,
 )
@@ -31,11 +46,12 @@ load_dotenv()
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY") or secrets.token_hex(32)
 
-# Cap request body size to blunt memory-exhaustion DoS. Every legit form here is
-# tiny (a cup has a handful of players); 256 KB is far more than any real submit
-# yet small enough that a flood of oversized bodies can't exhaust memory. Flask
-# returns 413 Request Entity Too Large automatically when this is exceeded.
-app.config["MAX_CONTENT_LENGTH"] = 256 * 1024  # 256 KB
+# Cap request body size to blunt memory-exhaustion DoS. The largest legit
+# request is a score form / extraction call carrying a client-downscaled
+# standings photo as base64 (~200-400 KB); 1 MB leaves comfortable headroom
+# while still keeping a flood of oversized bodies from exhausting memory.
+# Flask returns 413 Request Entity Too Large automatically when exceeded.
+app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024  # 1 MB
 
 
 # ---------------------------------------------------------------------------
@@ -56,6 +72,16 @@ IS_STAGING = APP_ENV == "staging"
 def inject_app_env():
     """Make the deployment environment available in all templates."""
     return {"app_env": APP_ENV, "is_staging": IS_STAGING}
+
+
+@app.context_processor
+def inject_photo_extraction():
+    """Whether photo score extraction is available (ANTHROPIC_API_KEY set).
+
+    When False, templates hide the extraction behavior but the photo-attach
+    controls still render — attaching a photo to a cup never needs the API.
+    """
+    return {"photo_extraction_enabled": extraction_enabled()}
 
 
 # ---------------------------------------------------------------------------
@@ -278,6 +304,20 @@ def index():
     return render_template("index.html", in_progress_cup=in_progress)
 
 
+def parse_default_character(form, field, edition):
+    """Return the submitted default character for an edition, or None if blank.
+
+    Raises InvalidInput if the value isn't in the edition's roster — the picker
+    is a <select>, so anything else is a crafted POST.
+    """
+    value = (form.get(field) or "").strip()
+    if not value:
+        return None
+    if value not in characters_for(edition):
+        raise InvalidInput("Unknown character selection.")
+    return value
+
+
 @app.route("/players")
 def players():
     conn = get_connection()
@@ -285,7 +325,12 @@ def players():
         "SELECT id, name, default_cup, line, has_line FROM players ORDER BY name"
     ).fetchall()
     conn.close()
-    return render_template("players.html", players=rows)
+    return render_template(
+        "players.html",
+        players=rows,
+        wii_characters=characters_for("wii"),
+        switch_characters=characters_for("mk8dx"),
+    )
 
 
 @app.route("/players", methods=["POST"])
@@ -296,11 +341,20 @@ def create_player():
         return redirect(url_for("players"))
     default_cup = request.form.get("default_cup") == "on"
     has_line = request.form.get("has_line") == "on"
+    try:
+        character_wii = parse_default_character(request.form, "default_character_wii", "wii")
+        character_switch = parse_default_character(
+            request.form, "default_character_switch", "mk8dx"
+        )
+    except InvalidInput as e:
+        flash(str(e))
+        return redirect(url_for("players"))
     conn = get_connection()
     try:
         conn.execute(
-            "INSERT INTO players (name, default_cup, has_line) VALUES (?, ?, ?)",
-            (name, default_cup, has_line),
+            "INSERT INTO players (name, default_cup, has_line, default_character_wii, default_character_switch) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (name, default_cup, has_line, character_wii, character_switch),
         )
         conn.commit()
     except sqlite3.IntegrityError:
@@ -314,12 +368,19 @@ def create_player():
 def edit_player(player_id):
     conn = get_connection()
     player = conn.execute(
-        "SELECT id, name, default_cup, line, has_line FROM players WHERE id = ?", (player_id,)
+        "SELECT id, name, default_cup, line, has_line, default_character_wii, default_character_switch "
+        "FROM players WHERE id = ?",
+        (player_id,),
     ).fetchone()
     conn.close()
     if player is None:
         abort(404)
-    return render_template("player_edit.html", player=player)
+    return render_template(
+        "player_edit.html",
+        player=player,
+        wii_characters=characters_for("wii"),
+        switch_characters=characters_for("mk8dx"),
+    )
 
 
 @app.route("/players/<int:player_id>/edit", methods=["POST"])
@@ -348,9 +409,19 @@ def update_player(player_id):
     if not has_line:
         line = 0
     try:
+        character_wii = parse_default_character(request.form, "default_character_wii", "wii")
+        character_switch = parse_default_character(
+            request.form, "default_character_switch", "mk8dx"
+        )
+    except InvalidInput as e:
+        conn.close()
+        flash(str(e))
+        return redirect(url_for("edit_player", player_id=player_id))
+    try:
         conn.execute(
-            "UPDATE players SET name = ?, default_cup = ?, line = ?, has_line = ? WHERE id = ?",
-            (name, default_cup, line, has_line, player_id),
+            "UPDATE players SET name = ?, default_cup = ?, line = ?, has_line = ?, "
+            "default_character_wii = ?, default_character_switch = ? WHERE id = ?",
+            (name, default_cup, line, has_line, character_wii, character_switch, player_id),
         )
         conn.commit()
     except sqlite3.IntegrityError:
@@ -407,13 +478,27 @@ def cups():
             f"ORDER BY p.name",
             cup_ids,
         ).fetchall()
+        photo_cup_ids = {
+            r["cup_id"]
+            for r in conn.execute(
+                f"SELECT DISTINCT cup_id FROM cup_photos WHERE cup_id IN ({placeholders})",
+                cup_ids,
+            ).fetchall()
+        }
     else:
         lc_rows = []
+        photo_cup_ids = set()
     line_changes = {}
     for lc in lc_rows:
         line_changes.setdefault(lc["cup_id"], []).append(lc)
     conn.close()
-    return render_template("cups.html", cups=rows, results=results, line_changes=line_changes)
+    return render_template(
+        "cups.html",
+        cups=rows,
+        results=results,
+        line_changes=line_changes,
+        photo_cup_ids=photo_cup_ids,
+    )
 
 
 @app.route("/cups", methods=["POST"])
@@ -456,6 +541,12 @@ def create_cup():
         flash(error)
         return redirect(url_for("new_cup"))
 
+    try:
+        photo = parse_photo_from_form(request.form)
+    except InvalidInput as e:
+        flash(str(e))
+        return redirect(url_for("new_cup"))
+
     conn = get_connection()
     try:
         cursor = conn.execute(
@@ -464,7 +555,13 @@ def create_cup():
         cup_id = cursor.lastrowid
         save_scores(conn, cup_id, scores_data)
         changes = apply_line_adjustments(conn, cup_id, scores_data)
+        if photo:
+            save_cup_photo(conn, cup_id, photo)
         conn.commit()
+        if photo:
+            # Confirm the photo made it — the attach is async client-side, so
+            # an explicit "photo saved" closes the loop on silent drops.
+            flash("Cup recorded — photo saved.", "success")
         if changes:
             player_names = {
                 r["id"]: r["name"]
@@ -505,6 +602,12 @@ def edit_cup(cup_id):
     all_players = conn.execute(
         "SELECT id, name, line, has_line FROM players ORDER BY name"
     ).fetchall()
+    has_photo = (
+        conn.execute(
+            "SELECT 1 FROM cup_photos WHERE cup_id = ? LIMIT 1", (cup_id,)
+        ).fetchone()
+        is not None
+    )
     conn.close()
     scores_by_player = {s["player_id"]: s for s in existing_scores}
     cup_players = [{"id": s["player_id"], "name": s["name"], "line": s["line"], "has_line": s["has_line"]} for s in existing_scores]
@@ -516,6 +619,7 @@ def edit_cup(cup_id):
         all_players=all_players,
         scores_by_player=scores_by_player,
         lines_by_id=lines_by_id,
+        has_photo=has_photo,
     )
 
 
@@ -1497,6 +1601,16 @@ def cup_session_submit(cup_id):
         conn.close()
         return redirect(url_for("cup_session_complete", cup_id=cup_id))
 
+    # A malformed photo rejects the whole submit (flash + redirect) so the
+    # attached photo is never silently dropped. Saving the photo does NOT
+    # depend on extraction — fully manual scores with a photo work the same.
+    try:
+        photo = parse_photo_from_form(request.form)
+    except InvalidInput as e:
+        conn.close()
+        flash(str(e))
+        return redirect(url_for("cup_session_complete", cup_id=cup_id))
+
     try:
         # Complete atomically (issue #39). The status transition is guarded by
         # `WHERE status = 'in_progress'` so that under two concurrent submits
@@ -1521,7 +1635,13 @@ def cup_session_submit(cup_id):
             abort(409)
         save_scores(conn, cup_id, scores_data)
         changes = apply_line_adjustments(conn, cup_id, scores_data)
+        if photo:
+            save_cup_photo(conn, cup_id, photo)
         conn.commit()
+        if photo:
+            # Confirm the photo made it — the attach is async client-side, so
+            # an explicit "photo saved" closes the loop on silent drops.
+            flash("Cup recorded — photo saved.", "success")
         if changes:
             player_names = {
                 r["id"]: r["name"]
@@ -1553,6 +1673,250 @@ def cup_session_cancel(cup_id):
     conn.commit()
     conn.close()
     return redirect(url_for("index"))
+
+
+# --- Photo score entry (extraction + photo persistence) ---
+
+PHOTO_ALLOWED_MIMES = ("image/jpeg", "image/png")
+# Decoded photo size cap. The client downscales to ~150-300 KB JPEG and the
+# whole request body is already capped at 1 MB (MAX_CONTENT_LENGTH), so
+# anything near this is a hostile payload, not a real photo.
+MAX_PHOTO_BYTES = 900 * 1024
+
+
+def decode_photo(image_b64, mime_type):
+    """Validate and decode a base64 photo payload. Returns the raw bytes.
+
+    Raises InvalidInput (with a user-presentable message) on a non-string /
+    non-base64 / empty / oversized payload or an unsupported mime type.
+    """
+    if not isinstance(image_b64, str) or not image_b64.strip():
+        raise InvalidInput("Photo data is missing.")
+    if mime_type not in PHOTO_ALLOWED_MIMES:
+        raise InvalidInput("Photo must be a JPEG or PNG image.")
+    try:
+        decoded = base64.b64decode(image_b64, validate=True)
+    except (binascii.Error, ValueError):
+        raise InvalidInput("Photo data is not valid base64.")
+    if not decoded:
+        raise InvalidInput("Photo data is empty.")
+    if len(decoded) > MAX_PHOTO_BYTES:
+        raise InvalidInput("Photo is too large.")
+    return decoded
+
+
+def parse_photo_from_form(form):
+    """Return (bytes, mime_type) for a photo attached to a score form, or None
+    when no photo was attached. Raises InvalidInput on a malformed payload —
+    callers reject the whole submit with a flash (the photo is part of the
+    record; silently dropping it would lose data without telling anyone).
+    """
+    photo_data = (form.get("photo_data") or "").strip()
+    if not photo_data:
+        return None
+    mime_type = (form.get("photo_mime") or "").strip()
+    return decode_photo(photo_data, mime_type), mime_type
+
+
+def save_cup_photo(conn, cup_id, photo):
+    """Insert an attached photo for a cup (photo = (bytes, mime_type))."""
+    image, mime_type = photo
+    created_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    conn.execute(
+        "INSERT INTO cup_photos (cup_id, image, mime_type, created_at) VALUES (?, ?, ?, ?)",
+        (cup_id, image, mime_type, created_at),
+    )
+
+
+@app.route("/cups/<int:cup_id>/photo")
+def cup_photo(cup_id):
+    """Serve the newest photo attached to a cup. 404 when there is none (or
+    the cup is soft-deleted). Sends ETag + Cache-Control and honors
+    If-None-Match with a 304, so /cups doesn't re-download every photo on
+    every visit.
+    """
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT p.image, p.mime_type FROM cup_photos p"
+        " JOIN cups c ON c.id = p.cup_id"
+        " WHERE p.cup_id = ? AND c.deleted_at IS NULL"
+        " ORDER BY p.id DESC LIMIT 1",
+        (cup_id,),
+    ).fetchone()
+    conn.close()
+    if row is None:
+        abort(404)
+    response = Response(row["image"], mimetype=row["mime_type"])
+    response.set_etag(hashlib.sha1(bytes(row["image"])).hexdigest())
+    response.headers["Cache-Control"] = "private, max-age=86400"
+    return response.make_conditional(request)
+
+
+def default_character_field(edition):
+    """Which players column holds the default character for an edition."""
+    return "default_character_wii" if edition == "wii" else "default_character_switch"
+
+
+def match_standings_to_players(rows, players, edition):
+    """Match extracted standings rows to players via their default characters.
+
+    rows: extracted StandingsRow objects (position/character/points).
+    players: dicts with player_id, name, and the default-character columns.
+
+    Returns (scores, ambiguous, unmatched):
+      scores    — {player_id: points} for exactly-one-player/exactly-one-row
+                  character matches.
+      ambiguous — player names left unfilled because their character maps to
+                  2+ rows, or 2+ players claim the same character.
+      unmatched — player names with no default character for this edition, or
+                  whose character isn't on the screen.
+    Extracted rows claimed by no player (CPU racers) are ignored.
+    """
+    char_field = default_character_field(edition)
+
+    def norm(value):
+        return value.strip().casefold()
+
+    claims = {}  # normalized character -> [player dicts]
+    unmatched = []
+    for player in players:
+        character = player[char_field]
+        if not character or not character.strip():
+            unmatched.append(player["name"])
+            continue
+        claims.setdefault(norm(character), []).append(player)
+
+    rows_by_char = {}  # normalized character -> [rows]
+    for row in rows:
+        rows_by_char.setdefault(norm(row.character), []).append(row)
+
+    scores = {}
+    ambiguous = []
+    for key, claimants in claims.items():
+        matched_rows = rows_by_char.get(key, [])
+        if not matched_rows:
+            unmatched.extend(p["name"] for p in claimants)
+        elif len(claimants) == 1 and len(matched_rows) == 1:
+            scores[claimants[0]["player_id"]] = matched_rows[0].points
+        else:
+            # Collision: two+ players share the character, or the character
+            # appears in two+ rows. Fill nothing; let the human decide.
+            ambiguous.extend(p["name"] for p in claimants)
+    return scores, sorted(ambiguous), sorted(unmatched)
+
+
+def _players_for_extraction(data):
+    """Resolve (edition, players) for /extract-scores from cup_id OR
+    edition + player_ids. Returns (edition, players, error_response)."""
+    player_select = (
+        "SELECT p.id AS player_id, p.name, p.default_character_wii, "
+        "p.default_character_switch FROM players p"
+    )
+    cup_id = data.get("cup_id")
+    if cup_id is not None:
+        if isinstance(cup_id, bool) or not isinstance(cup_id, (int, str)):
+            return None, None, (jsonify({"error": "Invalid cup_id"}), 400)
+        try:
+            cup_id = parse_int_field(cup_id)
+        except ValueError:
+            return None, None, (jsonify({"error": "Invalid cup_id"}), 400)
+        conn = get_connection()
+        cup = conn.execute(
+            "SELECT id, game_edition FROM cups WHERE id = ? AND deleted_at IS NULL",
+            (cup_id,),
+        ).fetchone()
+        if cup is None:
+            conn.close()
+            return None, None, (jsonify({"error": "Cup not found"}), 404)
+        players = conn.execute(
+            player_select + " JOIN cup_players cp ON cp.player_id = p.id WHERE cp.cup_id = ?",
+            (cup_id,),
+        ).fetchall()
+        conn.close()
+        if not players:
+            return None, None, (jsonify({"error": "Cup has no players"}), 400)
+        return cup["game_edition"], [dict(p) for p in players], None
+
+    edition = data.get("edition")
+    if edition not in TRACK_SETS:
+        return None, None, (jsonify({"error": "Unknown edition"}), 400)
+    player_ids = data.get("player_ids")
+    if (
+        not isinstance(player_ids, list)
+        or not player_ids
+        or len(player_ids) > MAX_SCORE_ROWS
+    ):
+        return None, None, (jsonify({"error": "player_ids must be a non-empty list"}), 400)
+    parsed_ids = []
+    for pid in player_ids:
+        if isinstance(pid, bool) or not isinstance(pid, (int, str)):
+            return None, None, (jsonify({"error": "Invalid player id"}), 400)
+        try:
+            parsed_ids.append(parse_int_field(pid))
+        except ValueError:
+            return None, None, (jsonify({"error": "Invalid player id"}), 400)
+    placeholders = ",".join("?" * len(parsed_ids))
+    conn = get_connection()
+    players = conn.execute(
+        player_select + f" WHERE p.id IN ({placeholders})", parsed_ids
+    ).fetchall()
+    conn.close()
+    if len(players) != len(set(parsed_ids)):
+        return None, None, (jsonify({"error": "Unknown player id"}), 400)
+    return edition, [dict(p) for p in players], None
+
+
+@app.route("/extract-scores", methods=["POST"])
+def extract_scores():
+    """Extract {position, character, points} rows from a standings photo and
+    match them to this cup's players. JSON in, JSON out; never auto-submits.
+
+    Request: {image: <base64>, mime_type: image/jpeg|image/png,
+              cup_id: <id>}  — live session form, players/edition from the cup
+           or {edition, player_ids: [...]} — manual /cups/new form.
+    Response: {scores: {player_id: points}, ambiguous: [names],
+               unmatched_players: [names], raw_rows: [...]}.
+    """
+    if not extraction_enabled():
+        return jsonify({"error": "extraction not configured"}), 503
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "JSON body required"}), 400
+
+    mime_type = data.get("mime_type")
+    try:
+        decode_photo(data.get("image"), mime_type)
+    except InvalidInput as e:
+        return jsonify({"error": str(e)}), 400
+
+    edition, players, error = _players_for_extraction(data)
+    if error:
+        return error
+
+    try:
+        standings = extract_standings(data["image"], mime_type)
+    except ExtractionError:
+        app.logger.exception("Photo score extraction failed")
+        return (
+            jsonify({"error": "Could not read the photo. Try another shot or enter scores manually."}),
+            502,
+        )
+
+    scores, ambiguous, unmatched = match_standings_to_players(
+        standings.rows, players, edition
+    )
+    return jsonify(
+        {
+            "scores": scores,
+            "ambiguous": ambiguous,
+            "unmatched_players": unmatched,
+            "raw_rows": [
+                {"position": r.position, "character": r.character, "points": r.points}
+                for r in standings.rows
+            ],
+        }
+    )
 
 
 if __name__ == "__main__":
