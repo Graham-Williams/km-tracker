@@ -498,7 +498,7 @@ def test_update_cup_bad_date_paths_do_not_wedge_connection(client):
 def test_oversized_request_body_rejected(client):
     # F4: MAX_CONTENT_LENGTH caps the body so an oversized POST is a clean 413
     # instead of an unbounded in-memory read.
-    big = "A" * (300 * 1024)  # 300 KB > 256 KB cap
+    big = "A" * (1200 * 1024)  # 1.2 MB > 1 MB cap
     response = client.post("/players", data={"name": big})
     assert response.status_code == 413
     assert _count("players") == 0

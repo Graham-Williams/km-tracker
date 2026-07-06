@@ -106,6 +106,21 @@
         </div>
     </div>
 
+    <div id="photo-score">
+        <div class="section-heading">{% if photo_extraction_enabled %}Score from photo{% else %}Attach photo{% endif %}</div>
+        <div class="field-row">
+            <button type="button" class="btn btn-secondary" onclick="document.getElementById('photo-take').click()">Take photo</button>
+            <button type="button" class="btn btn-secondary" onclick="document.getElementById('photo-pick').click()">Upload photo</button>
+        </div>
+        <input type="file" id="photo-take" accept="image/*" capture="environment" hidden>
+        <input type="file" id="photo-pick" accept="image/*" hidden>
+        <input type="hidden" name="photo_data" id="photo-data">
+        <input type="hidden" name="photo_mime" id="photo-mime">
+        <img class="photo-preview" alt="Standings photo preview" style="display:none; max-width:160px; border-radius: var(--radius-sm); margin-top: var(--space-2);">
+        <p class="muted photo-status"></p>
+        <p class="muted photo-notes"></p>
+    </div>
+
     <div class="field-row">
         <button type="submit" class="btn btn-primary">Submit Cup</button>
         {% if cup.status == 'in_progress' %}
@@ -129,11 +144,19 @@
 </div>
 {% endif %}
 
+<script src="{{ url_for('static', filename='js/photo_score.js') }}"></script>
 <script>
     document.getElementById("tz-offset").value = new Date().getTimezoneOffset();
     var now = new Date();
     now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
     document.getElementById("cup-date").value = now.toISOString().slice(0, 16);
+
+    initPhotoScore({
+        extractUrl: {% if photo_extraction_enabled %}"{{ url_for('extract_scores') }}"{% else %}null{% endif %},
+        getPayload: function () {
+            return { cup_id: {{ cup.id }} };
+        }
+    });
 
     function getLineValue(row) {
         var lineInput = row.querySelector(".line-input");

@@ -35,11 +35,12 @@ load_dotenv()
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY") or secrets.token_hex(32)
 
-# Cap request body size to blunt memory-exhaustion DoS. Every legit form here is
-# tiny (a cup has a handful of players); 256 KB is far more than any real submit
-# yet small enough that a flood of oversized bodies can't exhaust memory. Flask
-# returns 413 Request Entity Too Large automatically when this is exceeded.
-app.config["MAX_CONTENT_LENGTH"] = 256 * 1024  # 256 KB
+# Cap request body size to blunt memory-exhaustion DoS. The largest legit
+# request is a score form / extraction call carrying a client-downscaled
+# standings photo as base64 (~200-400 KB); 1 MB leaves comfortable headroom
+# while still keeping a flood of oversized bodies from exhausting memory.
+# Flask returns 413 Request Entity Too Large automatically when exceeded.
+app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024  # 1 MB
 
 
 # ---------------------------------------------------------------------------
