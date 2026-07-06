@@ -35,7 +35,7 @@ Until the Cloudflare tunnel is fully set up, deploy = pull + rebuild + restart w
 the CI override (which publishes the host port so the box is reachable on the LAN):
 
 ```bash
-cd /home/graham/km-tracker
+cd /home/<user>/km-tracker
 git pull
 docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d --build app
 ```

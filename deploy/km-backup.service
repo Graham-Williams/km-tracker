@@ -1,8 +1,9 @@
 # Automated KM Tracker DB backup (self-hosted "personalserver" box).
 #
 # Oneshot service driven by km-backup.timer. Paths assume the repo is checked
-# out at /home/graham/km-tracker. Runs on the HOST as the unprivileged "graham"
-# user (NOT in the container). See DEPLOY.md → "Automated backups".
+# out at /home/<user>/km-tracker. Runs on the HOST as the unprivileged "<user>"
+# user (NOT in the container). Edit User= and the ExecStart path below to match
+# your box before installing. See DEPLOY.md → "Automated backups".
 [Unit]
 Description=KM Tracker SQLite backup (local snapshot + Drive push)
 # Don't bother running if there's no network at all (the Drive push needs it);
@@ -12,8 +13,8 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-User=graham
-ExecStart=/home/graham/km-tracker/scripts/backup.sh
+User=<user>
+ExecStart=/home/<user>/km-tracker/scripts/backup.sh
 # A backup should never hang the system; cap the run time.
 TimeoutStartSec=300
 # Lightweight sandboxing that won't break the script's host/Drive access.
