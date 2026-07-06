@@ -1,3 +1,5 @@
+import base64
+import binascii
 import json
 import os
 import random
@@ -18,6 +20,7 @@ from dotenv import load_dotenv
 from flask import Flask, abort, flash, jsonify, redirect, render_template, request, url_for
 
 from db import get_connection, get_db_path, init_db
+from extraction import ExtractionError, extract_standings, extraction_enabled
 from maps import (
     DEFAULT_EDITION,
     EDITION_LABELS,
@@ -57,6 +60,16 @@ IS_STAGING = APP_ENV == "staging"
 def inject_app_env():
     """Make the deployment environment available in all templates."""
     return {"app_env": APP_ENV, "is_staging": IS_STAGING}
+
+
+@app.context_processor
+def inject_photo_extraction():
+    """Whether photo score extraction is available (ANTHROPIC_API_KEY set).
+
+    When False, templates hide the extraction behavior but the photo-attach
+    controls still render — attaching a photo to a cup never needs the API.
+    """
+    return {"photo_extraction_enabled": extraction_enabled()}
 
 
 # ---------------------------------------------------------------------------
@@ -1513,6 +1526,203 @@ def cup_session_cancel(cup_id):
     conn.commit()
     conn.close()
     return redirect(url_for("index"))
+
+
+# --- Photo score entry (extraction + photo persistence) ---
+
+PHOTO_ALLOWED_MIMES = ("image/jpeg", "image/png")
+# Decoded photo size cap. The client downscales to ~150-300 KB JPEG and the
+# whole request body is already capped at 1 MB (MAX_CONTENT_LENGTH), so
+# anything near this is a hostile payload, not a real photo.
+MAX_PHOTO_BYTES = 900 * 1024
+
+
+def decode_photo(image_b64, mime_type):
+    """Validate and decode a base64 photo payload. Returns the raw bytes.
+
+    Raises InvalidInput (with a user-presentable message) on a non-string /
+    non-base64 / empty / oversized payload or an unsupported mime type.
+    """
+    if not isinstance(image_b64, str) or not image_b64.strip():
+        raise InvalidInput("Photo data is missing.")
+    if mime_type not in PHOTO_ALLOWED_MIMES:
+        raise InvalidInput("Photo must be a JPEG or PNG image.")
+    try:
+        decoded = base64.b64decode(image_b64, validate=True)
+    except (binascii.Error, ValueError):
+        raise InvalidInput("Photo data is not valid base64.")
+    if not decoded:
+        raise InvalidInput("Photo data is empty.")
+    if len(decoded) > MAX_PHOTO_BYTES:
+        raise InvalidInput("Photo is too large.")
+    return decoded
+
+
+def default_character_field(edition):
+    """Which players column holds the default character for an edition."""
+    return "default_character_wii" if edition == "wii" else "default_character_switch"
+
+
+def match_standings_to_players(rows, players, edition):
+    """Match extracted standings rows to players via their default characters.
+
+    rows: extracted StandingsRow objects (position/character/points).
+    players: dicts with player_id, name, and the default-character columns.
+
+    Returns (scores, ambiguous, unmatched):
+      scores    — {player_id: points} for exactly-one-player/exactly-one-row
+                  character matches.
+      ambiguous — player names left unfilled because their character maps to
+                  2+ rows, or 2+ players claim the same character.
+      unmatched — player names with no default character for this edition, or
+                  whose character isn't on the screen.
+    Extracted rows claimed by no player (CPU racers) are ignored.
+    """
+    char_field = default_character_field(edition)
+
+    def norm(value):
+        return value.strip().casefold()
+
+    claims = {}  # normalized character -> [player dicts]
+    unmatched = []
+    for player in players:
+        character = player[char_field]
+        if not character or not character.strip():
+            unmatched.append(player["name"])
+            continue
+        claims.setdefault(norm(character), []).append(player)
+
+    rows_by_char = {}  # normalized character -> [rows]
+    for row in rows:
+        rows_by_char.setdefault(norm(row.character), []).append(row)
+
+    scores = {}
+    ambiguous = []
+    for key, claimants in claims.items():
+        matched_rows = rows_by_char.get(key, [])
+        if not matched_rows:
+            unmatched.extend(p["name"] for p in claimants)
+        elif len(claimants) == 1 and len(matched_rows) == 1:
+            scores[claimants[0]["player_id"]] = matched_rows[0].points
+        else:
+            # Collision: two+ players share the character, or the character
+            # appears in two+ rows. Fill nothing; let the human decide.
+            ambiguous.extend(p["name"] for p in claimants)
+    return scores, sorted(ambiguous), sorted(unmatched)
+
+
+def _players_for_extraction(data):
+    """Resolve (edition, players) for /extract-scores from cup_id OR
+    edition + player_ids. Returns (edition, players, error_response)."""
+    player_select = (
+        "SELECT p.id AS player_id, p.name, p.default_character_wii, "
+        "p.default_character_switch FROM players p"
+    )
+    cup_id = data.get("cup_id")
+    if cup_id is not None:
+        if isinstance(cup_id, bool) or not isinstance(cup_id, (int, str)):
+            return None, None, (jsonify({"error": "Invalid cup_id"}), 400)
+        try:
+            cup_id = parse_int_field(cup_id)
+        except ValueError:
+            return None, None, (jsonify({"error": "Invalid cup_id"}), 400)
+        conn = get_connection()
+        cup = conn.execute(
+            "SELECT id, game_edition FROM cups WHERE id = ? AND deleted_at IS NULL",
+            (cup_id,),
+        ).fetchone()
+        if cup is None:
+            conn.close()
+            return None, None, (jsonify({"error": "Cup not found"}), 404)
+        players = conn.execute(
+            player_select + " JOIN cup_players cp ON cp.player_id = p.id WHERE cp.cup_id = ?",
+            (cup_id,),
+        ).fetchall()
+        conn.close()
+        if not players:
+            return None, None, (jsonify({"error": "Cup has no players"}), 400)
+        return cup["game_edition"], [dict(p) for p in players], None
+
+    edition = data.get("edition")
+    if edition not in TRACK_SETS:
+        return None, None, (jsonify({"error": "Unknown edition"}), 400)
+    player_ids = data.get("player_ids")
+    if (
+        not isinstance(player_ids, list)
+        or not player_ids
+        or len(player_ids) > MAX_SCORE_ROWS
+    ):
+        return None, None, (jsonify({"error": "player_ids must be a non-empty list"}), 400)
+    parsed_ids = []
+    for pid in player_ids:
+        if isinstance(pid, bool) or not isinstance(pid, (int, str)):
+            return None, None, (jsonify({"error": "Invalid player id"}), 400)
+        try:
+            parsed_ids.append(parse_int_field(pid))
+        except ValueError:
+            return None, None, (jsonify({"error": "Invalid player id"}), 400)
+    placeholders = ",".join("?" * len(parsed_ids))
+    conn = get_connection()
+    players = conn.execute(
+        player_select + f" WHERE p.id IN ({placeholders})", parsed_ids
+    ).fetchall()
+    conn.close()
+    if len(players) != len(set(parsed_ids)):
+        return None, None, (jsonify({"error": "Unknown player id"}), 400)
+    return edition, [dict(p) for p in players], None
+
+
+@app.route("/extract-scores", methods=["POST"])
+def extract_scores():
+    """Extract {position, character, points} rows from a standings photo and
+    match them to this cup's players. JSON in, JSON out; never auto-submits.
+
+    Request: {image: <base64>, mime_type: image/jpeg|image/png,
+              cup_id: <id>}  — live session form, players/edition from the cup
+           or {edition, player_ids: [...]} — manual /cups/new form.
+    Response: {scores: {player_id: points}, ambiguous: [names],
+               unmatched_players: [names], raw_rows: [...]}.
+    """
+    if not extraction_enabled():
+        return jsonify({"error": "extraction not configured"}), 503
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "JSON body required"}), 400
+
+    mime_type = data.get("mime_type")
+    try:
+        decode_photo(data.get("image"), mime_type)
+    except InvalidInput as e:
+        return jsonify({"error": str(e)}), 400
+
+    edition, players, error = _players_for_extraction(data)
+    if error:
+        return error
+
+    try:
+        standings = extract_standings(data["image"], mime_type)
+    except ExtractionError:
+        app.logger.exception("Photo score extraction failed")
+        return (
+            jsonify({"error": "Could not read the photo. Try another shot or enter scores manually."}),
+            502,
+        )
+
+    scores, ambiguous, unmatched = match_standings_to_players(
+        standings.rows, players, edition
+    )
+    return jsonify(
+        {
+            "scores": scores,
+            "ambiguous": ambiguous,
+            "unmatched_players": unmatched,
+            "raw_rows": [
+                {"position": r.position, "character": r.character, "points": r.points}
+                for r in standings.rows
+            ],
+        }
+    )
 
 
 if __name__ == "__main__":
