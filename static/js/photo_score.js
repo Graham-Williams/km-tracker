@@ -24,6 +24,10 @@
  *     reject it anyway, and the redirect would wipe the attached photo);
  *     submit after a failed attach requires an explicit confirm() to proceed
  *     photoless.
+ *   - Busy UX while the extract fetch is in flight: a spinner shows beside
+ *     the status line and the form's submit button is visually disabled
+ *     (re-enabled on completion, error, or a superseding new pick). That's
+ *     UX only — the submit guard above remains the backstop.
  *
  * Usage (per page):
  *   initPhotoScore({
@@ -36,11 +40,13 @@ window.initPhotoScore = function (opts) {
     if (!block) return;
     var attachEl = block.querySelector(".photo-attach-status");
     var statusEl = block.querySelector(".photo-status");
+    var spinnerEl = block.querySelector(".photo-extract-spinner");
     var notesEl = block.querySelector(".photo-notes");
     var preview = block.querySelector(".photo-preview");
     var dataField = document.getElementById("photo-data");
     var mimeField = document.getElementById("photo-mime");
     var form = block.closest("form");
+    var submitBtn = form ? form.querySelector('button[type="submit"]') : null;
 
     var MAX_EDGE = 1200;
     var JPEG_QUALITY = 0.8;
@@ -61,6 +67,17 @@ window.initPhotoScore = function (opts) {
 
     function setStatus(msg) {
         statusEl.textContent = msg;
+    }
+
+    // Extraction-in-flight UX: spinner beside the status line + visually
+    // disabled submit button so users wait for the fill instead of typing
+    // scores in parallel. Pure UX — the submit guard below stays the actual
+    // safety mechanism (backstop if this ever misses a path). Only extract()
+    // and its settle paths call this, so attach-only mode (extractUrl null)
+    // and extraction-disabled pages can never disable anything.
+    function setExtractBusy(busy) {
+        if (spinnerEl) spinnerEl.hidden = !busy;
+        if (submitBtn) submitBtn.disabled = busy;
     }
 
     // kind: "success" | "error" | "pending" | null (null hides the indicator)
@@ -115,6 +132,7 @@ window.initPhotoScore = function (opts) {
 
     function extract(base64, seq) {
         extracting = true;
+        setExtractBusy(true);
         setStatus("Reading scores from the photo…");
         var payload = opts.getPayload();
         payload.image = base64;
@@ -130,6 +148,7 @@ window.initPhotoScore = function (opts) {
         }).then(function (res) {
             if (seq !== requestSeq) return; // superseded by a newer photo
             extracting = false;
+            setExtractBusy(false);
             if (!res.ok) {
                 var msg = (res.body && res.body.error) ||
                     "Extraction failed (" + res.status + ")";
@@ -153,6 +172,7 @@ window.initPhotoScore = function (opts) {
         }).catch(function () {
             if (seq !== requestSeq) return; // superseded by a newer photo
             extracting = false;
+            setExtractBusy(false);
             setStatus("Network error during extraction — photo is still attached; enter scores manually.");
         });
     }
@@ -174,8 +194,10 @@ window.initPhotoScore = function (opts) {
         var seq = ++requestSeq;
         pending = true;
         // A new pick supersedes any in-flight extraction: its response will
-        // bail on the seq check (and so never clears this flag itself).
+        // bail on the seq check (and so never clears this flag itself) — so
+        // reset the busy UX here; extract() re-engages it if this pick runs.
         extracting = false;
+        setExtractBusy(false);
         lastPickFailed = false;
         waitingToSubmit = false; // a new pick supersedes a blocked submit
         setAttachState("pending", "Processing photo…");

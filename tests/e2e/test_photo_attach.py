@@ -116,9 +116,19 @@ def test_submit_during_extraction_blocked_photo_survives(page, base_url, monkeyp
     status = page.locator(".photo-status")
     assert "Reading scores from the photo" in status.inner_text()
 
-    # Submit while extraction is in flight → blocked, message shown, and
-    # crucially NOT auto-resumed (never auto-submit model-filled scores).
-    page.click('button[type="submit"]')
+    # Busy UX while the extract fetch is in flight: spinner visible beside
+    # the status line, submit button visually disabled.
+    assert page.locator(".photo-extract-spinner").is_visible()
+    submit_btn = page.locator('button[type="submit"]')
+    assert submit_btn.is_disabled()
+
+    # The disabled attribute is UX; the submit guard stays the backstop.
+    # Fire a programmatic submit (a disabled button can't be clicked) →
+    # blocked, message shown, and crucially NOT auto-resumed (never
+    # auto-submit model-filled scores).
+    page.evaluate(
+        "document.getElementById('photo-score').closest('form').requestSubmit()"
+    )
     page.locator(".photo-status", has_text="Still reading scores").wait_for()
     assert "/cups/new" in page.url
     assert page.input_value("#photo-data") != ""  # photo survived
@@ -141,6 +151,10 @@ def test_submit_during_extraction_blocked_photo_survives(page, base_url, monkeyp
     assert score_inputs.nth(0).input_value() == "100"
     assert score_inputs.nth(1).input_value() == "80"
 
+    # Extraction settled → spinner gone, submit button re-enabled.
+    assert not page.locator(".photo-extract-spinner").is_visible()
+    assert submit_btn.is_enabled()
+
     # The user reviews and submits — cup saves WITH the photo.
     page.click('button[type="submit"]')
     page.wait_for_url(f"{base_url}/cups")
@@ -160,6 +174,11 @@ def test_submit_with_empty_scores_blocked_client_side(page, base_url):
 
     page.goto(f"{base_url}/cups/new")
     _attach_photo(page)  # extraction unconfigured → attach-only mode
+
+    # Attach-only mode never runs an extraction, so it must never engage the
+    # busy UX: no spinner, submit button stays enabled.
+    assert not page.locator(".photo-extract-spinner").is_visible()
+    assert page.locator('button[type="submit"]').is_enabled()
 
     page.click('button[type="submit"]')
     page.locator(".photo-status", has_text="Enter scores first").wait_for()
@@ -193,6 +212,11 @@ def test_extraction_failure_clears_hold_manual_submit_works(page, base_url, monk
     page.goto(f"{base_url}/cups/new")
     _attach_photo(page)
     page.locator(".photo-status", has_text="photo is still attached").wait_for()
+
+    # The failed extraction must also clear the busy UX: spinner gone,
+    # submit button re-enabled — no stuck disabled button on the 502 path.
+    assert not page.locator(".photo-extract-spinner").is_visible()
+    assert page.locator('button[type="submit"]').is_enabled()
 
     page.locator('.score-row input[name="scores[]"]').first.fill("60")
     page.click('button[type="submit"]')
