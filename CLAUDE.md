@@ -17,6 +17,7 @@ This is a public GitHub repo — keep all committed content professional and gen
 
 - **Backend:** Python + Flask (server-rendered HTML via Jinja templates)
 - **Database:** SQLite (via Python stdlib) — DB path is configured via `DB_PATH` in `.env` (defaults to `db/km_tracker.db`). Run with `--staging` flag to use a separate sandbox DB (`STAGING_DB_PATH`)
+  - **Concurrency (issue #42):** every connection from `db.get_connection()` runs in **WAL mode** (`journal_mode=WAL`, so readers don't block writers) with a `busy_timeout=5000` (writers queue instead of instantly raising "database is locked"). A scoped Flask `errorhandler(sqlite3.OperationalError)` in `app.py` maps only lock-timeout errors to a controlled response (503 JSON for fetch/XHR, flash+redirect for page navs); any other `OperationalError` is re-raised so real bugs still 500. WAL leaves `-wal`/`-shm` sidecars next to the DB — `backup.sh` (online `.backup()`) and `seed_staging.py` already handle these.
   - **Migrations:** fresh DBs come from `schema.sql`; changes to existing tables go in `db.run_migrations()`, which `init_db()` calls on every startup. Each step is guarded by a `PRAGMA table_info` check so it's idempotent/safe on the populated prod DB (the box rebuilds from `main` and the entrypoint runs `init_db`). Keep `schema.sql` and the migration in sync — new fresh DBs must match a fully-migrated one.
 - **Testing:** pytest (Flask test client for unit/integration, Playwright for e2e)
 - **Port:** 8080 (5000 conflicts with macOS AirPlay Receiver)
