@@ -17,6 +17,18 @@ def get_connection(db_path=None):
     db_path = os.path.abspath(db_path)
     conn = sqlite3.connect(db_path)
     conn.execute("PRAGMA foreign_keys = ON")
+    # Lock-contention hardening (issue #42). Under concurrent writes SQLite
+    # raises "database is locked" if it can't grab the lock instantly; these
+    # PRAGMAs make writers queue and let readers proceed while a writer holds
+    # the lock, so contention no longer surfaces as HTTP 500s.
+    #   - busy_timeout: wait up to 5s for the lock instead of failing at once.
+    #     Per-connection, so it must be set every time.
+    #   - journal_mode=WAL: readers don't block on a writer. This is a
+    #     persistent DB-level setting; re-issuing it per connection is a cheap
+    #     idempotent no-op. On a :memory: DB WAL is unavailable and the PRAGMA
+    #     silently reports "memory" — harmless, we never assert WAL there.
+    conn.execute("PRAGMA busy_timeout = 5000")
+    conn.execute("PRAGMA journal_mode = WAL")
     conn.row_factory = sqlite3.Row
     return conn
 

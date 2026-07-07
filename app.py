@@ -264,6 +264,43 @@ def cloudflare_access_check():
         abort(403, description="Cloudflare Access token invalid.")
 
 
+# ---------------------------------------------------------------------------
+# SQLite lock-contention backstop (issue #42)
+#
+# db.py sets busy_timeout + WAL so writers queue rather than failing instantly,
+# which resolves nearly all contention. This handler is the last line of
+# defence: if a writer still can't get the lock within busy_timeout, SQLite
+# raises "database is locked". Rather than let that surface as a raw HTTP 500,
+# we map it to a controlled response — a friendly flash + redirect for page
+# navigations, or a 503 JSON body for the fetch()-driven action endpoints.
+#
+# Scoped narrowly to the lock message: any other OperationalError is a real
+# bug and is re-raised so it still 500s (we never mask genuine failures).
+# ---------------------------------------------------------------------------
+
+
+@app.errorhandler(sqlite3.OperationalError)
+def handle_sqlite_locked(error):
+    if "locked" not in str(error).lower():
+        # Not lock contention — a genuine error. Don't swallow it.
+        raise error
+    app.logger.warning(
+        "SQLite lock contention on %s %s: %s", request.method, request.path, error
+    )
+    message = "The database was busy — please try again."
+    # fetch()/XHR callers send Accept: */* (best_match ties to the first entry);
+    # browser page navigations send Accept: text/html. Give the former a JSON
+    # 503 they can handle, the latter a flash + redirect back.
+    wants_json = (
+        request.accept_mimetypes.best_match(["application/json", "text/html"])
+        == "application/json"
+    )
+    if wants_json:
+        return jsonify({"error": message}), 503
+    flash(message, "error")
+    return redirect(request.referrer or url_for("index"))
+
+
 def resolve_db_path(staging, env):
     if staging:
         staging_path = env.get("STAGING_DB_PATH")
