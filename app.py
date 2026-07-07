@@ -298,7 +298,13 @@ def handle_sqlite_locked(error):
     if wants_json:
         return jsonify({"error": message}), 503
     flash(message, "error")
-    return redirect(request.referrer or url_for("index"))
+    # Only honor a same-host referrer (open-redirect guard) — the Referer is
+    # browser-supplied. Compare against the same expected host the CSRF check
+    # uses; anything cross-host or absent falls back to the index.
+    referrer = request.referrer
+    if referrer and urlsplit(referrer).netloc == _expected_host():
+        return redirect(referrer)
+    return redirect(url_for("index"))
 
 
 def resolve_db_path(staging, env):

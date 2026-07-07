@@ -13,6 +13,7 @@ import sqlite3
 import tempfile
 import threading
 import time
+from urllib.parse import urlsplit
 
 import pytest
 import requests
@@ -109,6 +110,36 @@ def test_lock_error_returns_controlled_response_not_500(client, monkeypatch):
     json_resp = client.get("/players", headers={"Accept": "*/*"})
     assert json_resp.status_code == 503
     assert "busy" in json_resp.get_json()["error"].lower()
+
+
+def test_lock_redirect_ignores_cross_host_referrer(client, monkeypatch):
+    """Open-redirect guard: a lock-timeout redirect must honor only a same-host
+    Referer, else fall back to the index — never bounce the user off-site."""
+    import app as app_module
+
+    def raise_locked(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(app_module, "get_connection", raise_locked)
+
+    # The test client's host is 'localhost'. A cross-host Referer must be ignored
+    # and the redirect must point back to the app's own index.
+    resp = client.get(
+        "/players",
+        headers={"Accept": "text/html", "Referer": "http://evil.example.com/phish"},
+    )
+    assert resp.status_code in (302, 303)
+    location = resp.headers["Location"]
+    assert "evil.example.com" not in location
+    assert urlsplit(location).path == "/"
+
+    # A same-host Referer is preserved.
+    resp2 = client.get(
+        "/players",
+        headers={"Accept": "text/html", "Referer": "http://localhost/scores"},
+    )
+    assert resp2.status_code in (302, 303)
+    assert urlsplit(resp2.headers["Location"]).path == "/scores"
 
 
 def test_non_lock_operational_error_is_not_masked(client, monkeypatch):
