@@ -487,11 +487,25 @@ def delete_player(player_id):
         conn.close()
         flash("Cannot delete a player who has scores recorded.")
         return redirect(url_for("players"))
-    conn.execute("DELETE FROM line_changes WHERE player_id = ?", (player_id,))
-    conn.execute("DELETE FROM scores WHERE player_id = ?", (player_id,))
-    conn.execute("DELETE FROM players WHERE id = ?", (player_id,))
-    conn.commit()
-    conn.close()
+    # A player attached to a cup (including an in-progress session) has a
+    # cup_players row. With foreign_keys=ON and no CASCADE, deleting the player
+    # would raise IntegrityError -> uncaught 500. Reject cleanly instead.
+    in_cup = conn.execute(
+        "SELECT 1 FROM cup_players WHERE player_id = ? LIMIT 1", (player_id,)
+    ).fetchone()
+    if in_cup:
+        conn.close()
+        flash("Cannot delete a player who is in a cup.")
+        return redirect(url_for("players"))
+    try:
+        conn.execute("DELETE FROM line_changes WHERE player_id = ?", (player_id,))
+        conn.execute("DELETE FROM scores WHERE player_id = ?", (player_id,))
+        conn.execute("DELETE FROM players WHERE id = ?", (player_id,))
+        conn.commit()
+    except sqlite3.IntegrityError:
+        flash("Cannot delete a player who is referenced elsewhere.")
+    finally:
+        conn.close()
     return redirect(url_for("players"))
 
 
