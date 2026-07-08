@@ -362,7 +362,11 @@ RATE_LIMIT_WINDOW = 15 * 60  # 15 minutes, in seconds
 # spoofing (which requires bypassing the Cloudflare tunnel — the app publishes
 # no host port and CF overwrites CF-Connecting-IP at the edge) could reach this.
 # When saturated, a brand-new IP is refused rather than growing the dict without
-# bound, so the failure table can never exceed this many entries.
+# bound, keeping the failure table at ~this many entries (concurrent inserts can
+# transiently exceed it by at most the worker-thread count — still bounded).
+# Reaching saturation would also lock out further new IPs until the process
+# recycles; that only bites under the mass-spoof precondition above, an accepted
+# tradeoff for a low-stakes single-tunnel app.
 RATE_LIMIT_MAX_TRACKED_IPS = 10000
 _login_fail_lock = threading.Lock()
 _login_failures = {}  # client_ip -> list[timestamps of failures within the window]
@@ -402,7 +406,8 @@ def _is_rate_limited(ip):
         # Backstop: if we're already tracking a pathological number of distinct
         # failing IPs, refuse a brand-new one instead of growing unbounded. This
         # both caps memory and imposes a very high global ceiling on a spoofing
-        # flood, while never affecting normal traffic (which never approaches it).
+        # flood. Normal traffic never approaches the cap (only *failing* IPs are
+        # tracked and a success clears them), so this is inert in practice.
         if (
             len(_login_failures) >= RATE_LIMIT_MAX_TRACKED_IPS
             and ip not in _login_failures
