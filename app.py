@@ -357,14 +357,30 @@ GATE_EXEMPT_PATHS = frozenset({"/login", "/logout", "/healthz"})
 # per the single-container deployment.
 RATE_LIMIT_MAX = 10
 RATE_LIMIT_WINDOW = 15 * 60  # 15 minutes, in seconds
+# Memory / global-abuse backstop: cap the number of distinct client IPs tracked
+# at once. Normal traffic tracks a handful of failing IPs; only mass IP/header
+# spoofing (which requires bypassing the Cloudflare tunnel — the app publishes
+# no host port and CF overwrites CF-Connecting-IP at the edge) could reach this.
+# When saturated, a brand-new IP is refused rather than growing the dict without
+# bound, so the failure table can never exceed this many entries.
+RATE_LIMIT_MAX_TRACKED_IPS = 10000
 _login_fail_lock = threading.Lock()
-_login_failures = {}  # client_ip -> list[monotonic-ish timestamps of failures]
+_login_failures = {}  # client_ip -> list[timestamps of failures within the window]
 
 
 def _client_ip():
-    """Best-effort client IP. Prefer Cloudflare's CF-Connecting-IP (the app sits
-    behind Cloudflare); fall back to the socket peer. Only used for rate-limiting
-    keys, so a spoofed header at worst rate-limits the spoofer's own bucket."""
+    """Rate-limiting key for the client. Prefer Cloudflare's CF-Connecting-IP,
+    falling back to the socket peer.
+
+    TRUST NOTE: the app is only reachable through the Cloudflare tunnel (no host
+    port is published — see docker-compose.yml), and Cloudflare *overwrites*
+    CF-Connecting-IP at the edge, so a client cannot forge it on the real path.
+    This is the same trust boundary the CF-Access check relies on. If the app
+    were ever exposed directly (a published host port / tailnet), this header
+    would become client-controllable and the per-IP throttle spoofable — the
+    RATE_LIMIT_MAX_TRACKED_IPS cap bounds the blast radius (memory + a global
+    ceiling) even in that case.
+    """
     return request.headers.get("CF-Connecting-IP") or request.remote_addr or "unknown"
 
 
@@ -381,7 +397,18 @@ def _prune_failures(ip, now):
 def _is_rate_limited(ip):
     now = time.time()
     with _login_fail_lock:
-        return len(_prune_failures(ip, now)) >= RATE_LIMIT_MAX
+        if len(_prune_failures(ip, now)) >= RATE_LIMIT_MAX:
+            return True
+        # Backstop: if we're already tracking a pathological number of distinct
+        # failing IPs, refuse a brand-new one instead of growing unbounded. This
+        # both caps memory and imposes a very high global ceiling on a spoofing
+        # flood, while never affecting normal traffic (which never approaches it).
+        if (
+            len(_login_failures) >= RATE_LIMIT_MAX_TRACKED_IPS
+            and ip not in _login_failures
+        ):
+            return True
+        return False
 
 
 def _record_login_failure(ip):
@@ -405,7 +432,10 @@ def _safe_next(target):
     """
     if not target or not target.startswith("/"):
         return None
-    if target.startswith("//") or target.startswith("/\\") or target.startswith("/%2f"):
+    lowered = target.lower()
+    # Reject protocol-relative (`//host`), backslash (`/\host`), and encoded-slash
+    # (`/%2fhost`, any case) tricks that browsers may resolve to an off-site host.
+    if lowered.startswith("//") or lowered.startswith("/\\") or lowered.startswith("/%2f"):
         return None
     parts = urlsplit(target)
     if parts.scheme or parts.netloc:

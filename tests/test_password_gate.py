@@ -160,6 +160,8 @@ def test_healthz_open_when_gate_on(client, gate):
         "http://evil.example",
         "//evil.example",
         "/\\evil.example",
+        "/%2fevil.example",
+        "/%2Fevil.example",  # uppercase-encoded slash must also be rejected
         "javascript:alert(1)",
         "evil.example",
     ],
@@ -212,6 +214,34 @@ def test_rate_limit_is_per_ip(client, gate):
         "/login", data={"password": "wrong"}, headers={"CF-Connecting-IP": "10.0.0.2"}
     )
     assert other.status_code == 401
+
+
+def test_tracked_ip_table_is_bounded(client, gate, monkeypatch):
+    # Backstop against unbounded memory growth / a mass-IP-spoofing flood: once
+    # the failure table is saturated, a brand-new IP is refused (429) rather than
+    # adding another entry. Shrink the cap so the test is cheap.
+    monkeypatch.setattr(app_module, "RATE_LIMIT_MAX_TRACKED_IPS", 3)
+    for i in range(3):
+        resp = client.post(
+            "/login",
+            data={"password": "wrong"},
+            headers={"CF-Connecting-IP": f"203.0.113.{i}"},
+        )
+        assert resp.status_code == 401
+    # Table now holds 3 distinct IPs; a fourth, never-seen IP is refused.
+    blocked = client.post(
+        "/login",
+        data={"password": "wrong"},
+        headers={"CF-Connecting-IP": "203.0.113.99"},
+    )
+    assert blocked.status_code == 429
+    # An already-tracked IP is still served (not a brand-new key).
+    known = client.post(
+        "/login",
+        data={"password": "wrong"},
+        headers={"CF-Connecting-IP": "203.0.113.0"},
+    )
+    assert known.status_code == 401
 
 
 def test_successful_login_clears_failure_counter(client, gate):
