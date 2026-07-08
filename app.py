@@ -30,6 +30,8 @@ from flask import (
     url_for,
 )
 
+from werkzeug.routing import IntegerConverter, ValidationError
+
 from db import get_connection, get_db_path, init_db
 from extraction import ExtractionError, extract_standings, extraction_enabled
 from maps import (
@@ -45,6 +47,23 @@ load_dotenv()
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY") or secrets.token_hex(32)
+
+
+# Werkzeug's default <int:...> converter accepts arbitrarily large integers.
+# Binding one that exceeds SQLite's signed 64-bit INTEGER range raises
+# OverflowError deep in the query -> uncaught 500 (issue #46). Cap the converter
+# so an oversized path id simply fails to match the route -> automatic 404.
+# Overriding the "int" converter key makes every existing <int:...> route
+# inherit the cap without per-route changes.
+class BoundedIntConverter(IntegerConverter):
+    def to_python(self, value):
+        result = super().to_python(value)
+        if not (SQLITE_MIN_INT <= result <= SQLITE_MAX_INT):
+            raise ValidationError()
+        return result
+
+
+app.url_map.converters["int"] = BoundedIntConverter
 
 # Cap request body size to blunt memory-exhaustion DoS. The largest legit
 # request is a score form / extraction call carrying a client-downscaled
@@ -305,6 +324,14 @@ def handle_sqlite_locked(error):
     if referrer and urlsplit(referrer).netloc == _expected_host():
         return redirect(referrer)
     return redirect(url_for("index"))
+
+
+@app.errorhandler(OverflowError)
+def handle_overflow(error):
+    # Belt-and-suspenders for issue #46: an oversized integer that slips past
+    # the bounded path converter (e.g. an int form field bound into a query)
+    # raises OverflowError. Treat it as a not-found/bad-request rather than 500.
+    abort(404)
 
 
 def resolve_db_path(staging, env):
