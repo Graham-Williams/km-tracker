@@ -141,8 +141,9 @@ prod container. Full runbook (Cloudflare dashboard steps, first bring-up) is in
 ## Security Hardening (public access)
 
 The app is exposed publicly at `km.graham-williams.com` behind a Cloudflare
-tunnel + Cloudflare Access. Two `before_request` hooks in `app.py` back up Access
-as defense-in-depth (full operator docs in `DEPLOY.md` → "Public access hardening"):
+tunnel + Cloudflare Access. Three `before_request` hooks in `app.py` handle
+access control (full operator docs in `DEPLOY.md` → "Public access hardening"
+and "Sign-in"):
 
 - **CSRF — Origin/Referer host check (`csrf_origin_check`).** On every
   `POST`/`PUT`/`PATCH`/`DELETE`, rejects (403) requests whose `Origin` (else
@@ -161,10 +162,32 @@ as defense-in-depth (full operator docs in `DEPLOY.md` → "Public access harden
   cookie): signature checked against the team JWKS
   (`https://<TEAM_DOMAIN>/cdn-cgi/access/certs`, fetched with stdlib `urllib`,
   cached in-process, auto-refreshed on unknown `kid`), plus `aud`/issuer/expiry.
-  Missing/invalid → 403. `/static/*` is exempt.
+  Missing/invalid → 403. `/static/*` and `/healthz` are exempt.
+- **App-level shared-password login gate (`password_gate_check` + `/login`,
+  `/logout`).** The intended **replacement** for the Cloudflare Access emailed-PIN
+  flow: hand friends **one shared password**; entering it once grants a **30-day
+  signed-cookie** session. **Env-gated on `APP_PASSWORD`** — set → gate ACTIVE
+  (unauthenticated requests 302 → `/login?next=<path>`); blank/unset → gate OFF
+  (app behaves as before). This lets it ship **dormant** behind Access, then
+  activate at cutover by setting `APP_PASSWORD`. `POST /login` does a
+  **constant-time** compare (`hmac.compare_digest`), sets a session cookie holding
+  only a signed `kmauth` marker (**never** the password; signed with `SECRET_KEY`
+  via Flask/itsdangerous), flagged **HttpOnly + Secure + SameSite=Lax**. `next` is
+  **open-redirect-safe** (local paths only). Failures are **rate-limited per IP**
+  (10/15 min → 429, keyed off `CF-Connecting-IP`; in-memory, per-process).
+  **Exempt from the gate:** `/static/*`, `/login`, `/logout`, `/healthz`.
+  `SESSION_SECRET` is an optional alias for the cookie-signing key (blank → reuse
+  `SECRET_KEY`); `SESSION_COOKIE_SECURE` defaults ON (set `0` only for plain-HTTP
+  local dev / tests). New unauthenticated **`GET /healthz`** liveness route is
+  exempt from **both** gates. The two mechanisms are independent hooks meant to
+  run one-at-a-time; nothing breaks if both are briefly on (Access gates first).
+  Compose passes `APP_PASSWORD`/`SESSION_SECRET` (empty-safe) to prod + staging;
+  staging can use `STAGING_APP_PASSWORD` to activate independently.
 
 Dependency added for JWT verification: **`PyJWT[crypto]`** (in `requirements.txt`,
 so it ships in the Docker image). Config env vars are documented in `.env.example`.
+The password gate adds **no new dependencies** (uses stdlib `hmac` + Flask's
+built-in signed session).
 
 ### Hardening test coverage
 
@@ -177,6 +200,13 @@ is generated in-process and the JWKS fetch is monkeypatched):
 - `tests/test_csrf.py` — Origin/Referer pinning: matching vs. cross-origin,
   `null` Origin, port mismatch, `APP_HOST`/`APP_ORIGIN` pinning, safe methods,
   JSON endpoints, kill switch.
+- `tests/test_password_gate.py` — the shared-password gate: gate off by default,
+  unauth protected route → 302 `/login`, correct password grants access, wrong/
+  empty rejected (401), logout clears session, static + `/healthz` stay open with
+  the gate on, open-redirect `next` rejected (absolute/`//`/`/\`/`javascript:`),
+  rate-limit trips at 10 fails (429, per-IP, cleared on success), cookie flags
+  (HttpOnly/Secure/SameSite=Lax), password never in the cookie, forged/unsigned
+  session cookie rejected.
 - `tests/test_hostile_input.py` — malformed/hostile input on the main POST
   endpoints. Bad input must return a 4xx / flash+redirect, never a 500, and
   never persist bad state. **The input-validation bugs it documents (BUG-1 …

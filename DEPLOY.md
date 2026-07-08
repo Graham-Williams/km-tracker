@@ -84,6 +84,11 @@ Edit `.env` and fill in:
 
 - `TUNNEL_TOKEN` — you'll get this in Step 4.
 
+- `APP_PASSWORD` — **optional.** The shared sign-in password. Blank/unset leaves
+  the login gate OFF; setting it turns on the `/login` gate (see
+  "Sign-in — app-level shared-password gate" below). Ships dormant so you can
+  deploy it before cutting over from Cloudflare Access.
+
 - `ANTHROPIC_API_KEY` — **optional.** Enables photo score extraction (reading a
   photographed standings screen via the Claude API). Leave blank and the app
   degrades gracefully: the score forms offer attach-only photo mode and manual
@@ -214,6 +219,47 @@ keys), and checks the audience, issuer, and expiry. Invalid/missing → 403.
 When **either** var is unset (local dev, or LAN/tailnet access), verification is
 skipped entirely — so this only enforces once you've configured it for
 production.
+
+## Sign-in — app-level shared-password gate
+
+The app has a built-in login gate so access can be granted by handing friends
+**one shared password** instead of adding each person to a Cloudflare Access
+policy (which emails a one-time PIN on every new device/session). It is designed
+to **replace** the Cloudflare Access PIN flow, but ships **dormant** so it can be
+deployed before cutover.
+
+**Env vars (in `.env`):**
+
+- `APP_PASSWORD` — the shared password. **Set → the gate is ACTIVE** (the app
+  serves a `/login` page and requires this password). **Blank/unset → the gate
+  is OFF** and the app behaves exactly as before. This env-gating is the whole
+  point: deploy the gate dormant while Cloudflare Access is still in front, then
+  activate it at cutover just by filling this in and redeploying.
+- `SESSION_SECRET` — **optional, leave blank.** The session cookie is signed with
+  the existing `SECRET_KEY`; set `SESSION_SECRET` only if you want a dedicated
+  signing key (`SECRET_KEY` wins if both are set).
+
+**How it works (`password_gate_check` before_request + `/login`, `/logout` in
+`app.py`):** any request that isn't a static asset, the login/logout routes, or
+`/healthz`, and isn't authenticated → `302` to `/login?next=<original-path>`.
+`POST /login` compares the submitted password against `APP_PASSWORD` in
+**constant time** (`hmac.compare_digest`); on success it sets a **signed** session
+cookie carrying only an auth marker (never the password), flagged
+**HttpOnly + Secure + SameSite=Lax** with a **30-day** lifetime, then redirects to
+the validated-local `next` (off-site `next` values are rejected — no open
+redirect). Wrong passwords are **rate-limited per client IP** (10 failures / 15
+min → `429`, keyed off `CF-Connecting-IP`). `GET /logout` clears the cookie.
+
+`SESSION_COOKIE_SECURE` defaults ON; it can be set to `0` for plain-HTTP local
+dev (the test suite does this). Leave it unset in production (HTTPS at the edge).
+
+**Cutover (Cloudflare Access → password gate):** deploy with `APP_PASSWORD` set,
+verify `/login` works, then the human removes/loosens the Cloudflare Access
+policy in the dashboard and clears `CF_ACCESS_AUD`/`CF_ACCESS_TEAM_DOMAIN` from
+`.env`. The two mechanisms are independent `before_request` hooks and are meant
+to run **one at a time**; nothing breaks if both are briefly on (Access simply
+gates first). `/healthz` is exempt from **both** gates so container/uptime
+health checks always succeed.
 
 ## Updating the deployment
 
