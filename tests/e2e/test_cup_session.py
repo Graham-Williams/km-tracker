@@ -100,11 +100,11 @@ def test_spin_button_works(page, base_url):
 def test_spin_then_next_race(page, base_url):
     _start_session(page, base_url)
     _spin_and_confirm(page, base_url)
-    # Should reload to race 2 or complete page
-    page.wait_for_load_state("networkidle")
-    # Either on race 2 or the page reloaded
-    content = page.content()
-    assert "Race 2 of 4" in content or "cup-session" in page.url
+    # After confirming, the JS reloads the page to race 2. Wait explicitly for
+    # the race-2 heading instead of a timing-sensitive networkidle wait (which
+    # flakes when the reload's network settles before/after the poll).
+    page.locator("text=Race 2 of 4").wait_for(timeout=10000)
+    assert "Race 2 of 4" in page.content()
 
 
 def test_full_session_flow(page, base_url):

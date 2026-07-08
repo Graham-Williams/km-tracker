@@ -56,6 +56,15 @@ def _server():
 
 
 @pytest.fixture(autouse=True)
+def _scrub_anthropic_key(monkeypatch):
+    """Ensure a real ANTHROPIC_API_KEY in the dev shell never leaks into e2e
+    runs (issue #51). Without this, a non-intercepted photo-attach test could
+    fire a real /extract-scores call against the live Claude API. Extraction-
+    specific tests set their own fake key, so a global scrub is safe."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _reset_db(_server):
     """Wipe all data between tests while keeping the schema."""
     yield
