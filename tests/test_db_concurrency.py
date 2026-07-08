@@ -314,3 +314,45 @@ def test_concurrent_writes_never_500(live_server):
         t.join()
 
     assert not bad, f"Concurrent writes produced 500s / errors: {bad}"
+
+
+def test_concurrent_cup_session_new_never_double_starts(live_server):
+    """Fire many concurrent POST /cup-session/new. The atomic conditional
+    INSERT (issue #55) must ensure at most ONE in-progress cup exists even
+    though all requests pass the early get_in_progress_cup() check in the
+    check-then-act gap."""
+    base = live_server["url"]
+    html = {"Accept": "text/html"}
+    errors = []
+    lock = threading.Lock()
+
+    def start_worker(tid):
+        try:
+            r = requests.post(
+                f"{base}/cup-session/new",
+                data={"player_ids[]": ["1", "2"]},
+                headers=html,
+                allow_redirects=False,
+                timeout=15,
+            )
+            if r.status_code == 500:
+                with lock:
+                    errors.append((tid, r.status_code))
+        except Exception as e:  # noqa: BLE001
+            with lock:
+                errors.append((tid, repr(e)))
+
+    threads = [threading.Thread(target=start_worker, args=(tid,)) for tid in range(12)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, f"cup-session/new produced 500s / errors: {errors}"
+
+    conn = get_connection(live_server["db_path"])
+    n = conn.execute(
+        "SELECT COUNT(*) FROM cups WHERE status = 'in_progress'"
+    ).fetchone()[0]
+    conn.close()
+    assert n <= 1, f"expected at most 1 in-progress cup, found {n}"

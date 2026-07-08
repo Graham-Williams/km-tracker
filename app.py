@@ -1310,10 +1310,28 @@ def cup_session_create():
     date_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     conn = get_connection()
     try:
+        # Atomic guard against a concurrent double-start (issue #55). The early
+        # get_in_progress_cup() check above handles the friendly common path,
+        # but two requests can both pass it before either inserts. This
+        # conditional INSERT only creates the cup if no in-progress cup exists,
+        # so at most one wins the race; the loser sees rowcount == 0.
         cursor = conn.execute(
-            "INSERT INTO cups (date, status, game_edition) VALUES (?, 'in_progress', ?)",
+            "INSERT INTO cups (date, status, game_edition) "
+            "SELECT ?, 'in_progress', ? "
+            "WHERE NOT EXISTS (SELECT 1 FROM cups WHERE status = 'in_progress')",
             (date_utc, edition),
         )
+        if cursor.rowcount == 0:
+            # Lost the race: another request started a cup in the gap. Redirect
+            # to the existing in-progress cup rather than creating a second one.
+            existing = conn.execute(
+                "SELECT id FROM cups WHERE status = 'in_progress' ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            conn.rollback()
+            flash("A cup is already in progress.")
+            if existing:
+                return redirect(url_for("cup_session_race", cup_id=existing["id"]))
+            return redirect(url_for("cup_session_new"))
         cup_id = cursor.lastrowid
         for pid in player_id_ints:
             conn.execute(
