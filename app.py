@@ -1127,10 +1127,21 @@ def create_score():
         except InvalidInput as e:
             flash(str(e))
             return redirect(url_for("scores"))
-        conn.execute(
-            "INSERT INTO scores (cup_id, player_id, score, line, line_score, won_tiebreaker) VALUES (?, ?, ?, ?, ?, ?)",
-            (cup_id, player_id, score, player_line, line_score_val, won_tiebreaker or None),
+        # Fold the in-progress guard into the INSERT (issue #52) to close the
+        # TOCTOU between the SELECT above and this write: if the cup is
+        # completed/cancelled/deleted in that window, EXISTS is false and no
+        # row is inserted. The SELECT above stays for the friendly common-path
+        # message; this conditional INSERT is the authoritative guard.
+        cursor = conn.execute(
+            "INSERT INTO scores (cup_id, player_id, score, line, line_score, won_tiebreaker) "
+            "SELECT ?, ?, ?, ?, ?, ? "
+            "WHERE EXISTS (SELECT 1 FROM cups WHERE id = ? AND deleted_at IS NULL AND status = 'in_progress')",
+            (cup_id, player_id, score, player_line, line_score_val, won_tiebreaker or None, cup_id),
         )
+        if cursor.rowcount == 0:
+            conn.rollback()
+            flash("Scores can only be added to a cup that is currently in progress.")
+            return redirect(url_for("scores"))
         conn.commit()
     except sqlite3.IntegrityError:
         flash("A score for that player in that cup already exists.")

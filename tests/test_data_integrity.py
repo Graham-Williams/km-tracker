@@ -311,6 +311,50 @@ def test_completion_status_transition_is_conditional(client):
 
 
 # =============================================================================
+# #52 — standalone POST /scores must not write into a cup completed mid-request
+# =============================================================================
+
+
+def test_create_score_atomic_rejects_cup_completed_mid_request(client, monkeypatch):
+    # Simulate the TOCTOU deterministically: create_score passes its in-progress
+    # SELECT check, then (in the window before its INSERT) the cup is completed
+    # by another request. The conditional INSERT (WHERE EXISTS in_progress) must
+    # write nothing, so no score leaks into the now-completed cup.
+    cup_id = _start_session(client, ("1", "2"))
+
+    real_checked = app_module.checked_line_score
+    state = {"raced": False}
+
+    def racing_checked(score, line):
+        if not state["raced"]:
+            state["raced"] = True
+            # Another request completes the cup in the gap.
+            conn2 = get_connection()
+            conn2.execute(
+                "UPDATE cups SET status = 'completed' WHERE id = ?", (cup_id,)
+            )
+            conn2.commit()
+            conn2.close()
+        return real_checked(score, line)
+
+    monkeypatch.setattr(app_module, "checked_line_score", racing_checked)
+
+    resp = client.post(
+        "/scores",
+        data={"cup_id": str(cup_id), "player_id": "1", "score": "50"},
+        follow_redirects=False,
+    )
+    assert resp.status_code < 500  # clean loss, not a crash
+
+    conn = get_connection()
+    n = conn.execute(
+        "SELECT COUNT(*) FROM scores WHERE cup_id = ?", (cup_id,)
+    ).fetchone()[0]
+    conn.close()
+    assert n == 0  # nothing persisted into the completed cup
+
+
+# =============================================================================
 # #36 — veto/voto counters must stay at/under cap under concurrent increments
 # =============================================================================
 
