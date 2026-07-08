@@ -16,6 +16,13 @@ services:
       # Optional — photo score extraction. Blank/unset disables the feature
       # gracefully (attach-only photo mode; manual entry unaffected).
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      # Cloudflare Access hardening (issue #20). Empty-safe defaults so the base
+      # file works standalone in dev: blank CF_ACCESS_* disables app-side JWT
+      # verification (intended dev fallback). docker-compose.access.yml still
+      # layers the real prod values on top — don't pin the prod host here.
+      - APP_HOST=${APP_HOST:-}
+      - CF_ACCESS_TEAM_DOMAIN=${CF_ACCESS_TEAM_DOMAIN:-}
+      - CF_ACCESS_AUD=${CF_ACCESS_AUD:-}
     restart: unless-stopped
 
   cloudflared:
