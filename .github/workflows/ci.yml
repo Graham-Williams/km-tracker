@@ -64,6 +64,11 @@ jobs:
           docker compose logs
           exit 1
 
+      - name: Verify static CSS is served
+        run: |
+          curl -sf http://localhost:8080/static/css/app.css > /dev/null \
+            || (echo "app.css not served"; exit 1)
+
       - name: Allow host access to DB volume
         run: sudo chmod -R a+rw data
 
