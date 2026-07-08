@@ -1,6 +1,7 @@
 import base64
 import binascii
 import hashlib
+import hmac
 import json
 import os
 import random
@@ -27,6 +28,7 @@ from flask import (
     redirect,
     render_template,
     request,
+    session,
     url_for,
 )
 
@@ -46,7 +48,39 @@ from maps import (
 load_dotenv()
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("SECRET_KEY") or secrets.token_hex(32)
+# The session cookie is signed (itsdangerous HMAC) with this key. SECRET_KEY is
+# the app's existing signing key and is REUSED for the login-gate session — so
+# the shared-password gate needs no new signing secret. SESSION_SECRET is
+# accepted only as an explicit alias/override if someone prefers a dedicated
+# name; SECRET_KEY wins when both are set. Neither is ever hardcoded, and a
+# random per-process key is the last resort (dev only — logins won't survive a
+# restart, which is fine locally).
+app.secret_key = (
+    os.environ.get("SECRET_KEY")
+    or os.environ.get("SESSION_SECRET")
+    or secrets.token_hex(32)
+)
+
+# Session cookie hardening for the shared-password login gate.
+#   - HttpOnly: JS can't read the auth cookie (default True, set explicit).
+#   - SameSite=Lax: not sent on cross-site POSTs (defense-in-depth w/ CSRF pin).
+#   - Secure: only sent over HTTPS. On by default (prod is HTTPS at the edge);
+#     read from an env flag so the test suite / plain-HTTP local dev can turn it
+#     off and let the cookie round-trip. Never store the password in the cookie
+#     — only a signed "authenticated" marker (session["kmauth"]).
+#   - Lifetime: 30 days so friends rarely have to re-enter the password.
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+# Secure defaults ON; only an explicit falsey env value ('0'/'false'/'no'/'off'/'')
+# turns it off (mirrors _env_flag, inlined here because _env_flag is defined
+# further down and this runs at import time).
+_secure_env = os.environ.get("SESSION_COOKIE_SECURE")
+app.config["SESSION_COOKIE_SECURE"] = (
+    True
+    if _secure_env is None
+    else _secure_env.strip().lower() not in ("0", "false", "no", "off", "")
+)
+app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(days=30)
 
 
 # Werkzeug's default <int:...> converter accepts arbitrarily large integers.
@@ -270,6 +304,9 @@ def cloudflare_access_check():
         return
     if request.path.startswith("/static/"):
         return
+    if request.path == "/healthz":
+        # Unauthenticated liveness probe — exempt from BOTH gates.
+        return
     token = request.headers.get("Cf-Access-Jwt-Assertion") or request.cookies.get("CF_Authorization")
     if not token:
         abort(403, description="Cloudflare Access token missing.")
@@ -281,6 +318,223 @@ def cloudflare_access_check():
         # logs. Still fail closed with a 403.
         app.logger.exception("Cloudflare Access token verification failed")
         abort(403, description="Cloudflare Access token invalid.")
+
+
+# ---------------------------------------------------------------------------
+# 3. App-level shared-password login gate
+#
+# A single shared password (APP_PASSWORD) that Graham hands to friends. Entering
+# it once grants a long-lived (30-day) signed-cookie session so they rarely have
+# to re-auth. Designed to REPLACE the Cloudflare-Access emailed-PIN flow.
+#
+# Env-gated: when APP_PASSWORD is set the gate is ACTIVE; when unset/empty the
+# gate is OFF and the app behaves exactly as before. This lets the gate ship
+# dormant (while Cloudflare Access is still in front) and be switched on during
+# cutover just by setting APP_PASSWORD. The two mechanisms are independent and
+# meant to run one-at-a-time (Access in front, THEN the password gate after
+# cutover); neither interferes with the other's before_request hook.
+#
+# Security properties:
+#   - Constant-time password compare (hmac.compare_digest) — no timing oracle.
+#   - The cookie only carries a signed "authenticated" marker (session["kmauth"]),
+#     never the password; itsdangerous signs it with SECRET_KEY so it can't be
+#     forged. Cookie flags: HttpOnly + Secure + SameSite=Lax (configured above).
+#   - Open-redirect-safe `next` (local paths only).
+#   - Per-IP brute-force rate limiting (in-memory; single container).
+# ---------------------------------------------------------------------------
+
+APP_PASSWORD = os.environ.get("APP_PASSWORD", "")
+PASSWORD_GATE_ENABLED = bool(APP_PASSWORD)
+
+# Paths always reachable without a session when the gate is active: the login
+# and logout routes themselves, and an unauthenticated health/liveness probe.
+# (Static assets are handled separately via the /static/ prefix check.)
+GATE_EXEMPT_PATHS = frozenset({"/login", "/logout", "/healthz"})
+
+# Brute-force throttle: after RATE_LIMIT_MAX failed attempts from one client IP
+# within RATE_LIMIT_WINDOW seconds, further attempts are refused (429) until the
+# burst ages out of the window (~15 min). In-memory + per-process is acceptable
+# per the single-container deployment.
+RATE_LIMIT_MAX = 10
+RATE_LIMIT_WINDOW = 15 * 60  # 15 minutes, in seconds
+# Memory / global-abuse backstop: cap the number of distinct client IPs tracked
+# at once. Normal traffic tracks a handful of failing IPs; only mass IP/header
+# spoofing (which requires bypassing the Cloudflare tunnel — the app publishes
+# no host port and CF overwrites CF-Connecting-IP at the edge) could reach this.
+# When saturated, a brand-new IP is refused rather than growing the dict without
+# bound, keeping the failure table at ~this many entries (concurrent inserts can
+# transiently exceed it by at most the worker-thread count — still bounded).
+# Reaching saturation would also lock out further new IPs until the process
+# recycles; that only bites under the mass-spoof precondition above, an accepted
+# tradeoff for a low-stakes single-tunnel app.
+RATE_LIMIT_MAX_TRACKED_IPS = 10000
+_login_fail_lock = threading.Lock()
+_login_failures = {}  # client_ip -> list[timestamps of failures within the window]
+
+
+def _client_ip():
+    """Rate-limiting key for the client. Prefer Cloudflare's CF-Connecting-IP,
+    falling back to the socket peer.
+
+    TRUST NOTE: the app is only reachable through the Cloudflare tunnel (no host
+    port is published — see docker-compose.yml), and Cloudflare *overwrites*
+    CF-Connecting-IP at the edge, so a client cannot forge it on the real path.
+    This is the same trust boundary the CF-Access check relies on. If the app
+    were ever exposed directly (a published host port / tailnet), this header
+    would become client-controllable and the per-IP throttle spoofable — the
+    RATE_LIMIT_MAX_TRACKED_IPS cap bounds the blast radius (memory + a global
+    ceiling) even in that case.
+    """
+    return request.headers.get("CF-Connecting-IP") or request.remote_addr or "unknown"
+
+
+def _prune_failures(ip, now):
+    """Return this IP's failure timestamps within the window (caller holds lock)."""
+    kept = [t for t in _login_failures.get(ip, ()) if now - t < RATE_LIMIT_WINDOW]
+    if kept:
+        _login_failures[ip] = kept
+    else:
+        _login_failures.pop(ip, None)
+    return kept
+
+
+def _is_rate_limited(ip):
+    now = time.time()
+    with _login_fail_lock:
+        if len(_prune_failures(ip, now)) >= RATE_LIMIT_MAX:
+            return True
+        # Backstop: if we're already tracking a pathological number of distinct
+        # failing IPs, refuse a brand-new one instead of growing unbounded. This
+        # both caps memory and imposes a very high global ceiling on a spoofing
+        # flood. Normal traffic never approaches the cap (only *failing* IPs are
+        # tracked and a success clears them), so this is inert in practice.
+        if (
+            len(_login_failures) >= RATE_LIMIT_MAX_TRACKED_IPS
+            and ip not in _login_failures
+        ):
+            return True
+        return False
+
+
+def _record_login_failure(ip):
+    now = time.time()
+    with _login_fail_lock:
+        kept = _prune_failures(ip, now)
+        kept.append(now)
+        _login_failures[ip] = kept
+
+
+def _clear_login_failures(ip):
+    with _login_fail_lock:
+        _login_failures.pop(ip, None)
+
+
+def _safe_next(target):
+    """Validate a post-login redirect target: local same-site paths only.
+
+    Rejects absolute URLs, protocol-relative (`//host`), and backslash tricks
+    (`/\\host`) to prevent open redirects. Returns the safe path or None.
+    """
+    if not target or not target.startswith("/"):
+        return None
+    lowered = target.lower()
+    # Reject protocol-relative (`//host`), backslash (`/\host`), and encoded-slash
+    # (`/%2fhost`, any case) tricks that browsers may resolve to an off-site host.
+    if lowered.startswith("//") or lowered.startswith("/\\") or lowered.startswith("/%2f"):
+        return None
+    parts = urlsplit(target)
+    if parts.scheme or parts.netloc:
+        return None
+    return target
+
+
+def _is_authenticated():
+    return session.get("kmauth") is True
+
+
+@app.before_request
+def password_gate_check():
+    """Redirect unauthenticated requests to the login page when the gate is on.
+
+    Exempt: static assets, the login/logout/health routes. Everything else
+    requires session["kmauth"]; otherwise 302 -> /login?next=<original-path>.
+    Runs AFTER the CSRF and CF-Access hooks (registration order) so those still
+    apply to the login POST (same-origin) as normal.
+    """
+    if not PASSWORD_GATE_ENABLED:
+        return
+    if request.path.startswith("/static/"):
+        return
+    if request.path in GATE_EXEMPT_PATHS:
+        return
+    if _is_authenticated():
+        return
+    # full_path preserves the query string; werkzeug appends a trailing '?'
+    # even when there's no query — strip it so `next` stays clean.
+    original = request.full_path
+    if original.endswith("?"):
+        original = original[:-1]
+    return redirect(url_for("login", next=original))
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    """Shared-password login. GET renders the form; POST verifies the password."""
+    # Gate off -> there's nothing to log into; send them to the app.
+    if not PASSWORD_GATE_ENABLED:
+        return redirect(url_for("index"))
+
+    next_target = _safe_next(request.values.get("next"))
+
+    # Already authenticated -> straight through.
+    if _is_authenticated():
+        return redirect(next_target or url_for("index"))
+
+    if request.method == "POST":
+        ip = _client_ip()
+        if _is_rate_limited(ip):
+            # Don't even check the password while throttled.
+            return (
+                render_template(
+                    "login.html",
+                    error="Too many attempts. Please wait a few minutes and try again.",
+                    next=next_target or "",
+                ),
+                429,
+            )
+        submitted = request.form.get("password", "")
+        # Constant-time compare; encode to bytes so non-ASCII passwords work.
+        if hmac.compare_digest(submitted.encode("utf-8"), APP_PASSWORD.encode("utf-8")):
+            session.clear()
+            session["kmauth"] = True
+            session.permanent = True  # honor PERMANENT_SESSION_LIFETIME (30d)
+            _clear_login_failures(ip)
+            return redirect(next_target or url_for("index"))
+        # Failure — never log the submitted value.
+        _record_login_failure(ip)
+        return (
+            render_template(
+                "login.html",
+                error="Incorrect password.",
+                next=next_target or "",
+            ),
+            401,
+        )
+
+    return render_template("login.html", error=None, next=next_target or "")
+
+
+@app.route("/logout")
+def logout():
+    """Clear the session cookie and return to the login page (or the app)."""
+    session.clear()
+    return redirect(url_for("login") if PASSWORD_GATE_ENABLED else url_for("index"))
+
+
+@app.route("/healthz")
+def healthz():
+    """Unauthenticated liveness probe — always reachable, even with the gate on."""
+    return Response("ok\n", mimetype="text/plain")
 
 
 # ---------------------------------------------------------------------------

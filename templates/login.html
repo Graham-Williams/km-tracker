@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+
+{% block title %}Sign In — KM Tracker{% endblock %}
+{% block heading %}Sign In{% endblock %}
+{% block subtitle %}<p class="page-subtitle">Enter the shared password to continue</p>{% endblock %}
+
+{% block content %}
+{% if error %}
+<div class="flashes">
+    <div class="flash flash-error">{{ error }}</div>
+</div>
+{% endif %}
+
+<form class="form card" method="post" action="{{ url_for('login') }}" autocomplete="off">
+    <input type="hidden" name="next" value="{{ next }}">
+    <div class="field">
+        <label for="password-input">Password</label>
+        <input type="password" id="password-input" name="password" autocomplete="current-password" autofocus required>
+    </div>
+    <div class="field-row">
+        <button type="submit" class="btn btn-primary btn-block">Sign In</button>
+    </div>
+</form>
+{% endblock %}
