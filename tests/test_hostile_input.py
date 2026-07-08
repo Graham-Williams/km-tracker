@@ -108,6 +108,17 @@ def test_player_id_non_integer_in_url_404(client):
     assert client.post("/players/abc/edit", data={"name": "x"}).status_code == 404
 
 
+def test_oversized_path_id_404_not_500(client):
+    """An integer path id larger than SQLite's signed 64-bit range must fail to
+    match the route -> 404, not raise OverflowError -> 500 (issue #46). The
+    bounded int converter caps every <int:...> route."""
+    huge = 10**20  # > 2**63-1
+    assert client.get(f"/cups/{huge}/photo").status_code == 404
+    assert client.get(f"/cup-session/{huge}").status_code == 404
+    assert client.get(f"/cups/{huge}/edit").status_code == 404
+    assert client.post(f"/cups/{huge}/delete").status_code in (404, 302)
+
+
 def test_update_player_huge_line_rejected_gracefully(client):
     create_player(client, "Alice")
     response = client.post(

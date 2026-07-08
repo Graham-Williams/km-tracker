@@ -30,6 +30,8 @@ from flask import (
     url_for,
 )
 
+from werkzeug.routing import IntegerConverter, ValidationError
+
 from db import get_connection, get_db_path, init_db
 from extraction import ExtractionError, extract_standings, extraction_enabled
 from maps import (
@@ -45,6 +47,23 @@ load_dotenv()
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY") or secrets.token_hex(32)
+
+
+# Werkzeug's default <int:...> converter accepts arbitrarily large integers.
+# Binding one that exceeds SQLite's signed 64-bit INTEGER range raises
+# OverflowError deep in the query -> uncaught 500 (issue #46). Cap the converter
+# so an oversized path id simply fails to match the route -> automatic 404.
+# Overriding the "int" converter key makes every existing <int:...> route
+# inherit the cap without per-route changes.
+class BoundedIntConverter(IntegerConverter):
+    def to_python(self, value):
+        result = super().to_python(value)
+        if not (SQLITE_MIN_INT <= result <= SQLITE_MAX_INT):
+            raise ValidationError()
+        return result
+
+
+app.url_map.converters["int"] = BoundedIntConverter
 
 # Cap request body size to blunt memory-exhaustion DoS. The largest legit
 # request is a score form / extraction call carrying a client-downscaled
@@ -307,6 +326,14 @@ def handle_sqlite_locked(error):
     return redirect(url_for("index"))
 
 
+@app.errorhandler(OverflowError)
+def handle_overflow(error):
+    # Belt-and-suspenders for issue #46: an oversized integer that slips past
+    # the bounded path converter (e.g. an int form field bound into a query)
+    # raises OverflowError. Treat it as a not-found/bad-request rather than 500.
+    abort(404)
+
+
 def resolve_db_path(staging, env):
     if staging:
         staging_path = env.get("STAGING_DB_PATH")
@@ -487,11 +514,25 @@ def delete_player(player_id):
         conn.close()
         flash("Cannot delete a player who has scores recorded.")
         return redirect(url_for("players"))
-    conn.execute("DELETE FROM line_changes WHERE player_id = ?", (player_id,))
-    conn.execute("DELETE FROM scores WHERE player_id = ?", (player_id,))
-    conn.execute("DELETE FROM players WHERE id = ?", (player_id,))
-    conn.commit()
-    conn.close()
+    # A player attached to a cup (including an in-progress session) has a
+    # cup_players row. With foreign_keys=ON and no CASCADE, deleting the player
+    # would raise IntegrityError -> uncaught 500. Reject cleanly instead.
+    in_cup = conn.execute(
+        "SELECT 1 FROM cup_players WHERE player_id = ? LIMIT 1", (player_id,)
+    ).fetchone()
+    if in_cup:
+        conn.close()
+        flash("Cannot delete a player who is in a cup.")
+        return redirect(url_for("players"))
+    try:
+        conn.execute("DELETE FROM line_changes WHERE player_id = ?", (player_id,))
+        conn.execute("DELETE FROM scores WHERE player_id = ?", (player_id,))
+        conn.execute("DELETE FROM players WHERE id = ?", (player_id,))
+        conn.commit()
+    except sqlite3.IntegrityError:
+        flash("Cannot delete a player who is referenced elsewhere.")
+    finally:
+        conn.close()
     return redirect(url_for("players"))
 
 
@@ -1086,10 +1127,21 @@ def create_score():
         except InvalidInput as e:
             flash(str(e))
             return redirect(url_for("scores"))
-        conn.execute(
-            "INSERT INTO scores (cup_id, player_id, score, line, line_score, won_tiebreaker) VALUES (?, ?, ?, ?, ?, ?)",
-            (cup_id, player_id, score, player_line, line_score_val, won_tiebreaker or None),
+        # Fold the in-progress guard into the INSERT (issue #52) to close the
+        # TOCTOU between the SELECT above and this write: if the cup is
+        # completed/cancelled/deleted in that window, EXISTS is false and no
+        # row is inserted. The SELECT above stays for the friendly common-path
+        # message; this conditional INSERT is the authoritative guard.
+        cursor = conn.execute(
+            "INSERT INTO scores (cup_id, player_id, score, line, line_score, won_tiebreaker) "
+            "SELECT ?, ?, ?, ?, ?, ? "
+            "WHERE EXISTS (SELECT 1 FROM cups WHERE id = ? AND deleted_at IS NULL AND status = 'in_progress')",
+            (cup_id, player_id, score, player_line, line_score_val, won_tiebreaker or None, cup_id),
         )
+        if cursor.rowcount == 0:
+            conn.rollback()
+            flash("Scores can only be added to a cup that is currently in progress.")
+            return redirect(url_for("scores"))
         conn.commit()
     except sqlite3.IntegrityError:
         flash("A score for that player in that cup already exists.")
@@ -1296,10 +1348,28 @@ def cup_session_create():
     date_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     conn = get_connection()
     try:
+        # Atomic guard against a concurrent double-start (issue #55). The early
+        # get_in_progress_cup() check above handles the friendly common path,
+        # but two requests can both pass it before either inserts. This
+        # conditional INSERT only creates the cup if no in-progress cup exists,
+        # so at most one wins the race; the loser sees rowcount == 0.
         cursor = conn.execute(
-            "INSERT INTO cups (date, status, game_edition) VALUES (?, 'in_progress', ?)",
+            "INSERT INTO cups (date, status, game_edition) "
+            "SELECT ?, 'in_progress', ? "
+            "WHERE NOT EXISTS (SELECT 1 FROM cups WHERE status = 'in_progress')",
             (date_utc, edition),
         )
+        if cursor.rowcount == 0:
+            # Lost the race: another request started a cup in the gap. Redirect
+            # to the existing in-progress cup rather than creating a second one.
+            existing = conn.execute(
+                "SELECT id FROM cups WHERE status = 'in_progress' ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            conn.rollback()
+            flash("A cup is already in progress.")
+            if existing:
+                return redirect(url_for("cup_session_race", cup_id=existing["id"]))
+            return redirect(url_for("cup_session_new"))
         cup_id = cursor.lastrowid
         for pid in player_id_ints:
             conn.execute(

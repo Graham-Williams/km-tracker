@@ -63,9 +63,11 @@ reaches the app over the internal network and no host port should be published.)
 Automated by `scripts/backup.sh` on the **host** (not in the container), driven by
 the `deploy/km-backup.{service,timer}` systemd units:
 
-- **Local snapshots:** consistent SQLite online-backup snapshots into `data/backups/`,
-  deduplicated by sha256, pruned to the newest `LOCAL_RETENTION` (default 100). The
-  timer fires every 5 minutes.
+- **Local snapshots:** consistent SQLite online-backup snapshots into
+  `~/km-backups/snapshots/` (default `LOCAL_BACKUP_DIR`; **outside** the
+  container-owned `data/` bind-mount so the host backup process can write it —
+  issue #19), deduplicated by sha256, pruned to the newest `LOCAL_RETENTION`
+  (default 100). The timer fires every 5 minutes.
 - **Off-box copies:** pushed to Google Drive via `rclone` on a throttled cadence
   (only when the DB changed and ≥ `DRIVE_PUSH_INTERVAL_MIN` minutes — default 15 —
   since the last push), pruned to the newest `DRIVE_RETENTION` (default 50).

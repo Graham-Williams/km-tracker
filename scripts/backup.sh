@@ -88,8 +88,12 @@ fi
 
 # Config vars with sane defaults (env / .env.backup override these).
 DB_PATH="${DB_PATH:-${HOME}/km-tracker/data/km_tracker.db}"
-LOCAL_BACKUP_DIR="${LOCAL_BACKUP_DIR:-${HOME}/km-tracker/data/backups}"
-STATE_DIR="${STATE_DIR:-${HOME}/km-tracker/data/.backup-state}"
+# Outputs default OUTSIDE data/ (issue #19): data/ is bind-mounted and owned by
+# the container user (UID 10001), so the host `backup.sh` process (the graham
+# user) can't create/write dirs inside it on a fresh deploy. DB_PATH stays inside
+# data/ because that's the live DB the container writes; only our OUTPUT dirs move.
+LOCAL_BACKUP_DIR="${LOCAL_BACKUP_DIR:-${HOME}/km-backups/snapshots}"
+STATE_DIR="${STATE_DIR:-${HOME}/km-backups/state}"
 RCLONE_DEST="${RCLONE_DEST:-}"                       # e.g. gdrive:km-tracker-backups
 LOCAL_RETENTION="${LOCAL_RETENTION:-100}"            # keep newest N local snapshots
 DRIVE_RETENTION="${DRIVE_RETENTION:-50}"             # keep newest N recent on Drive

@@ -428,9 +428,12 @@ The database lives at `./data/km_tracker.db` on the host. Backups are automated 
 
 - Takes a **consistent** snapshot using SQLite's online backup API via `python3`
   (stdlib only — no `sqlite3` CLI, no pip deps), safe to run while gunicorn writes.
-- Keeps **frequent local snapshots** in `data/backups/`, deduplicated by sha256
-  (an unchanged DB doesn't create a new file), pruned to the newest
-  `LOCAL_RETENTION` (default 100).
+- Keeps **frequent local snapshots** in `~/km-backups/snapshots/` (default;
+  `LOCAL_BACKUP_DIR`), deduplicated by sha256 (an unchanged DB doesn't create a
+  new file), pruned to the newest `LOCAL_RETENTION` (default 100). The snapshot
+  and state dirs default **outside** the bind-mounted `data/` dir, which is
+  owned by the container user (UID 10001) and so isn't writable by the host
+  backup process on a fresh deploy.
 - Pushes snapshots **off-box to Google Drive** via `rclone` on a throttled cadence
   (only when the DB changed *and* at least `DRIVE_PUSH_INTERVAL_MIN` minutes —
   default 15 — since the last push), pruning the recent ring buffer on Drive to
@@ -562,8 +565,8 @@ systemctl list-timers | grep km-backup
 sudo systemctl start km-backup.service
 journalctl -u km-backup.service --no-pager -n 50
 
-# A local snapshot should appear:
-ls -1 data/backups/
+# A local snapshot should appear (default LOCAL_BACKUP_DIR, outside data/):
+ls -1 ~/km-backups/snapshots/
 
 # And the file should appear in Drive:
 rclone lsf gdrive:km-tracker-backups

@@ -1,5 +1,5 @@
 from db import get_connection
-from helpers import create_player
+from helpers import create_player, start_inprogress_cup
 
 
 # --- List ---
@@ -162,6 +162,26 @@ def test_delete_player_with_scores_blocked(client):
     response = client.post("/players/1/delete", follow_redirects=True)
     assert b"Cannot delete" in response.data
     assert b"Alice" in response.data
+
+
+def test_delete_player_in_inprogress_cup_rejected(client):
+    """Deleting a scoreless player who is in an in-progress cup must be a
+    friendly reject (no 500). Regression for #47: without the cup_players
+    guard the DELETE FROM players raised IntegrityError -> uncaught 500."""
+    create_player(client, "Alice")
+    create_player(client, "Bob")
+    start_inprogress_cup(client, player_ids=("1", "2"))
+    response = client.post("/players/1/delete", follow_redirects=True)
+    assert response.status_code != 500
+    assert response.status_code in (200, 302)
+    assert b"Cannot delete" in response.data
+    # Player still exists.
+    conn = get_connection()
+    still_there = conn.execute(
+        "SELECT 1 FROM players WHERE id = 1"
+    ).fetchone()
+    conn.close()
+    assert still_there is not None
 
 
 def test_delete_player_allowed_after_cup_deleted(client):
