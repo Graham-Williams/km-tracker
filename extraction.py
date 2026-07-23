@@ -19,8 +19,13 @@ EXTRACTION_PROMPT = (
     "This photo shows a Mario Kart final standings screen (the end-of-cup "
     "results table). Extract EVERY row of the standings: the finishing "
     "position, the character name exactly as displayed, and that row's total "
-    "points. Include all rows — human players and CPU racers alike. If a value "
-    "is unreadable, make your best guess from what is visible."
+    "points. Include all rows — human players and CPU racers alike. On this "
+    "screen the human players' rows are visually highlighted (a player badge "
+    "like P1/P2 and/or a highlighted/brighter row background) while the CPU "
+    "racers are not — set is_highlighted=true for exactly those highlighted "
+    "human rows and false for every CPU row, because only the human players' "
+    "scores matter. If a value is unreadable, make your best guess from what "
+    "is visible."
 )
 
 
@@ -28,6 +33,7 @@ class StandingsRow(BaseModel):
     position: int
     character: str
     points: int
+    is_highlighted: bool = False
 
 
 class Standings(BaseModel):

@@ -2144,6 +2144,16 @@ def match_standings_to_players(rows, players, edition):
     def norm(value):
         return value.strip().casefold()
 
+    # Highlight-aware matching: the results screen visually highlights the
+    # human players' rows (player badges / brighter row background) vs CPUs.
+    # Match only against highlighted rows so a CPU that happens to use a human's
+    # default character (e.g. a CPU Yoshi alongside a human Yoshi) is dropped and
+    # the real human matches cleanly. Fallback: if the model flagged ZERO rows as
+    # highlighted (clearly a bad/old detection), use ALL rows so the feature can
+    # never make matching worse than the pre-highlight behavior.
+    highlighted = [r for r in rows if getattr(r, "is_highlighted", False)]
+    match_rows = highlighted if highlighted else rows
+
     claims = {}  # normalized character -> [player dicts]
     unmatched = []
     for player in players:
@@ -2154,7 +2164,7 @@ def match_standings_to_players(rows, players, edition):
         claims.setdefault(norm(character), []).append(player)
 
     rows_by_char = {}  # normalized character -> [rows]
-    for row in rows:
+    for row in match_rows:
         rows_by_char.setdefault(norm(row.character), []).append(row)
 
     scores = {}
@@ -2279,7 +2289,12 @@ def extract_scores():
             "ambiguous": ambiguous,
             "unmatched_players": unmatched,
             "raw_rows": [
-                {"position": r.position, "character": r.character, "points": r.points}
+                {
+                    "position": r.position,
+                    "character": r.character,
+                    "points": r.points,
+                    "is_highlighted": bool(r.is_highlighted),
+                }
                 for r in standings.rows
             ],
         }
