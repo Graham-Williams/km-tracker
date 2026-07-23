@@ -43,6 +43,10 @@ window.initPhotoScore = function (opts) {
     var spinnerEl = block.querySelector(".photo-extract-spinner");
     var notesEl = block.querySelector(".photo-notes");
     var preview = block.querySelector(".photo-preview");
+    var mappingEl = block.querySelector(".photo-mapping");
+    var mappingRowsEl = block.querySelector(".photo-mapping-rows");
+    var mapWarnEl = block.querySelector(".photo-map-warning");
+    var mapUnassignedEl = block.querySelector(".photo-map-unassigned");
     var dataField = document.getElementById("photo-data");
     var mimeField = document.getElementById("photo-mime");
     var form = block.closest("form");
@@ -130,6 +134,157 @@ window.initPhotoScore = function (opts) {
         return filled;
     }
 
+    // ---- Mix-and-match mapping panel ------------------------------------
+    // After extraction, render one <select> per roster player whose options are
+    // the HIGHLIGHTED (human) rows the model read off the photo, pre-selected to
+    // the auto-matched row. Picking a row fills that player's .score-input (via
+    // the same input event as typing); a row chosen by one player is disabled in
+    // every other dropdown. Purely an editing aid — it never submits the form.
+
+    // The roster in DOM order: non-removed score rows with their player id/name.
+    function getRoster() {
+        var out = [];
+        document.querySelectorAll(".score-row").forEach(function (row) {
+            if (row.classList.contains("removed")) return;
+            var input = row.querySelector(".score-input");
+            if (input && input.disabled) return; // removed/inactive row
+            var nameEl = row.querySelector(".score-name");
+            var pid = row.getAttribute("data-player-id");
+            out.push({
+                pid: pid,
+                name: nameEl ? nameEl.textContent.trim() : "Player " + pid,
+                row: row
+            });
+        });
+        return out;
+    }
+
+    function clearMapping() {
+        if (!mappingEl) return;
+        mappingRowsEl.innerHTML = "";
+        if (mapWarnEl) { mapWarnEl.hidden = true; mapWarnEl.textContent = ""; }
+        if (mapUnassignedEl) { mapUnassignedEl.hidden = true; mapUnassignedEl.textContent = ""; }
+        mappingEl.hidden = true;
+    }
+
+    // Fill (or clear) a player's score input from a chosen highlighted row,
+    // firing the existing input event so line-sync + placement recalc run.
+    function applySelection(row, value, hrows) {
+        var input = row.querySelector(".score-input");
+        if (!input) return;
+        if (value === "") {
+            input.value = "";
+        } else {
+            var idx = parseInt(value, 10);
+            if (hrows[idx]) input.value = hrows[idx].points;
+        }
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+
+    // Live-update the disabled options (a row assigned to one player is greyed
+    // out everywhere else) and the count-mismatch / unassigned-row banners.
+    function refreshMapping(hrows, roster) {
+        var selects = mappingRowsEl.querySelectorAll(".photo-map-select");
+        var chosen = {}; // option value -> count
+        selects.forEach(function (s) {
+            if (s.value !== "") chosen[s.value] = (chosen[s.value] || 0) + 1;
+        });
+        selects.forEach(function (s) {
+            var cur = s.value;
+            s.querySelectorAll("option").forEach(function (opt) {
+                if (opt.value === "") { opt.disabled = false; return; }
+                opt.disabled = !!(chosen[opt.value] && opt.value !== cur);
+            });
+        });
+        if (mapWarnEl) {
+            if (hrows.length !== roster.length) {
+                mapWarnEl.textContent =
+                    "Photo shows " + hrows.length + " highlighted player" +
+                    (hrows.length === 1 ? "" : "s") + ", but this cup has " +
+                    roster.length + " — check the mapping.";
+                mapWarnEl.hidden = false;
+            } else {
+                mapWarnEl.hidden = true;
+                mapWarnEl.textContent = "";
+            }
+        }
+        if (mapUnassignedEl) {
+            var unassigned = hrows.length - Object.keys(chosen).length;
+            if (unassigned > 0) {
+                mapUnassignedEl.textContent =
+                    unassigned + " highlighted player" +
+                    (unassigned === 1 ? "" : "s") + " unassigned";
+                mapUnassignedEl.hidden = false;
+            } else {
+                mapUnassignedEl.hidden = true;
+                mapUnassignedEl.textContent = "";
+            }
+        }
+    }
+
+    function renderMapping(rawRows) {
+        if (!mappingEl) return;
+        rawRows = rawRows || [];
+        var hrows = rawRows.filter(function (r) { return r && r.is_highlighted; });
+        // Mirror the server's fallback: if the model flagged nothing as
+        // highlighted, offer all rows so the panel matches what was auto-filled.
+        if (!hrows.length) hrows = rawRows.slice();
+        if (!hrows.length) { clearMapping(); return; }
+
+        var roster = getRoster();
+        mappingRowsEl.innerHTML = "";
+
+        // Pre-select by reconstructing the auto-match from the already-filled
+        // score inputs: each player with a value claims the first unclaimed
+        // highlighted row whose points equal it; blank players stay blank.
+        var claimed = {};
+        var preselect = {};
+        roster.forEach(function (p) {
+            var input = p.row.querySelector(".score-input");
+            var val = input && input.value.trim() !== "" ? parseInt(input.value, 10) : null;
+            var chosen = -1;
+            if (val !== null && !isNaN(val)) {
+                for (var i = 0; i < hrows.length; i++) {
+                    if (!claimed[i] && hrows[i].points === val) { chosen = i; break; }
+                }
+            }
+            if (chosen !== -1) claimed[chosen] = true;
+            preselect[p.pid] = chosen;
+        });
+
+        roster.forEach(function (p) {
+            var wrap = document.createElement("div");
+            wrap.className = "photo-map-row";
+            var name = document.createElement("span");
+            name.className = "photo-map-name";
+            name.textContent = p.name;
+            var sel = document.createElement("select");
+            sel.className = "photo-map-select";
+            sel.setAttribute("data-player-id", p.pid);
+            var blank = document.createElement("option");
+            blank.value = "";
+            blank.textContent = "— leave blank —";
+            sel.appendChild(blank);
+            hrows.forEach(function (r, i) {
+                var opt = document.createElement("option");
+                opt.value = String(i);
+                opt.textContent = "P" + r.position + " · " + r.character + " — " + r.points + " pts";
+                sel.appendChild(opt);
+            });
+            sel.value = preselect[p.pid] >= 0 ? String(preselect[p.pid]) : "";
+            sel.addEventListener("change", function () {
+                applySelection(p.row, sel.value, hrows);
+                refreshMapping(hrows, roster);
+            });
+            wrap.appendChild(name);
+            wrap.appendChild(sel);
+            mappingRowsEl.appendChild(wrap);
+        });
+
+        mappingEl.hidden = false;
+        refreshMapping(hrows, roster);
+    }
+
     function extract(base64, seq) {
         extracting = true;
         setExtractBusy(true);
@@ -153,10 +308,14 @@ window.initPhotoScore = function (opts) {
                 var msg = (res.body && res.body.error) ||
                     "Extraction failed (" + res.status + ")";
                 setStatus(msg + " — photo is still attached; enter scores manually.");
+                clearMapping();
                 return;
             }
             var body = res.body || {};
             var filled = fillScores(body.scores || {});
+            // Build the mix-and-match panel AFTER fillScores so pre-selection
+            // can read the auto-filled score inputs.
+            renderMapping(body.raw_rows || []);
             setStatus(
                 "Filled " + filled + " score" + (filled === 1 ? "" : "s") +
                 " from the photo — review before submitting."
@@ -174,6 +333,7 @@ window.initPhotoScore = function (opts) {
             extracting = false;
             setExtractBusy(false);
             setStatus("Network error during extraction — photo is still attached; enter scores manually.");
+            clearMapping();
         });
     }
 
@@ -203,6 +363,7 @@ window.initPhotoScore = function (opts) {
         setAttachState("pending", "Processing photo…");
         setStatus("");
         notesEl.textContent = "";
+        clearMapping();
         downscale(file, function (dataUrl) {
             if (seq !== requestSeq) return; // superseded by a newer photo
             if (!dataUrl) {

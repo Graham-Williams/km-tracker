@@ -193,6 +193,76 @@ def test_submit_with_empty_scores_blocked_client_side(page, base_url):
 
 
 @requires_in_process_server
+def test_mapping_panel_mix_and_match(page, base_url, monkeypatch):
+    """The mix-and-match panel: one dropdown per player over the highlighted
+    rows, pre-selected to the auto-match, with live dedup + reassignment."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "e2e-fake-key")
+
+    _create_player(page, base_url, "Alice")
+    _create_player(page, base_url, "Bob")
+
+    page.goto(f"{base_url}/cups/new")
+    player_ids = page.eval_on_selector_all(
+        ".score-row", "rows => rows.map(r => r.dataset.playerId)"
+    )
+
+    # Auto-match fills Alice (60) only; Bob is left blank. Highlighted rows are
+    # Alice's 60 and an unassigned 54; a CPU 40 row is NOT highlighted so it
+    # must not appear in the dropdowns.
+    page.route(
+        "**/extract-scores",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "scores": {player_ids[0]: 60},
+                    "ambiguous": [],
+                    "unmatched_players": ["Bob"],
+                    "raw_rows": [
+                        {"position": 1, "character": "Funky Kong", "points": 60, "is_highlighted": True},
+                        {"position": 2, "character": "Yoshi", "points": 54, "is_highlighted": True},
+                        {"position": 5, "character": "Bowser", "points": 40, "is_highlighted": False},
+                    ],
+                }
+            ),
+        ),
+    )
+
+    _attach_photo(page)
+    page.locator(".photo-mapping").wait_for(state="visible")
+
+    selects = page.locator(".photo-map-select")
+    assert selects.count() == 2
+    # Each dropdown offers "leave blank" + the 2 highlighted rows only (CPU
+    # Bowser excluded).
+    assert selects.nth(0).locator("option").count() == 3
+
+    # Alice pre-selected to the 60 row; Bob blank.
+    alice_score = page.locator('.score-row').nth(0).locator('.score-input')
+    bob_score = page.locator('.score-row').nth(1).locator('.score-input')
+    assert alice_score.input_value() == "60"
+    assert bob_score.input_value() == ""
+
+    # Assign Bob to the 54 row → his score input fills and fires input event.
+    selects.nth(1).select_option(label="P2 · Yoshi — 54 pts")
+    assert bob_score.input_value() == "54"
+
+    # Alice's 60 selection must be disabled in Bob's dropdown (already claimed
+    # by no one else here, but Bob's own 54 is now claimed) — verify the row
+    # Bob picked is disabled as an option in Alice's dropdown.
+    yoshi_opt_in_alice = selects.nth(0).locator("option", has_text="Yoshi")
+    assert yoshi_opt_in_alice.is_disabled()
+
+    # Set Alice to blank → her score clears.
+    selects.nth(0).select_option(label="— leave blank —")
+    assert alice_score.input_value() == ""
+
+    # Never auto-submitted.
+    assert "/cups/new" in page.url
+
+
+@requires_in_process_server
 def test_extraction_failure_clears_hold_manual_submit_works(page, base_url, monkeypatch):
     """A failed extraction (502) must clear the in-flight hold: the user can
     enter scores manually and submit, and the photo still persists."""
