@@ -60,9 +60,20 @@ reaches the app over the internal network and no host port should be published.)
 
 ### Backups
 
-Automated by `scripts/backup.sh` on the **host** (not in the container), driven by
-the `deploy/km-backup.{service,timer}` systemd units:
+Automated by `scripts/backup.sh` (orchestrated on the **host**, but the snapshot
+itself runs **inside the app container**), driven by the
+`deploy/km-backup.{service,timer}` systemd units:
 
+- **The snapshot runs INSIDE the container (UID 10001), not host-side.** The live
+  DB is WAL-mode and its `-wal`/`-shm` sidecars are container-owned; SQLite's
+  online backup API must write them to take its read lock, so a host-side backup
+  fails `sqlite3.OperationalError: attempt to write a readonly database`. The
+  script runs the `.backup()` via `docker exec` in `BACKUP_CONTAINER` (default
+  `km-tracker-app-1`) against `CONTAINER_DB_PATH` (default `/data/km_tracker.db`),
+  then `docker cp`s the finished snapshot out to the host. The backup user must be
+  able to run `docker` (in the `docker` group). *(This was the root cause of the
+  ~3-week silent backup outage fixed 2026-07-28: the backup previously ran the
+  online-backup host-side and exited 1 every tick with the readonly-DB error.)*
 - **Local snapshots:** consistent SQLite online-backup snapshots into
   `~/km-backups/snapshots/` (default `LOCAL_BACKUP_DIR`; **outside** the
   container-owned `data/` bind-mount so the host backup process can write it —

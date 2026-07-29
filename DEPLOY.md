@@ -469,11 +469,21 @@ double-seeding).
 ## Automated backups
 
 The database lives at `./data/km_tracker.db` on the host. Backups are automated by
-`scripts/backup.sh`, driven by a systemd timer. The script runs on the **host**
-(not in the container) and:
+`scripts/backup.sh`, driven by a systemd timer. The script is orchestrated on the
+**host** but runs the actual snapshot **inside the app container**, and:
 
 - Takes a **consistent** snapshot using SQLite's online backup API via `python3`
   (stdlib only — no `sqlite3` CLI, no pip deps), safe to run while gunicorn writes.
+  The snapshot is run via `docker exec` **inside the app container** (default
+  container `km-tracker-app-1`, override with `BACKUP_CONTAINER`; DB path inside
+  the container is `/data/km_tracker.db`, override with `CONTAINER_DB_PATH`), then
+  the finished file is `docker cp`-ed out to a host temp file.
+  **Why inside the container:** the live DB is WAL-mode and its `-wal`/`-shm`
+  sidecars are owned by the container user (UID 10001). SQLite's online backup API
+  must write those sidecars to take its read lock, so running it host-side (as the
+  unprivileged backup user) fails with `sqlite3.OperationalError: attempt to write
+  a readonly database`. Running as UID 10001 (inside the container) is the fix.
+  The backup user must be able to run `docker` (in the `docker` group).
 - Keeps **frequent local snapshots** in `~/km-backups/snapshots/` (default;
   `LOCAL_BACKUP_DIR`), deduplicated by sha256 (an unchanged DB doesn't create a
   new file), pruned to the newest `LOCAL_RETENTION` (default 100). The snapshot
@@ -624,6 +634,15 @@ stopped (it's a plain SQLite file).
 ### Manual one-off backup (without the timer)
 
 ```bash
-# Hot backup that's safe while the app is running:
-sqlite3 ./data/km_tracker.db ".backup ./data/km_tracker.$(date +%F).db"
+# Hot backup that's safe while the app is running. Run it INSIDE the container
+# (as UID 10001) — a host-side backup of the WAL-mode DB fails with "attempt to
+# write a readonly database" because it can't write the container-owned
+# -wal/-shm sidecars. This is exactly what scripts/backup.sh does.
+docker exec km-tracker-app-1 python3 -c \
+  "import sqlite3; s=sqlite3.connect('/data/km_tracker.db'); d=sqlite3.connect('/data/km_tracker.manual.db'); s.backup(d); d.close(); s.close()"
+docker cp km-tracker-app-1:/data/km_tracker.manual.db ./km_tracker.$(date +%F).db
+docker exec km-tracker-app-1 rm -f /data/km_tracker.manual.db
 ```
+
+Or just run the automated script directly: `scripts/backup.sh` (it does the
+in-container snapshot, dedupe, and Drive push).

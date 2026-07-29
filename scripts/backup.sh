@@ -88,6 +88,15 @@ fi
 
 # Config vars with sane defaults (env / .env.backup override these).
 DB_PATH="${DB_PATH:-${HOME}/km-tracker/data/km_tracker.db}"
+# The live DB is WAL-mode and owned by the container user (UID 10001). SQLite's
+# online backup API must be able to write the DB's -wal/-shm sidecars to take its
+# read lock, so it MUST run as UID 10001 — i.e. INSIDE the app container. Running
+# it host-side (as the unprivileged backup user) fails with "attempt to write a
+# readonly database". We therefore run the snapshot via `docker exec` in the app
+# container against the container-internal DB path, then copy the finished file
+# out to the host. See DEPLOY.md → "Automated backups".
+BACKUP_CONTAINER="${BACKUP_CONTAINER:-km-tracker-app-1}"   # prod app container name
+CONTAINER_DB_PATH="${CONTAINER_DB_PATH:-/data/km_tracker.db}"  # DB path INSIDE the container
 # Outputs default OUTSIDE data/ (issue #19): data/ is bind-mounted and owned by
 # the container user (UID 10001), so the host `backup.sh` process (the graham
 # user) can't create/write dirs inside it on a fresh deploy. DB_PATH stays inside
@@ -112,31 +121,55 @@ DRIVE_PUSH_TS_FILE="${STATE_DIR}/last_drive_push.epoch"
 
 # --- Preconditions ----------------------------------------------------------
 [[ -f "${DB_PATH}" ]] || die "DB not found at DB_PATH=${DB_PATH}"
+command -v docker >/dev/null 2>&1 || die "docker not found on PATH — the snapshot runs inside the app container (see DEPLOY.md)"
+# The container must be running for `docker exec` to reach the DB as UID 10001.
+docker inspect -f '{{.State.Running}}' "${BACKUP_CONTAINER}" 2>/dev/null | grep -qx true \
+  || die "app container '${BACKUP_CONTAINER}' is not running — cannot snapshot (set BACKUP_CONTAINER in .env.backup if the name differs)"
 mkdir -p "${LOCAL_BACKUP_DIR}" "${STATE_DIR}"
 
 # --- Make a consistent snapshot --------------------------------------------
 # Use SQLite's online backup API via python3 (stdlib only — no sqlite3 CLI, no
 # pip deps). This is safe to run while gunicorn is writing: the backup API copies
-# a transactionally consistent image of the DB. We snapshot to a temp file first,
-# then decide (by checksum) whether to keep it.
+# a transactionally consistent image of the DB.
+#
+# CRITICAL: the backup MUST run INSIDE the app container (as UID 10001), because
+# the live DB is WAL-mode and its -wal/-shm sidecars are owned by 10001 — the
+# online backup API needs to write them to take its read lock, so running it
+# host-side (as the backup user) fails with "attempt to write a readonly
+# database". We snapshot to a container-local temp file, integrity-check it in
+# the container, then `docker cp` it out to a host temp file and decide (by
+# checksum) whether to keep it.
 TMP_SNAPSHOT="$(mktemp "${LOCAL_BACKUP_DIR}/.snapshot.XXXXXX.db")"
-# Clean up the temp file on any exit (it's renamed into place on the keep path).
-cleanup() { rm -f "${TMP_SNAPSHOT}"; }
+# Arm cleanup BEFORE creating the container temp, so an early failure (e.g. the
+# in-container mktemp below) still removes the stray host temp file — it's a
+# hidden dotfile the km_tracker_*.db prune globs never reap. cleanup tolerates
+# CONTAINER_TMP_SNAPSHOT being unset (it's created just after) under `set -u`.
+cleanup() {
+  rm -f "${TMP_SNAPSHOT}"
+  [[ -n "${CONTAINER_TMP_SNAPSHOT:-}" ]] \
+    && docker exec "${BACKUP_CONTAINER}" rm -f "${CONTAINER_TMP_SNAPSHOT}" >/dev/null 2>&1 || true
+}
 trap cleanup EXIT
+# Create the in-container temp path (as UID 10001) for the snapshot destination.
+CONTAINER_TMP_SNAPSHOT="$(docker exec "${BACKUP_CONTAINER}" mktemp /tmp/km_snapshot.XXXXXX.db)" \
+  || die "could not create a temp snapshot path inside container ${BACKUP_CONTAINER}"
 
-DB_PATH="${DB_PATH}" TMP_SNAPSHOT="${TMP_SNAPSHOT}" python3 - <<'PY'
+# Run the online backup + integrity check inside the container. Paths are passed
+# via `-e` env (never interpolated into the python source), and the DB is opened
+# by plain path (NOT a file: URI): .backup() is read-only w.r.t. the source so we
+# don't need mode=ro, a plain connection opens WAL DBs reliably, and this avoids
+# any URI-param injection if a path ever contains "?".
+docker exec -i \
+  -e SRC_PATH="${CONTAINER_DB_PATH}" \
+  -e DST_PATH="${CONTAINER_TMP_SNAPSHOT}" \
+  "${BACKUP_CONTAINER}" python3 - <<'PY'
 import os
 import sqlite3
 import sys
 
-src_path = os.environ["DB_PATH"]
-dst_path = os.environ["TMP_SNAPSHOT"]
+src_path = os.environ["SRC_PATH"]
+dst_path = os.environ["DST_PATH"]
 
-# Open the live DB by plain path (NOT a file: URI). The online .backup() API is
-# read-only with respect to the source, so we don't need mode=ro — and a plain
-# connection opens WAL-mode DBs reliably, whereas a `file:...?mode=ro` URI can
-# fail to open a WAL DB and is vulnerable to URI-param injection if the path
-# contains a "?".
 src = sqlite3.connect(src_path)
 try:
     dst = sqlite3.connect(dst_path)
@@ -148,7 +181,8 @@ try:
 finally:
     src.close()
 
-# Sanity check: the SNAPSHOT (destination) must be a usable SQLite DB.
+# Sanity check the SNAPSHOT inside the container, where UID 10001 can freely
+# create the snapshot's own -wal/-shm sidecars, before we copy it to the host.
 check = sqlite3.connect(dst_path)
 try:
     ok = check.execute("PRAGMA integrity_check").fetchone()[0]
@@ -158,6 +192,14 @@ if ok != "ok":
     sys.stderr.write(f"integrity_check failed: {ok}\n")
     sys.exit(1)
 PY
+
+# Copy the finished snapshot out of the container onto the host temp file. The
+# host user OWNS this file (created via mktemp), so downstream host-side reads
+# (sha256, rclone) work without any container-user permission issues.
+docker cp "${BACKUP_CONTAINER}:${CONTAINER_TMP_SNAPSHOT}" "${TMP_SNAPSHOT}" \
+  || die "docker cp of snapshot out of ${BACKUP_CONTAINER} failed"
+# Drop the container temp immediately (also covered by the cleanup trap).
+docker exec "${BACKUP_CONTAINER}" rm -f "${CONTAINER_TMP_SNAPSHOT}" >/dev/null 2>&1 || true
 
 # --- Checksum + dedupe ------------------------------------------------------
 SNAP_CKSUM="$(sha256_of "${TMP_SNAPSHOT}")"
