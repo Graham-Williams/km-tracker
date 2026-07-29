@@ -15,78 +15,88 @@ from typing import List
 EXTRACTION_MODEL = "claude-sonnet-4-6"
 EXTRACTION_MAX_TOKENS = 2000
 
-# What ALWAYS gets read, regardless of edition: every row, tagged human vs CPU.
-_PROMPT_TASK = (
+# What ALWAYS gets read, regardless of edition: every row of the screen.
+_PROMPT_READ = (
     "This photo shows a Mario Kart results screen (the end-of-cup or "
     "post-race standings). Extract EVERY row of the standings: the finishing "
     "position, the character name exactly as displayed, and that row's total "
-    "points. Include ALL rows — human players and CPU racers alike. For each "
-    "row set is_highlighted=true ONLY if that row belongs to a HUMAN player "
-    "(never for a CPU), because only the human players' scores matter. The "
-    "human marker is the ROW STYLING described below — it is independent of "
-    "finishing position (a human can place anywhere)."
+    "points. Include ALL rows — human players and CPU racers alike."
 )
 
-# Per-edition descriptions of the real human-vs-CPU visual cue(s). These were
-# written from real-photo validation: the highlight signal is REAL but easy for
-# the model to miss (dark/glare photos, two different Wii screens), so we
-# describe the exact cues rather than a vague "brighter row."
+# Highlight framing — used ONLY for editions where a reliable human-vs-CPU cue
+# exists (Wii). Switch has no such cue, so its prompt omits this entirely.
+_PROMPT_HIGHLIGHT_INTRO = (
+    "Also mark which rows belong to HUMAN players: set is_highlighted=true "
+    "ONLY for a human row (never for a CPU), because only the human players' "
+    "scores matter. The human marker is the ROW STYLING described below — it "
+    "is independent of finishing position (a human can place anywhere)."
+)
+
+# Mario Kart Wii human-vs-CPU cue. From real-photo validation: the ONE
+# consistent cue across BOTH Wii results layouts is opaque-bar (human) vs
+# translucent (CPU). The two layouts differ only in shape, not in the cue.
 _PROMPT_CUES_WII = (
-    "This is Mario Kart Wii. There are TWO possible results-screen layouts — "
-    "handle whichever one you see:\n"
-    "1) A single VERTICAL 12-row final-standings list (positions 1-12, top to "
-    "bottom). A HUMAN player's row is drawn as a SOLID, OPAQUE colored bar "
-    "(e.g. pink, cyan, orange — the color is per-player, not fixed). A CPU "
-    "row is SEMI-TRANSPARENT / TRANSLUCENT — the background track shows "
-    "through it. Set is_highlighted=true for the solid opaque (human) rows "
-    "only; false for the see-through (CPU) rows.\n"
-    "2) A TWO-COLUMN trophy/credits results screen (it says something like "
-    "\"You got Nth place!\" with a trophy in the middle; positions 1-6 are in "
-    "the LEFT column and 7-12 in the RIGHT column). Read BOTH columns. Here a "
-    "HUMAN row is marked by a WHITE / light ROUNDED OUTLINE BOX around the "
-    "character nameplate; CPUs have NO outline. Set is_highlighted=true for "
-    "the outlined (human) rows only."
+    "This is Mario Kart Wii. The human cue is ONE consistent thing: a HUMAN "
+    "player's row is a SOLID, OPAQUE colored bar (e.g. pink, cyan, orange — "
+    "the color is per-player, not fixed); a CPU row is SEMI-TRANSPARENT / "
+    "TRANSLUCENT, so the background track shows through it. Set "
+    "is_highlighted=true for the solid opaque (human) rows and false for the "
+    "see-through (CPU) rows.\n"
+    "There are TWO possible Wii layouts and they differ ONLY in shape — the "
+    "opaque-vs-translucent cue is the same in both:\n"
+    "1) A single VERTICAL list of 12 rows (positions 1-12, top to bottom).\n"
+    "2) A TWO-COLUMN trophy/credits screen (\"You got Nth place!\", a trophy "
+    "in the middle) with positions 1-6 in the LEFT column and 7-12 in the "
+    "RIGHT column — read BOTH columns; the human bars are simply shorter "
+    "because each row is split across two columns."
 )
-_PROMPT_CUES_MK8DX = (
-    "This is Mario Kart 8 Deluxe (Switch). One vertical 12-row layout "
-    "(post-race and end-of-cup look the same). A HUMAN row carries a small "
-    "colored PLAYER-NUMBER BADGE — \"P1\", \"P2\", \"P3\" or \"P4\" — next to "
-    "the character portrait/name. CPUs have NO player badge (character name "
-    "only). A row is human if and only if it shows a P# tag; set "
-    "is_highlighted=true for exactly those rows."
+
+# Mario Kart 8 Deluxe (Switch): NO reliable human-vs-CPU marker exists, so we
+# do NOT attempt highlight detection here. Every Switch row is left
+# is_highlighted=false, which routes matching through the character-only
+# fallback (naive best-effort, same as Wii's pre-highlight behavior). The photo
+# is still saved so we can collect Switch data. Switch highlight-aware auto-fill
+# is a deliberate FUTURE follow-up once a real cue is identified.
+_PROMPT_SWITCH = (
+    "This is Mario Kart 8 Deluxe (Switch). This screen has NO reliable "
+    "human-vs-CPU visual marker, so DO NOT try to guess which rows are humans "
+    "— leave is_highlighted=false for EVERY row. Just read the position, "
+    "character and points for all rows."
 )
-# When the edition is unknown, describe every cue and let the screen dictate.
+
+# Unknown edition: fall back to the Wii opaque-vs-translucent cue (the only
+# reliable one) and let the screen dictate.
 _PROMPT_CUES_UNKNOWN = (
-    "The edition is unknown, so watch for any of these human-row markers "
-    "(whichever the screen uses): a SOLID OPAQUE colored bar vs a "
-    "SEMI-TRANSPARENT CPU row (Mario Kart Wii vertical list); a WHITE ROUNDED "
-    "OUTLINE BOX around the nameplate (Mario Kart Wii two-column trophy screen "
-    "— read both the left column for positions 1-6 and the right for 7-12); "
-    "or a \"P1\"/\"P2\"/\"P3\"/\"P4\" player-number badge next to the "
-    "character (Mario Kart 8 Deluxe / Switch). Set is_highlighted=true for the "
-    "human rows so identified."
+    "The edition is unknown. If this is a Mario Kart Wii screen, a HUMAN row "
+    "is a SOLID OPAQUE colored bar and a CPU row is SEMI-TRANSPARENT / "
+    "TRANSLUCENT (the track shows through) — in either the single 12-row list "
+    "or the two-column trophy screen (positions 1-6 left, 7-12 right; read "
+    "both). Set is_highlighted=true for the opaque (human) rows. If the screen "
+    "has no such cue, leave is_highlighted=false for every row."
 )
 _PROMPT_ROBUSTNESS = (
-    "The photo may be dark, glare-washed, or shot at an angle — do your best; "
-    "the human marker is the ROW STYLING, not the position. If a value is "
-    "unreadable, make your best guess from what is visible."
+    "The photo may be dark, glare-washed, or shot at an angle — do your best. "
+    "If a value is unreadable, make your best guess from what is visible."
 )
 
 
 def build_extraction_prompt(edition=None):
     """Assemble the edition-specific extraction prompt.
 
-    edition: "wii", "mk8dx", or None/unknown. The task + robustness framing is
-    shared; the middle section describes the real human-vs-CPU visual cue(s)
-    for that edition (or all of them when the edition is unknown).
+    edition: "wii", "mk8dx", or None/unknown.
+      - "wii"   → read all rows + detect the opaque-vs-translucent human cue.
+      - "mk8dx" → read all rows only; NO highlight detection (no reliable cue),
+                  so matching falls through to character-only (best-effort).
+      - None    → read all rows + best-effort (Wii) cue if present.
     """
     if edition == "wii":
-        cues = _PROMPT_CUES_WII
+        parts = (_PROMPT_READ, _PROMPT_HIGHLIGHT_INTRO, _PROMPT_CUES_WII, _PROMPT_ROBUSTNESS)
     elif edition == "mk8dx":
-        cues = _PROMPT_CUES_MK8DX
+        # No highlight framing at all — Switch is character-only for now.
+        parts = (_PROMPT_READ, _PROMPT_SWITCH, _PROMPT_ROBUSTNESS)
     else:
-        cues = _PROMPT_CUES_UNKNOWN
-    return "\n\n".join((_PROMPT_TASK, cues, _PROMPT_ROBUSTNESS))
+        parts = (_PROMPT_READ, _PROMPT_HIGHLIGHT_INTRO, _PROMPT_CUES_UNKNOWN, _PROMPT_ROBUSTNESS)
+    return "\n\n".join(parts)
 
 
 # Back-compat default (edition-agnostic) — the route passes an explicit edition.

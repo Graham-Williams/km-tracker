@@ -2161,7 +2161,11 @@ def match_standings_to_players(rows, players, edition):
     # Did the model flag ANY row as highlighted anywhere in the photo? If not,
     # detection clearly failed (or it's an old 3-tuple read) — we then fall
     # back to pure character matching so we never regress below pre-highlight
-    # behavior (the "cup-52 under-detection" safety).
+    # behavior (the "cup-52 under-detection" safety). NOTE: Switch (mk8dx) has
+    # no reliable human-vs-CPU cue, so its prompt never sets is_highlighted —
+    # every Switch photo therefore flows through this zero-highlight fallback to
+    # character-only matching by design (Switch highlight auto-fill is a future
+    # follow-up). Highlight-aware safe auto-fill is effectively Wii-only today.
     any_highlighted = any(getattr(r, "is_highlighted", False) for r in rows)
 
     claims = {}  # normalized character -> [player dicts]

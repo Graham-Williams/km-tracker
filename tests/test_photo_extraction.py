@@ -351,11 +351,20 @@ def test_build_extraction_prompt_is_edition_specific():
     wii = extraction.build_extraction_prompt("wii")
     mk8 = extraction.build_extraction_prompt("mk8dx")
     unknown = extraction.build_extraction_prompt(None)
-    assert "Wii" in wii and "opaque" in wii.lower() and "outline" in wii.lower()
-    assert "Deluxe" in mk8 and "P1" in mk8
-    # Unknown falls back to describing all cues.
-    assert "P1" in unknown and "opaque" in unknown.lower()
-    assert "is_highlighted" in wii
+    # Wii: opaque-vs-translucent cue, both layouts, and it DOES detect humans.
+    assert "Wii" in wii
+    assert "opaque" in wii.lower() and "translucent" in wii.lower()
+    assert "is_highlighted=true" in wii
+    # The dropped "outline box" cue must be gone.
+    assert "outline" not in wii.lower()
+    # Switch: NO highlight detection — every row left is_highlighted=false, and
+    # no P#/badge language.
+    assert "Deluxe" in mk8
+    assert "is_highlighted=false" in mk8
+    assert "P1" not in mk8 and "badge" not in mk8.lower()
+    assert "is_highlighted=true" not in mk8
+    # Unknown falls back to the (Wii) opaque cue.
+    assert "opaque" in unknown.lower()
 
 
 # --- Manual-form contract (edition + player_ids) ---
