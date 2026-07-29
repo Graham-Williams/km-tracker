@@ -44,7 +44,7 @@ def _fake_rows(*rows):
         )
     standings = Standings(rows=parsed)
 
-    def fake_extract(image_b64, media_type):
+    def fake_extract(image_b64, media_type, edition=None):
         return standings
 
     return fake_extract
@@ -261,6 +261,44 @@ def test_two_humans_sharing_character_stay_ambiguous(client, api_key, monkeypatc
     assert data["ambiguous"] == ["Alice", "Bob"]
 
 
+def test_off_character_human_not_auto_filled_from_cpu_row(client, api_key, monkeypatch):
+    # Real cup-56 case: Graham defaults to Toad, but Toad is a CPU on screen
+    # (non-highlighted, 33 pts) while he actually played a highlighted Dry
+    # Bowser (10 pts). With OTHER rows highlighted, his Toad default must NOT
+    # be auto-filled from the CPU Toad row — he's left blank to pick manually.
+    _setup_players(client, [("Graham", "Toad", None), ("Lizzy", "Yoshi", None)])
+    cup_id = _start_session(client, [1, 2])
+    monkeypatch.setattr(
+        app_module,
+        "extract_standings",
+        _fake_rows(
+            (1, "Yoshi", 55, True),       # Lizzy, human
+            (2, "Dry Bowser", 10, True),  # Graham actually played this (off-char)
+            (7, "Toad", 33, False),       # a CPU on Graham's default character
+        ),
+    )
+    data = _post(client, cup_id=cup_id).get_json()
+    # Lizzy (player 2) auto-fills; Graham (player 1) is NOT given the CPU Toad's 33.
+    assert data["scores"] == {"2": 55}
+    assert 33 not in data["scores"].values()
+    assert data["unmatched_players"] == ["Graham"]
+
+
+def test_two_highlighted_rows_one_character_are_ambiguous(client, api_key, monkeypatch):
+    # A single player mains Yoshi but TWO highlighted rows both show Yoshi
+    # (e.g. a second human also on Yoshi) -> can't tell which is theirs.
+    _setup_players(client, [("Alice", "Yoshi", None)])
+    cup_id = _start_session(client, [1])
+    monkeypatch.setattr(
+        app_module,
+        "extract_standings",
+        _fake_rows((1, "Yoshi", 60, True), (3, "Yoshi", 40, True)),
+    )
+    data = _post(client, cup_id=cup_id).get_json()
+    assert data["scores"] == {}
+    assert data["ambiguous"] == ["Alice"]
+
+
 def test_zero_highlighted_falls_back_to_all_rows(client, api_key, monkeypatch):
     # Robustness: if the model flags NOTHING highlighted (bad detection / old
     # behavior), fall back to matching all rows so we never regress.
@@ -288,6 +326,36 @@ def test_raw_rows_carry_highlight_flag(client, api_key, monkeypatch):
     raw = _post(client, cup_id=cup_id).get_json()["raw_rows"]
     assert raw[0]["is_highlighted"] is True
     assert raw[1]["is_highlighted"] is False
+
+
+# --- Edition-aware prompt / plumbing ---
+
+
+def test_route_passes_cup_edition_to_extractor(client, api_key, monkeypatch):
+    # The /extract-scores route must thread the cup's edition into
+    # extract_standings so the prompt can describe the right screen cues.
+    _setup_players(client, [("Alice", "Funky Kong", "Isabelle")])
+    cup_id = _start_session(client, [1], edition="mk8dx")
+    seen = {}
+
+    def capturing_extract(image_b64, media_type, edition=None):
+        seen["edition"] = edition
+        return Standings(rows=[StandingsRow(position=1, character="Isabelle", points=60)])
+
+    monkeypatch.setattr(app_module, "extract_standings", capturing_extract)
+    _post(client, cup_id=cup_id)
+    assert seen["edition"] == "mk8dx"
+
+
+def test_build_extraction_prompt_is_edition_specific():
+    wii = extraction.build_extraction_prompt("wii")
+    mk8 = extraction.build_extraction_prompt("mk8dx")
+    unknown = extraction.build_extraction_prompt(None)
+    assert "Wii" in wii and "opaque" in wii.lower() and "outline" in wii.lower()
+    assert "Deluxe" in mk8 and "P1" in mk8
+    # Unknown falls back to describing all cues.
+    assert "P1" in unknown and "opaque" in unknown.lower()
+    assert "is_highlighted" in wii
 
 
 # --- Manual-form contract (edition + player_ids) ---
@@ -379,7 +447,7 @@ def test_api_error_returns_502(client, api_key, monkeypatch):
     _setup_players(client, [("Alice", "Funky Kong", None)])
     cup_id = _start_session(client, [1])
 
-    def boom(image_b64, media_type):
+    def boom(image_b64, media_type, edition=None):
         raise ExtractionError("api down")
 
     monkeypatch.setattr(app_module, "extract_standings", boom)
