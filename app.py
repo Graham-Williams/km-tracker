@@ -1977,6 +1977,38 @@ def cup_session_submit(cup_id):
         conn.close()
         return redirect(url_for("cup_session_complete", cup_id=cup_id))
 
+    # Roster freshness guard (mid-cup roster editing). The completion form is
+    # rendered from cup_players at page-load, but the roster can now be edited
+    # mid-cup. A STALE form — submitted after a player was added/removed since it
+    # loaded — would otherwise drive save_scores/apply_line_adjustments off the
+    # OLD roster: writing a score + line_change (and shifting a *persistent*
+    # players.line) for a player no longer in the cup, or skipping/adding the
+    # Wii 3-player handicap because len(scores_data) no longer matches the live
+    # roster. parse_scores_from_form's #45 guard only catches unequal
+    # player_ids[]/scores[] LENGTHS, not a roster mismatch. Require the submitted
+    # player-id set to EXACTLY match the live roster (order- and duplicate-robust);
+    # otherwise reject, write nothing, leave the cup in_progress, and re-render
+    # the fresh form so the user re-confirms against the current players.
+    try:
+        submitted_ids = [parse_int_field(pid) for pid in request.form.getlist("player_ids[]")]
+    except ValueError:
+        conn.close()
+        flash("Invalid player selection.")
+        return redirect(url_for("cup_session_complete", cup_id=cup_id))
+    live_roster = {
+        r["player_id"]
+        for r in conn.execute(
+            "SELECT player_id FROM cup_players WHERE cup_id = ?", (cup_id,)
+        ).fetchall()
+    }
+    if len(submitted_ids) != len(set(submitted_ids)) or set(submitted_ids) != live_roster:
+        conn.close()
+        flash(
+            "The player roster changed since this page loaded — here are the "
+            "current players. Please re-enter the scores."
+        )
+        return redirect(url_for("cup_session_complete", cup_id=cup_id))
+
     # Switch (mk8dx) cups are lineless — drop any submitted line before it can
     # reach validation or storage.
     zero_lines_if_lineless(conn, cup_id, scores_data)

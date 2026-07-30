@@ -383,6 +383,117 @@ def test_late_added_player_not_stale_veto_forfeited(client):
     assert roster[1] == 1 and roster[2] == 1  # originals unchanged
 
 
+def _submit_stale(client, cup_id, player_scores, lines=None):
+    """POST /complete with an EXPLICIT (possibly stale) player_ids[]/scores[]
+    set — NOT re-read from the live roster — to simulate a completion form that
+    was rendered before a mid-cup roster change."""
+    pids = [str(p) for p, _ in player_scores]
+    if lines is None:
+        lines = ["0"] * len(pids)
+    return client.post(
+        f"/cup-session/{cup_id}/complete",
+        data={
+            "notes": "",
+            "tz_offset": "",
+            "player_ids[]": pids,
+            "scores[]": [str(s) for _, s in player_scores],
+            "lines[]": [str(l) for l in lines],
+        },
+        follow_redirects=True,
+    )
+
+
+def _completion_state(cup_id=1):
+    conn = get_connection()
+    state = {
+        "status": conn.execute(
+            "SELECT status FROM cups WHERE id = ?", (cup_id,)
+        ).fetchone()["status"],
+        "score_pids": {
+            r["player_id"]
+            for r in conn.execute(
+                "SELECT player_id FROM scores WHERE cup_id = ?", (cup_id,)
+            ).fetchall()
+        },
+        "line_changes": conn.execute(
+            "SELECT COUNT(*) AS n FROM line_changes WHERE cup_id = ?", (cup_id,)
+        ).fetchone()["n"],
+        "player_lines": {
+            r["id"]: r["line"]
+            for r in conn.execute("SELECT id, line FROM players").fetchall()
+        },
+    }
+    conn.close()
+    return state
+
+
+def test_stale_remove_form_3_to_2_rejected_nothing_written(client):
+    # Wii cup {Alice,Bob,Carol} all has_line, races done. Remove Carol (3->2),
+    # then submit the STALE 3-row form. The 3-player line adjustment must NOT
+    # fire, no scores/line_changes written, Carol's persistent line unchanged,
+    # cup stays in_progress.
+    _setup_players(client, has_line=True)
+    _create_session(client, [1, 2, 3])
+    _play_four_races(client)
+    _remove(client, 1, 3)  # live roster now {1, 2}
+    resp = _submit_stale(client, 1, [(1, 100), (2, 80), (3, 60)])  # stale 3-row form
+    assert resp.status_code == 200
+    assert b"roster changed" in resp.data
+    state = _completion_state()
+    assert state["status"] == "in_progress"  # NOT completed
+    assert state["score_pids"] == set()  # nothing written
+    assert state["line_changes"] == 0
+    assert all(state["player_lines"][i] == 0 for i in (1, 2, 3))  # Carol's line untouched
+
+
+def test_stale_add_form_2_to_3_rejected_nothing_written(client):
+    # Cup started with {Alice,Bob}; add Carol (2->3). Submitting the STALE 2-row
+    # form (which would skip the now-applicable handicap) must be rejected with
+    # nothing written; cup stays in_progress.
+    _setup_players(client, has_line=True)
+    _create_session(client, [1, 2])
+    _play_four_races(client)
+    _add(client, 1, 3)  # live roster now {1, 2, 3}
+    resp = _submit_stale(client, 1, [(1, 100), (2, 80)])  # stale 2-row form
+    assert resp.status_code == 200
+    assert b"roster changed" in resp.data
+    state = _completion_state()
+    assert state["status"] == "in_progress"
+    assert state["score_pids"] == set()
+    assert state["line_changes"] == 0
+    assert all(state["player_lines"][i] == 0 for i in (1, 2, 3))
+
+
+def test_stale_form_duplicate_player_id_rejected(client):
+    # A crafted form whose player_ids[] set matches the roster but carries a
+    # duplicate must be rejected (never write two rows / trip a UNIQUE 500).
+    _setup_players(client)
+    _create_session(client, [1, 2])
+    _play_four_races(client)
+    resp = _submit_stale(client, 1, [(1, 100), (2, 80), (2, 70)])
+    assert resp.status_code == 200
+    assert b"roster changed" in resp.data
+    state = _completion_state()
+    assert state["status"] == "in_progress"
+    assert state["score_pids"] == set()
+
+
+def test_matching_form_still_completes_after_roster_edit(client):
+    # Positive control: after a roster edit, a form that MATCHES the live roster
+    # completes normally with the correct 3-player line adjustment.
+    _setup_players(client, has_line=True)
+    _create_session(client, [1, 2])
+    _play_four_races(client)
+    _add(client, 1, 3)  # live roster {1, 2, 3}
+    resp = _submit_stale(client, 1, [(1, 100), (2, 80), (3, 60)])  # matches roster
+    assert resp.status_code == 200
+    state = _completion_state()
+    assert state["status"] == "completed"
+    assert state["score_pids"] == {1, 2, 3}
+    assert state["line_changes"] == 3
+    assert state["player_lines"][1] == -3 and state["player_lines"][2] == 0 and state["player_lines"][3] == 3
+
+
 def test_add_then_next_race_does_not_reforfeit(client):
     # Adding a player mid-cup and playing on must not re-trigger the one-time
     # forfeit for anyone.
