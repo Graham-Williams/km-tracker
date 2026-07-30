@@ -1479,6 +1479,11 @@ MAX_VOTOES = 4
 # "Use it or lose it": a one-time check applied when entering this race. A player
 # who still holds ALL their half-vetoes at this point forfeits one.
 STALE_VETO_CHECK_RACE = 3
+# Minimum roster size for an in-progress cup. Mirrors cup creation, which requires
+# "at least one player" (cup_session_create rejects an empty player_ids[]), so a
+# mid-cup removal must never drop the roster below this — a cup can never be
+# emptied of players.
+MIN_ROSTER_SIZE = 1
 
 
 def increment_voto(conn, cup_id):
@@ -1662,8 +1667,22 @@ def _get_cup_session(cup_id):
         (cup_id,),
     ).fetchall()
 
+    # Players NOT already in this cup — candidates for the mid-cup "add player"
+    # control. A player can only be added once (UNIQUE(cup_id, player_id)).
+    available_players = conn.execute(
+        "SELECT id, name FROM players "
+        "WHERE id NOT IN (SELECT player_id FROM cup_players WHERE cup_id = ?) "
+        "ORDER BY name",
+        (cup_id,),
+    ).fetchall()
+
     conn.close()
-    return {"cup": cup, "players": players, "races": races}
+    return {
+        "cup": cup,
+        "players": players,
+        "races": races,
+        "available_players": available_players,
+    }
 
 
 @app.route("/cup-session/<int:cup_id>")
@@ -1678,12 +1697,14 @@ def cup_session_race(cup_id):
         "cup_session_race.html",
         cup=session["cup"],
         players=session["players"],
+        available_players=session["available_players"],
         races=session["races"],
         played_maps=played_maps,
         current_race=current_race,
         max_races=MAX_RACES,
         max_half_vetoes=MAX_HALF_VETOES,
         max_votoes=MAX_VOTOES,
+        min_roster_size=MIN_ROSTER_SIZE,
         all_courses=courses_for(edition),
         edition_label=edition_label(edition),
     )
@@ -1956,6 +1977,38 @@ def cup_session_submit(cup_id):
         conn.close()
         return redirect(url_for("cup_session_complete", cup_id=cup_id))
 
+    # Roster freshness guard (mid-cup roster editing). The completion form is
+    # rendered from cup_players at page-load, but the roster can now be edited
+    # mid-cup. A STALE form — submitted after a player was added/removed since it
+    # loaded — would otherwise drive save_scores/apply_line_adjustments off the
+    # OLD roster: writing a score + line_change (and shifting a *persistent*
+    # players.line) for a player no longer in the cup, or skipping/adding the
+    # Wii 3-player handicap because len(scores_data) no longer matches the live
+    # roster. parse_scores_from_form's #45 guard only catches unequal
+    # player_ids[]/scores[] LENGTHS, not a roster mismatch. Require the submitted
+    # player-id set to EXACTLY match the live roster (order- and duplicate-robust);
+    # otherwise reject, write nothing, leave the cup in_progress, and re-render
+    # the fresh form so the user re-confirms against the current players.
+    try:
+        submitted_ids = [parse_int_field(pid) for pid in request.form.getlist("player_ids[]")]
+    except ValueError:
+        conn.close()
+        flash("Invalid player selection.")
+        return redirect(url_for("cup_session_complete", cup_id=cup_id))
+    live_roster = {
+        r["player_id"]
+        for r in conn.execute(
+            "SELECT player_id FROM cup_players WHERE cup_id = ?", (cup_id,)
+        ).fetchall()
+    }
+    if len(submitted_ids) != len(set(submitted_ids)) or set(submitted_ids) != live_roster:
+        conn.close()
+        flash(
+            "The player roster changed since this page loaded — here are the "
+            "current players. Please re-enter the scores."
+        )
+        return redirect(url_for("cup_session_complete", cup_id=cup_id))
+
     # Switch (mk8dx) cups are lineless — drop any submitted line before it can
     # reach validation or storage.
     zero_lines_if_lineless(conn, cup_id, scores_data)
@@ -2040,6 +2093,143 @@ def cup_session_cancel(cup_id):
     conn.commit()
     conn.close()
     return redirect(url_for("index"))
+
+
+# --- Mid-cup roster editing (add / remove a player on an in-progress cup) ---
+#
+# The roster is otherwise fixed at cup creation. These two routes let the user
+# adjust it while a cup is in progress. No scores exist mid-cup (scores are only
+# written at completion), so there is nothing to reconcile here — only the
+# cup_players join table changes. Both guards mirror create_score / PR #58:
+# the cup must be status='in_progress' AND deleted_at IS NULL, verified inside
+# the write itself so a completed/cancelled/deleted/nonexistent cup is rejected
+# with a friendly flash (never a 500). The <int:cup_id> path uses the bounded
+# converter, so an oversized cup_id 404s before we run.
+
+
+@app.route("/cup-session/<int:cup_id>/players/add", methods=["POST"])
+def cup_session_add_player(cup_id):
+    """Add an existing player to an in-progress cup.
+
+    New players start with half_veto_count=0. UNIQUE(cup_id, player_id) makes a
+    duplicate add a friendly no-op, not a 500. A player added AFTER the race-3
+    stale-veto-forfeit check is intentionally NOT retroactively forfeited: the
+    forfeit fires once, in cup_session_next_race when entering race 3, over the
+    roster present at that moment. A late-add keeps half_veto_count=0 (all vetoes
+    intact) — it simply wasn't subject to that one-time event.
+    """
+    try:
+        player_id = parse_int_field(request.form.get("player_id", "").strip())
+    except ValueError:
+        flash("Invalid player selection.")
+        return redirect(url_for("cup_session_race", cup_id=cup_id))
+
+    conn = get_connection()
+    try:
+        # Friendly common-path checks (nice messages); the conditional INSERT
+        # below is the authoritative, race-safe guard.
+        cup = conn.execute(
+            "SELECT status, deleted_at FROM cups WHERE id = ?", (cup_id,)
+        ).fetchone()
+        if cup is None or cup["deleted_at"] is not None or cup["status"] != "in_progress":
+            flash("Players can only be edited while a cup is in progress.")
+            return redirect(url_for("cups"))
+        player = conn.execute(
+            "SELECT id, name FROM players WHERE id = ?", (player_id,)
+        ).fetchone()
+        if player is None:
+            flash("That player doesn't exist.")
+            return redirect(url_for("cup_session_race", cup_id=cup_id))
+        # Fold the in-progress guard into the INSERT to close the TOCTOU between
+        # the SELECT above and this write (mirrors create_score, issue #52): if
+        # the cup is completed/cancelled/deleted in that window, EXISTS is false
+        # and no row is inserted. UNIQUE(cup_id, player_id) blocks a duplicate.
+        cursor = conn.execute(
+            "INSERT INTO cup_players (cup_id, player_id, half_veto_count) "
+            "SELECT ?, ?, 0 "
+            "WHERE EXISTS (SELECT 1 FROM cups WHERE id = ? AND deleted_at IS NULL AND status = 'in_progress')",
+            (cup_id, player_id, cup_id),
+        )
+        if cursor.rowcount == 0:
+            conn.rollback()
+            flash("Players can only be edited while a cup is in progress.")
+            return redirect(url_for("cups"))
+        conn.commit()
+        flash(f"Added {player['name']} to the cup.", "success")
+    except sqlite3.IntegrityError:
+        conn.rollback()
+        flash("That player is already in this cup.")
+    finally:
+        conn.close()
+    return redirect(url_for("cup_session_race", cup_id=cup_id))
+
+
+@app.route("/cup-session/<int:cup_id>/players/remove", methods=["POST"])
+def cup_session_remove_player(cup_id):
+    """Remove a player from an in-progress cup.
+
+    Refuses to drop the roster below MIN_ROSTER_SIZE (a cup can never be emptied
+    of players). The removed player's half-veto history is dropped with the row
+    (acceptable — vetoes are per-cup state). Completion uses the LIVE roster
+    (cup_session_complete renders players from cup_players, and
+    apply_line_adjustments keys off the submitted scores for that roster), so a
+    removal here is reflected correctly at completion — e.g. a 3-player Wii cup
+    dropped to 2 no longer triggers the 3-player line adjustment.
+    """
+    try:
+        player_id = parse_int_field(request.form.get("player_id", "").strip())
+    except ValueError:
+        flash("Invalid player selection.")
+        return redirect(url_for("cup_session_race", cup_id=cup_id))
+
+    conn = get_connection()
+    try:
+        # Friendly common-path checks; the conditional DELETE below is the
+        # authoritative, race-safe guard.
+        cup = conn.execute(
+            "SELECT status, deleted_at FROM cups WHERE id = ?", (cup_id,)
+        ).fetchone()
+        if cup is None or cup["deleted_at"] is not None or cup["status"] != "in_progress":
+            flash("Players can only be edited while a cup is in progress.")
+            return redirect(url_for("cups"))
+        in_cup = conn.execute(
+            "SELECT 1 FROM cup_players WHERE cup_id = ? AND player_id = ?",
+            (cup_id, player_id),
+        ).fetchone()
+        if in_cup is None:
+            flash("That player isn't in this cup.")
+            return redirect(url_for("cup_session_race", cup_id=cup_id))
+        roster_size = conn.execute(
+            "SELECT COUNT(*) AS n FROM cup_players WHERE cup_id = ?", (cup_id,)
+        ).fetchone()["n"]
+        if roster_size <= MIN_ROSTER_SIZE:
+            flash(
+                f"A cup must keep at least {MIN_ROSTER_SIZE} player"
+                f"{'s' if MIN_ROSTER_SIZE != 1 else ''}."
+            )
+            return redirect(url_for("cup_session_race", cup_id=cup_id))
+        # Authoritative atomic DELETE. The min-roster guard lives INSIDE the
+        # statement (COUNT > MIN, evaluated against the pre-delete table state)
+        # so two concurrent removes can't both pass the read-check above and
+        # drop the roster below the minimum — SQLite serializes writers, and a
+        # remove only fires while count is still strictly above MIN. The cup
+        # in-progress guard is folded in too (TOCTOU-safe).
+        cursor = conn.execute(
+            "DELETE FROM cup_players "
+            "WHERE cup_id = ? AND player_id = ? "
+            "AND EXISTS (SELECT 1 FROM cups WHERE id = ? AND deleted_at IS NULL AND status = 'in_progress') "
+            "AND (SELECT COUNT(*) FROM cup_players WHERE cup_id = ?) > ?",
+            (cup_id, player_id, cup_id, cup_id, MIN_ROSTER_SIZE),
+        )
+        if cursor.rowcount == 0:
+            conn.rollback()
+            flash("Could not remove that player.")
+            return redirect(url_for("cup_session_race", cup_id=cup_id))
+        conn.commit()
+        flash("Player removed from the cup.", "success")
+    finally:
+        conn.close()
+    return redirect(url_for("cup_session_race", cup_id=cup_id))
 
 
 # --- Photo score entry (extraction + photo persistence) ---

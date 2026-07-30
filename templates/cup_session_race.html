@@ -132,6 +132,21 @@
 
     /* Cancel link */
     .cancel-link { display: block; margin-top: var(--space-5); text-align: center; color: var(--color-danger); font-size: 0.85rem; cursor: pointer; }
+
+    /* Mid-cup roster editor */
+    .roster-editor { margin-top: var(--space-3); font-size: 0.85rem; }
+    .roster-editor > summary { cursor: pointer; color: var(--color-muted); user-select: none; }
+    .roster-editor > summary:hover { color: var(--color-text); }
+    .roster-editor .roster-list { list-style: none; margin: var(--space-2) 0; padding: 0; }
+    .roster-editor .roster-list li { display: flex; align-items: center; justify-content: space-between; padding: 0.2rem 0; }
+    .roster-editor .roster-remove {
+        background: none; border: none; color: var(--color-danger); cursor: pointer;
+        font-size: 1rem; line-height: 1; padding: 0 0.35rem; margin: 0;
+    }
+    .roster-editor .roster-remove:disabled { color: var(--color-faint); cursor: default; }
+    .roster-editor .roster-add { display: flex; gap: var(--space-2); align-items: center; margin-top: var(--space-2); }
+    .roster-editor .roster-add select { flex: 1; }
+    .roster-editor .roster-hint { color: var(--color-faint); font-size: 0.8rem; margin-top: var(--space-1); }
 </style>
 {% endblock %}
 
@@ -154,6 +169,42 @@
             {{ p.name }} (<strong class="hv-count" data-player-id="{{ p.player_id }}">{{ max_half_vetoes - p.half_veto_count }}</strong>){% if not loop.last %}, {% endif %}
             {% endfor %}
         </div>
+
+        <!-- Mid-cup roster editing: add/remove players while the cup is in
+             progress. Plain form POSTs that redirect back here, so the reloaded
+             page always reflects the live roster. -->
+        <details class="roster-editor">
+            <summary>Edit players</summary>
+            <ul class="roster-list">
+                {% for p in players %}
+                <li>
+                    <span>{{ p.name }}</span>
+                    <form method="post" action="{{ url_for('cup_session_remove_player', cup_id=cup.id) }}" style="margin:0">
+                        <input type="hidden" name="player_id" value="{{ p.player_id }}">
+                        <button type="submit" class="roster-remove" title="Remove {{ p.name }}"
+                            aria-label="Remove {{ p.name }}"
+                            {% if players|length <= min_roster_size %}disabled{% endif %}>&times;</button>
+                    </form>
+                </li>
+                {% endfor %}
+            </ul>
+            {% if available_players %}
+            <form method="post" action="{{ url_for('cup_session_add_player', cup_id=cup.id) }}" class="roster-add">
+                <select name="player_id" required aria-label="Player to add">
+                    <option value="" disabled selected>Add a player…</option>
+                    {% for ap in available_players %}
+                    <option value="{{ ap.id }}">{{ ap.name }}</option>
+                    {% endfor %}
+                </select>
+                <button type="submit" class="btn btn-secondary btn-sm">Add</button>
+            </form>
+            {% else %}
+            <p class="roster-hint">All players are already in this cup.</p>
+            {% endif %}
+            {% if players|length <= min_roster_size %}
+            <p class="roster-hint">A cup must keep at least {{ min_roster_size }} player{{ 's' if min_roster_size != 1 else '' }}.</p>
+            {% endif %}
+        </details>
     </div>
 
     {% if current_race <= max_races %}
