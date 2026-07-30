@@ -25,12 +25,26 @@ def api_key(monkeypatch):
 
 
 def _fake_rows(*rows):
-    """rows: (position, character, points) tuples -> patchable extractor."""
-    standings = Standings(
-        rows=[StandingsRow(position=p, character=c, points=pts) for p, c, pts in rows]
-    )
+    """rows: (position, character, points[, is_highlighted]) tuples -> extractor.
 
-    def fake_extract(image_b64, media_type):
+    A 3-tuple omits the highlight flag (defaults False, i.e. the pre-highlight
+    behavior where zero highlighted rows fall back to matching all rows).
+    """
+    parsed = []
+    for row in rows:
+        position, character, points = row[0], row[1], row[2]
+        highlighted = row[3] if len(row) > 3 else False
+        parsed.append(
+            StandingsRow(
+                position=position,
+                character=character,
+                points=points,
+                is_highlighted=highlighted,
+            )
+        )
+    standings = Standings(rows=parsed)
+
+    def fake_extract(image_b64, media_type, edition=None):
         return standings
 
     return fake_extract
@@ -95,7 +109,12 @@ def test_happy_path_matches_players_by_character(client, api_key, monkeypatch):
     assert data["ambiguous"] == []
     assert data["unmatched_players"] == []
     assert len(data["raw_rows"]) == 3
-    assert data["raw_rows"][0] == {"position": 1, "character": "Funky Kong", "points": 60}
+    assert data["raw_rows"][0] == {
+        "position": 1,
+        "character": "Funky Kong",
+        "points": 60,
+        "is_highlighted": False,
+    }
 
 
 def test_matching_is_case_insensitive(client, api_key, monkeypatch):
@@ -174,6 +193,178 @@ def test_switch_cup_matches_on_switch_character(client, api_key, monkeypatch):
     )
     data = _post(client, cup_id=cup_id).get_json()
     assert data["scores"] == {"1": 60}
+
+
+# --- Highlight-aware matching ---
+
+
+def test_only_highlighted_rows_are_matched(client, api_key, monkeypatch):
+    # Alice=Funky Kong is highlighted; a non-highlighted Funky Kong row (a CPU)
+    # also exists. Only the highlighted row's score is used.
+    _setup_players(client, [("Alice", "Funky Kong", None)])
+    cup_id = _start_session(client, [1])
+    monkeypatch.setattr(
+        app_module,
+        "extract_standings",
+        _fake_rows((1, "Funky Kong", 60, True), (4, "Funky Kong", 30, False)),
+    )
+    data = _post(client, cup_id=cup_id).get_json()
+    assert data["scores"] == {"1": 60}
+    assert data["ambiguous"] == []
+    assert data["unmatched_players"] == []
+
+
+def test_cpu_sharing_human_character_is_ignored(client, api_key, monkeypatch):
+    # The bug this feature fixes: a human on Yoshi (highlighted) plus a CPU
+    # Yoshi (not highlighted). Pre-highlight this was ambiguous; now the human
+    # matches cleanly and the CPU Yoshi is dropped.
+    _setup_players(client, [("Lizzy", "Yoshi", None)])
+    cup_id = _start_session(client, [1])
+    monkeypatch.setattr(
+        app_module,
+        "extract_standings",
+        _fake_rows((1, "Yoshi", 55, True), (6, "Yoshi", 22, False)),
+    )
+    data = _post(client, cup_id=cup_id).get_json()
+    assert data["scores"] == {"1": 55}
+    assert data["ambiguous"] == []
+
+
+def test_player_whose_character_only_appears_as_cpu_is_unmatched(
+    client, api_key, monkeypatch
+):
+    # Bob mains Bowser but the only Bowser on screen is a CPU (not highlighted).
+    # Bob must be left blank (unmatched), NOT auto-filled with the CPU's score.
+    _setup_players(client, [("Alice", "Yoshi", None), ("Bob", "Bowser", None)])
+    cup_id = _start_session(client, [1, 2])
+    monkeypatch.setattr(
+        app_module,
+        "extract_standings",
+        _fake_rows((1, "Yoshi", 60, True), (3, "Bowser", 40, False)),
+    )
+    data = _post(client, cup_id=cup_id).get_json()
+    assert data["scores"] == {"1": 60}
+    assert data["unmatched_players"] == ["Bob"]
+
+
+def test_two_humans_sharing_character_stay_ambiguous(client, api_key, monkeypatch):
+    # Genuine collision: two highlighted humans both on Yoshi -> still ambiguous.
+    _setup_players(client, [("Alice", "Yoshi", None), ("Bob", "Yoshi", None)])
+    cup_id = _start_session(client, [1, 2])
+    monkeypatch.setattr(
+        app_module,
+        "extract_standings",
+        _fake_rows((1, "Yoshi", 60, True), (2, "Yoshi", 48, True)),
+    )
+    data = _post(client, cup_id=cup_id).get_json()
+    assert data["scores"] == {}
+    assert data["ambiguous"] == ["Alice", "Bob"]
+
+
+def test_off_character_human_not_auto_filled_from_cpu_row(client, api_key, monkeypatch):
+    # Real cup-56 case: Graham defaults to Toad, but Toad is a CPU on screen
+    # (non-highlighted, 33 pts) while he actually played a highlighted Dry
+    # Bowser (10 pts). With OTHER rows highlighted, his Toad default must NOT
+    # be auto-filled from the CPU Toad row — he's left blank to pick manually.
+    _setup_players(client, [("Graham", "Toad", None), ("Lizzy", "Yoshi", None)])
+    cup_id = _start_session(client, [1, 2])
+    monkeypatch.setattr(
+        app_module,
+        "extract_standings",
+        _fake_rows(
+            (1, "Yoshi", 55, True),       # Lizzy, human
+            (2, "Dry Bowser", 10, True),  # Graham actually played this (off-char)
+            (7, "Toad", 33, False),       # a CPU on Graham's default character
+        ),
+    )
+    data = _post(client, cup_id=cup_id).get_json()
+    # Lizzy (player 2) auto-fills; Graham (player 1) is NOT given the CPU Toad's 33.
+    assert data["scores"] == {"2": 55}
+    assert 33 not in data["scores"].values()
+    assert data["unmatched_players"] == ["Graham"]
+
+
+def test_two_highlighted_rows_one_character_are_ambiguous(client, api_key, monkeypatch):
+    # A single player mains Yoshi but TWO highlighted rows both show Yoshi
+    # (e.g. a second human also on Yoshi) -> can't tell which is theirs.
+    _setup_players(client, [("Alice", "Yoshi", None)])
+    cup_id = _start_session(client, [1])
+    monkeypatch.setattr(
+        app_module,
+        "extract_standings",
+        _fake_rows((1, "Yoshi", 60, True), (3, "Yoshi", 40, True)),
+    )
+    data = _post(client, cup_id=cup_id).get_json()
+    assert data["scores"] == {}
+    assert data["ambiguous"] == ["Alice"]
+
+
+def test_zero_highlighted_falls_back_to_all_rows(client, api_key, monkeypatch):
+    # Robustness: if the model flags NOTHING highlighted (bad detection / old
+    # behavior), fall back to matching all rows so we never regress.
+    _setup_players(client, [("Alice", "Funky Kong", None), ("Bob", "Yoshi", None)])
+    cup_id = _start_session(client, [1, 2])
+    monkeypatch.setattr(
+        app_module,
+        "extract_standings",
+        _fake_rows((1, "Funky Kong", 60), (2, "Yoshi", 54), (3, "Mario", 40)),
+    )
+    data = _post(client, cup_id=cup_id).get_json()
+    assert data["scores"] == {"1": 60, "2": 54}
+    assert data["ambiguous"] == []
+    assert data["unmatched_players"] == []
+
+
+def test_raw_rows_carry_highlight_flag(client, api_key, monkeypatch):
+    _setup_players(client, [("Alice", "Funky Kong", None)])
+    cup_id = _start_session(client, [1])
+    monkeypatch.setattr(
+        app_module,
+        "extract_standings",
+        _fake_rows((1, "Funky Kong", 60, True), (2, "Bowser", 40, False)),
+    )
+    raw = _post(client, cup_id=cup_id).get_json()["raw_rows"]
+    assert raw[0]["is_highlighted"] is True
+    assert raw[1]["is_highlighted"] is False
+
+
+# --- Edition-aware prompt / plumbing ---
+
+
+def test_route_passes_cup_edition_to_extractor(client, api_key, monkeypatch):
+    # The /extract-scores route must thread the cup's edition into
+    # extract_standings so the prompt can describe the right screen cues.
+    _setup_players(client, [("Alice", "Funky Kong", "Isabelle")])
+    cup_id = _start_session(client, [1], edition="mk8dx")
+    seen = {}
+
+    def capturing_extract(image_b64, media_type, edition=None):
+        seen["edition"] = edition
+        return Standings(rows=[StandingsRow(position=1, character="Isabelle", points=60)])
+
+    monkeypatch.setattr(app_module, "extract_standings", capturing_extract)
+    _post(client, cup_id=cup_id)
+    assert seen["edition"] == "mk8dx"
+
+
+def test_build_extraction_prompt_is_edition_specific():
+    wii = extraction.build_extraction_prompt("wii")
+    mk8 = extraction.build_extraction_prompt("mk8dx")
+    unknown = extraction.build_extraction_prompt(None)
+    # Wii: opaque-vs-translucent cue, both layouts, and it DOES detect humans.
+    assert "Wii" in wii
+    assert "opaque" in wii.lower() and "translucent" in wii.lower()
+    assert "is_highlighted=true" in wii
+    # The dropped "outline box" cue must be gone.
+    assert "outline" not in wii.lower()
+    # Switch: NO highlight detection — every row left is_highlighted=false, and
+    # no P#/badge language.
+    assert "Deluxe" in mk8
+    assert "is_highlighted=false" in mk8
+    assert "P1" not in mk8 and "badge" not in mk8.lower()
+    assert "is_highlighted=true" not in mk8
+    # Unknown falls back to the (Wii) opaque cue.
+    assert "opaque" in unknown.lower()
 
 
 # --- Manual-form contract (edition + player_ids) ---
@@ -265,7 +456,7 @@ def test_api_error_returns_502(client, api_key, monkeypatch):
     _setup_players(client, [("Alice", "Funky Kong", None)])
     cup_id = _start_session(client, [1])
 
-    def boom(image_b64, media_type):
+    def boom(image_b64, media_type, edition=None):
         raise ExtractionError("api down")
 
     monkeypatch.setattr(app_module, "extract_standings", boom)

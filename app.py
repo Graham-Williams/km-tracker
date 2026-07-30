@@ -2144,31 +2144,80 @@ def match_standings_to_players(rows, players, edition):
     def norm(value):
         return value.strip().casefold()
 
+    # Highlight is a SAFE HINT, not a hard filter (revised 2026-07 after
+    # real-photo validation). The human-vs-CPU highlight cue is real but the
+    # model misses it under dark/glare photos and across Wii's two different
+    # results screens, so we NEVER *require* a highlight to fill — we only use
+    # highlight to protect against auto-filling a CPU's score. The human's
+    # dropdown (client-side) is the actual guarantee; auto-fill just gets the
+    # common case right without ever grabbing a wrong (CPU) row.
+    #
+    # Build character -> rows over ALL rows (keep the highlight flag on each so
+    # we can prefer highlighted matches per character below).
+    rows_by_char = {}  # normalized character -> [rows]
+    for row in rows:
+        rows_by_char.setdefault(norm(row.character), []).append(row)
+
+    # Did the model flag ANY row as highlighted anywhere in the photo? If not,
+    # detection clearly failed (or it's an old 3-tuple read) — we then fall
+    # back to pure character matching so we never regress below pre-highlight
+    # behavior (the "cup-52 under-detection" safety). NOTE: Switch (mk8dx) has
+    # no reliable human-vs-CPU cue, so its prompt never sets is_highlighted —
+    # every Switch photo therefore flows through this zero-highlight fallback to
+    # character-only matching by design (Switch highlight auto-fill is a future
+    # follow-up). Highlight-aware safe auto-fill is effectively Wii-only today.
+    any_highlighted = any(getattr(r, "is_highlighted", False) for r in rows)
+
     claims = {}  # normalized character -> [player dicts]
     unmatched = []
     for player in players:
         character = player[char_field]
+        # A player with no default character for this edition can't be matched.
         if not character or not character.strip():
             unmatched.append(player["name"])
             continue
         claims.setdefault(norm(character), []).append(player)
 
-    rows_by_char = {}  # normalized character -> [rows]
-    for row in rows:
-        rows_by_char.setdefault(norm(row.character), []).append(row)
-
     scores = {}
     ambiguous = []
     for key, claimants in claims.items():
-        matched_rows = rows_by_char.get(key, [])
-        if not matched_rows:
-            unmatched.extend(p["name"] for p in claimants)
-        elif len(claimants) == 1 and len(matched_rows) == 1:
-            scores[claimants[0]["player_id"]] = matched_rows[0].points
-        else:
-            # Collision: two+ players share the character, or the character
-            # appears in two+ rows. Fill nothing; let the human decide.
+        # Unchanged rule: if 2+ players main the same character we can't tell
+        # their rows apart -> everyone on that character is ambiguous.
+        if len(claimants) != 1:
             ambiguous.extend(p["name"] for p in claimants)
+            continue
+        player = claimants[0]
+
+        matching = rows_by_char.get(key, [])
+        hl_matching = [r for r in matching if getattr(r, "is_highlighted", False)]
+
+        if len(hl_matching) == 1:
+            # Confident human match: exactly one highlighted row wears this
+            # character. Auto-fill it.
+            scores[player["player_id"]] = hl_matching[0].points
+        elif len(hl_matching) >= 2:
+            # Two human rows share the character (rare) -> let the human decide.
+            ambiguous.append(player["name"])
+        else:
+            # No HIGHLIGHTED row carries this character.
+            if any_highlighted:
+                # The character appears ONLY on non-highlighted (CPU) rows (or
+                # not at all). Do NOT auto-fill a CPU score — leave the player
+                # blank so the human picks the right row. This is the
+                # off-character protection: e.g. a player defaults to Toad but
+                # Toad is a CPU here while they actually played a highlighted
+                # Dry Bowser -> we must not hand them the CPU Toad's points.
+                unmatched.append(player["name"])
+            else:
+                # Zero highlights detected anywhere -> highlight detection
+                # failed; fall back to pre-highlight character matching so we
+                # never do worse than before this feature existed.
+                if len(matching) == 1:
+                    scores[player["player_id"]] = matching[0].points
+                elif len(matching) >= 2:
+                    ambiguous.append(player["name"])
+                else:
+                    unmatched.append(player["name"])
     return scores, sorted(ambiguous), sorted(unmatched)
 
 
@@ -2262,7 +2311,7 @@ def extract_scores():
         return error
 
     try:
-        standings = extract_standings(data["image"], mime_type)
+        standings = extract_standings(data["image"], mime_type, edition=edition)
     except ExtractionError:
         app.logger.exception("Photo score extraction failed")
         return (
@@ -2279,7 +2328,12 @@ def extract_scores():
             "ambiguous": ambiguous,
             "unmatched_players": unmatched,
             "raw_rows": [
-                {"position": r.position, "character": r.character, "points": r.points}
+                {
+                    "position": r.position,
+                    "character": r.character,
+                    "points": r.points,
+                    "is_highlighted": bool(r.is_highlighted),
+                }
                 for r in standings.rows
             ],
         }
