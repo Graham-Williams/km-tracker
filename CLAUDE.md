@@ -105,9 +105,14 @@ Cloudflare tunnel**, but isolated from prod by design:
   (`'-staging' if is_staging else ''`). All PNGs are metadata-free (pixel data
   only). The prod `.ico`/32px use a tighter crop on the shell body (full winged
   artwork is illegible at 16px); the large prod icons use the full artwork.
-- **Separate Cloudflare Access app → separate AUD.** Staging has its own Access
-  application, so its own AUD, supplied via the box `.env` as
-  `STAGING_CF_ACCESS_AUD` — **never reuse the prod `CF_ACCESS_AUD`.**
+- **Sign-in: the shared app-password gate (`APP_PASSWORD`), same as prod.**
+  Staging's own Cloudflare Access application (email PIN) was **retired
+  2026-08-05** and the edge app deleted, so `STAGING_CF_ACCESS_AUD` is blank and
+  app-side JWT verification is off on staging. Staging inherits prod's
+  `APP_PASSWORD` unless `STAGING_APP_PASSWORD` is set. (Retiring the PIN also
+  means an agent can reach staging's public URL, which an email PIN made
+  impossible.) If staging is ever re-gated with Access, it needs its **own**
+  AUD — **never reuse the prod `CF_ACCESS_AUD`.**
 - Compose override: `docker-compose.staging.yml` (layers on `docker-compose.yml` +
   `docker-compose.access.yml`). No host port published — reachable only via the tunnel.
 
@@ -380,7 +385,7 @@ Reusable agent skills live in `.claude/skills/` and **are committed** (a `.gitig
 - **What it does:** fans out parallel subagents across every endpoint — hostile/malformed input, out-of-order & double-submit session flows (spin/veto/voto/next-race/complete against the state machine), concurrent request pairs against the same in-progress cup (racing the non-atomic counter guards), plus a direct **staging-DB invariant audit** (counter caps, score/line-change consistency, referential integrity). Reports each finding with severity, a concrete repro, observed-vs-expected, and a **proposed pytest regression test** (using the `client` fixture + `tests/helpers.py`).
 - **Change-awareness / focus-fire:** before the broad sweep it diffs what's deployed on staging against prod/`main` (deployed-commit and `git diff origin/main...HEAD`), maps the changed routes/columns/migrations/UI, and runs a **dedicated heavier attack pass on that currently-deployed-but-unmerged feature** (new enum values, migration backfill gaps, validation bypasses, broken old invariants) on top of the broad sweep — findings for the changed surface get their own report heading so it's obvious whether the new work is safe.
 - **Staging-only guardrails (non-negotiable):** proves the target is staging (DB basename contains `staging`, `APP_ENV=staging`/`[STG]` title, `staging-app` service) before touching anything; before its first reseed it **fingerprints the staging DB against the deterministic seed baseline** (the seed leaves one in-progress fake cup, so a bare in-progress count can't be used) and **aborts only if the state looks like a *real* human session** — extra/real cups or non-seed player names — never stomping an active session; never touches the prod `app` container, `km_tracker.db`, or `km.graham-williams.com`; **reseeds `scripts/seed_staging.py --reset` before and after** so staging is left clean.
-- **Access path:** the public `staging-km.graham-williams.com` is behind Cloudflare Access (email PIN, un-automatable) and the app enforces an Access JWT server-side, so the skill reaches staging **on the box** over Tailscale SSH (box SSH target + repo path are **not committed** — the executing agent gets them from local memory / private DEPLOY notes) by launching a **throwaway one-off container** from the `staging-app` service with `CSRF_PROTECTION=0` + `CF_ACCESS_*` unset, publishing loopback `127.0.0.1:18080`, sharing the `./data` volume so it hits the real staging DB — without rebuilding/restarting the live `staging-app` or prod. Optional `ssh -L` port-forward lets an agent drive it (incl. Playwright) from its own machine.
+- **Access path:** the public `staging-km.graham-williams.com` is behind the shared app-password gate (`APP_PASSWORD`; the old Cloudflare Access email PIN was retired 2026-08-05), so the skill reaches staging **on the box** over Tailscale SSH (box SSH target + repo path are **not committed** — the executing agent gets them from local memory / private DEPLOY notes) by launching a **throwaway one-off container** from the `staging-app` service with `CSRF_PROTECTION=0` + `APP_PASSWORD=` + `CF_ACCESS_*` unset (blanking `APP_PASSWORD` is required, or every request 302s to `/login`), publishing loopback `127.0.0.1:18080`, sharing the `./data` volume so it hits the real staging DB — without rebuilding/restarting the live `staging-app` or prod. Optional `ssh -L` port-forward lets an agent drive it (incl. Playwright) from its own machine.
 - **It informs only** — it does not fix bugs or open PRs; a follow-up session turns accepted findings into tests + fixes.
 
 ## UI Testing
