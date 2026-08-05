@@ -79,16 +79,17 @@ not improvise around them.
 
 ## 1. Access path (how an agent reaches staging)
 
-The public hostname `staging-km.graham-williams.com` sits behind **Cloudflare
-Access one-time-email-PIN**, which an agent cannot complete, and the app *also*
-enforces a Cloudflare Access JWT check server-side when `CF_ACCESS_TEAM_DOMAIN` +
-`CF_ACCESS_AUD` are set. So do **not** go through the public URL. Reach staging
-**on the box** instead.
+The public hostname `staging-km.graham-williams.com` sits behind the **shared
+app-password gate** (`APP_PASSWORD`) — every non-static path 302s to `/login`
+until a session cookie is issued. (It used to be a Cloudflare Access
+one-time-email-PIN; that was retired in favour of the password gate, matching
+prod.) So do **not** go through the public URL. Reach staging **on the box**
+instead.
 
 Reach staging on the self-hosted box over Tailscale SSH. The staging DB lives on
 the box's bind-mounted `./data` volume as `km_tracker.staging.db`. The
 `staging-app` container publishes **no host port**, so you can't curl it from the
-LAN, and the live gunicorn has the Access JWT check active — so don't attack the
+LAN, and the live gunicorn has the password gate active — so don't attack the
 live container directly.
 
 > **Box coordinates are NOT committed** (this repo is public). The concrete SSH
@@ -102,7 +103,8 @@ live container directly.
 
 **Canonical approach — a disposable, auth-disabled app container against the same
 staging DB.** Stand up a *throwaway* one-off container from the `staging-app`
-service definition, with the Cloudflare Access check and CSRF turned off and a
+service definition, with the password gate, the Cloudflare Access check and CSRF
+turned off and a
 loopback port published, pointed (via the shared `./data` volume + `DB_PATH`) at
 the real staging DB. It shares the staging DB with the live `staging-app` but does
 **not** rebuild, restart, or reconfigure it, and never touches prod.
@@ -118,9 +120,14 @@ COMPOSE="docker compose -f docker-compose.yml -f docker-compose.access.yml -f do
 # Launch the throwaway QA server: auth OFF, CSRF OFF, loopback port 18080,
 # same ./data volume so DB_PATH=/data/km_tracker.staging.db hits the real
 # staging DB. --no-deps so nothing else is started/restarted.
+#
+# APP_PASSWORD= is REQUIRED: staging inherits the shared password gate, and with
+# it set every path 302s to /login, so the whole sweep would measure the login
+# page instead of the app. Blank turns the gate off in this throwaway only.
 $COMPOSE run -d --name km-tracker-qa --no-deps \
   -p 127.0.0.1:18080:8080 \
   -e CSRF_PROTECTION=0 \
+  -e APP_PASSWORD= \
   -e CF_ACCESS_TEAM_DOMAIN= \
   -e CF_ACCESS_AUD= \
   staging-app
@@ -147,7 +154,7 @@ docker rm -f km-tracker-qa
 ```
 
 > Why a throwaway and not the live container: it's deterministic (auth reliably
-> off regardless of how the box `.env` set `STAGING_CF_ACCESS_AUD`), it needs no
+> off regardless of how the box `.env` set `APP_PASSWORD`/`STAGING_CF_ACCESS_AUD`), it needs no
 > reconfiguration of the running staging service, and true request concurrency
 > against the same DB row (the race-condition surface) works because the
 > throwaway runs its own gunicorn workers. The live `staging-app` stays quiescent
