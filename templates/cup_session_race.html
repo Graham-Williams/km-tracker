@@ -863,6 +863,14 @@
                     } else {
                         window.location.reload();
                     }
+                }).catch(function () {
+                    // A non-JSON response (e.g. a 500 HTML error page) or a
+                    // dropped connection rejects r.json(). Without this the
+                    // page would just sit there doing nothing — the same
+                    // dead-end the error-response reload above removes, via a
+                    // different failure path. Reload so the page re-syncs with
+                    // whatever the server actually recorded.
+                    window.location.reload();
                 });
             });
         }

@@ -13,8 +13,9 @@
  * `partial_half: true` — a MIXED (Wii + Switch) cup, where the photographed
  * screen holds only the second console's half of the scoring. Filling half
  * totals into a cup-total field would record silently-wrong numbers that look
- * completely plausible, so those responses only feed the reference mapping
- * panel and an explanatory status line.
+ * completely plausible, so those responses render the mapping panel as a
+ * READ-ONLY reference list (no dropdowns, no write path to the score inputs)
+ * plus an explanatory status line.
  *
  * Silent-drop guards (the photo attach is async, so a submit could otherwise
  * race it or follow a failed decode without anyone noticing):
@@ -51,7 +52,11 @@ window.initPhotoScore = function (opts) {
     var notesEl = block.querySelector(".photo-notes");
     var preview = block.querySelector(".photo-preview");
     var mappingEl = block.querySelector(".photo-mapping");
+    var mappingTitleEl = block.querySelector(".photo-mapping-title");
     var mappingRowsEl = block.querySelector(".photo-mapping-rows");
+    // The markup's own title, restored whenever the interactive panel renders.
+    var MAPPING_TITLE = mappingTitleEl ? mappingTitleEl.textContent : "";
+    var REFERENCE_TITLE = "Rows read from the photo — this console only:";
     var mapWarnEl = block.querySelector(".photo-map-warning");
     var mapUnassignedEl = block.querySelector(".photo-map-unassigned");
     var dataField = document.getElementById("photo-data");
@@ -173,9 +178,41 @@ window.initPhotoScore = function (opts) {
     function clearMapping() {
         if (!mappingEl) return;
         mappingRowsEl.innerHTML = "";
+        if (mappingTitleEl) mappingTitleEl.textContent = MAPPING_TITLE;
         if (mapWarnEl) { mapWarnEl.hidden = true; mapWarnEl.textContent = ""; }
         if (mapUnassignedEl) { mapUnassignedEl.hidden = true; mapUnassignedEl.textContent = ""; }
         mappingEl.hidden = true;
+    }
+
+    // Read-only variant of the panel, used when the photo covers only PART of
+    // the cup's scoring (partial_half — a mixed cup). It lists what the model
+    // read off the screen and NOTHING else: no <select>, no writes to any score
+    // input. The interactive panel is titled "Map each player to a highlighted
+    // row from the photo", which would be instructing the user down a
+    // three-tap path to persisting half totals as the cup's scores — directly
+    // contradicting the warning above it. Reading the numbers off the photo is
+    // the only part of the panel that's safe here, so that's all it does.
+    //
+    // Deliberately NOT additive (no "add this to the existing value"): silent
+    // arithmetic on top of a typed number is a worse footgun than either a
+    // plain overwrite or this.
+    function renderReferenceRows(rawRows) {
+        if (!mappingEl) return;
+        mappingRowsEl.innerHTML = "";
+        if (mappingTitleEl) mappingTitleEl.textContent = REFERENCE_TITLE;
+        rawRows.forEach(function (r) {
+            var row = document.createElement("div");
+            row.className = "photo-map-row photo-map-readonly";
+            var star = r.is_highlighted ? "★ " : "";
+            row.textContent =
+                star + "P" + r.position + " · " + r.character + " — " + r.points + " pts";
+            mappingRowsEl.appendChild(row);
+        });
+        // The count/unassigned banners describe an assignment that no longer
+        // exists here.
+        if (mapWarnEl) { mapWarnEl.hidden = true; mapWarnEl.textContent = ""; }
+        if (mapUnassignedEl) { mapUnassignedEl.hidden = true; mapUnassignedEl.textContent = ""; }
+        mappingEl.hidden = false;
     }
 
     // Fill (or clear) a player's score input from a chosen row, firing the
@@ -244,10 +281,13 @@ window.initPhotoScore = function (opts) {
         }
     }
 
-    function renderMapping(rawRows) {
+    function renderMapping(rawRows, partialHalf) {
         if (!mappingEl) return;
         rawRows = rawRows || [];
         if (!rawRows.length) { clearMapping(); return; }
+        // Partial-half photo: reference list only, no write path at all.
+        if (partialHalf) { renderReferenceRows(rawRows); return; }
+        if (mappingTitleEl) mappingTitleEl.textContent = MAPPING_TITLE;
 
         // Order: highlighted (human) rows first, then the rest. Option values
         // index into this ordered list. Highlighted rows get a ★ marker; all
@@ -369,8 +409,9 @@ window.initPhotoScore = function (opts) {
             var partialHalf = !!body.partial_half;
             var filled = partialHalf ? 0 : fillScores(body.scores || {});
             // Build the mix-and-match panel AFTER fillScores so pre-selection
-            // can read the auto-filled score inputs.
-            renderMapping(body.raw_rows || []);
+            // can read the auto-filled score inputs. On a partial-half photo
+            // this renders the READ-ONLY reference list instead.
+            renderMapping(body.raw_rows || [], partialHalf);
             if (partialHalf) {
                 setStatus(
                     "Read " + (body.raw_rows || []).length + " row" +

@@ -624,8 +624,10 @@ def cup_edition_label_filter(cup):
 
     Takes the row (not a string) because a mixed cup's label depends on both
     game_edition and first_edition: '{{ cup|cup_edition_label }}' →
-    "Wii", "Switch", or "Wii → Switch". Any row passed here must have
-    first_edition in its SELECT (falls back safely if not).
+    "Wii", "Switch", or "Wii → Switch". Any row passed here MUST have
+    first_edition in its SELECT — row_value raises if it doesn't, deliberately,
+    so a short SELECT is a loud failure rather than a Switch-first mixed cup
+    quietly labeled "Wii → Switch".
     """
     return edition_order_label(cup["game_edition"], row_value(cup, "first_edition"))
 

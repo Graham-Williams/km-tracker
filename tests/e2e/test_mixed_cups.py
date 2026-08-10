@@ -235,8 +235,21 @@ def test_mixed_cup_photo_never_autofills_scores(page, base_url, monkeypatch):
     assert "Filled" not in status
     assert "combined total" in status
 
-    # The mapping panel is still available as a reference.
-    assert page.locator(".photo-map-select").count() == 2
+    # The panel is a READ-ONLY reference: it shows what was read off the photo
+    # but offers NO control that could write a half total into a score input.
+    # (The interactive version's own title tells the user to map players to
+    # rows — a titled three-tap path to persisting half totals as cup scores.)
+    assert page.locator(".photo-map-select").count() == 0
+    readonly = page.locator(".photo-map-readonly")
+    assert readonly.count() == 2
+    assert "42 pts" in readonly.nth(0).text_content()
+    title = page.locator(".photo-mapping-title").text_content()
+    assert "Map each player" not in title
+    assert "this console only" in title
+
+    # Nothing on the page can fill a score: still empty after the panel renders.
+    for i in range(scores.count()):
+        assert scores.nth(i).input_value() == ""
 
 
 @requires_in_process_server
@@ -286,6 +299,17 @@ def test_pure_cup_photo_still_autofills(page, base_url, monkeypatch):
 
     assert page.locator(".score-input").nth(0).input_value() == "60"
     assert "Filled 1 score" in page.locator(".photo-status").text_content()
+
+    # A pure cup keeps the full interactive panel — dropdowns, original title,
+    # and a live write path into the score inputs (the read-only reference list
+    # is mixed-only). Alice's dropdown is pre-selected to the row that filled
+    # her; clearing it clears her score, which the reference list can't do.
+    selects = page.locator(".photo-map-select")
+    assert selects.count() == 2
+    assert page.locator(".photo-map-readonly").count() == 0
+    assert "Map each player" in page.locator(".photo-mapping-title").text_content()
+    selects.nth(0).select_option(label="— leave blank —")
+    assert page.locator(".score-input").nth(0).input_value() == ""
 
 
 def test_swap_reminder_does_not_reopen_on_refresh(page, base_url):
@@ -338,3 +362,37 @@ def test_stale_manual_override_recovers_instead_of_dead_ending(page, base_url):
     # The page recovers onto race 3 with the OTHER console's wheel.
     page.locator("text=Race 3 of 4").wait_for(timeout=15000)
     assert page.evaluate("RACE_EDITION") != stale_edition
+
+
+def test_next_race_non_json_response_recovers(page, base_url):
+    """A 500 HTML page (or a dropped connection) rejects r.json(). Without a
+    .catch() the page silently does nothing — the same dead-end class as a
+    stale manual override, reached by a different error path."""
+    _start_mixed_session(page, base_url)
+    _dismiss_console_flip(page)
+
+    # One non-JSON response, then let the route fall through on the reload.
+    served = []
+
+    def handle(route):
+        if served:
+            route.continue_()
+            return
+        served.append(True)
+        route.fulfill(
+            status=500,
+            content_type="text/html",
+            body="<html><body>Internal Server Error</body></html>",
+        )
+
+    page.route("**/next-race", handle)
+
+    page.click("#spin-btn")
+    page.locator("#wheel-label.visible").wait_for(timeout=15000)
+    page.locator("#next-race-btn, #complete-btn").first.click()
+    page.locator("#next-race-confirm-btn").click()
+
+    # The page reloads and re-syncs rather than hanging on a dead confirm modal.
+    page.locator("#spin-btn").wait_for(state="visible", timeout=15000)
+    assert page.locator("#next-race-modal.active").count() == 0
+    assert page.locator("#spin-btn").is_enabled()
