@@ -30,6 +30,7 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from db import get_connection, init_db  # noqa: E402
+from maps import MIXED_EDITION, TRACK_SETS, other_edition  # noqa: E402
 
 # Deterministic seed so scores/standings are reproducible run to run.
 RANDOM_SEED = 20260701
@@ -50,9 +51,39 @@ NUM_COMPLETED_CUPS = 11
 NUM_IN_PROGRESS_CUPS = 1
 NUM_CUPS = NUM_COMPLETED_CUPS + NUM_IN_PROGRESS_CUPS
 
-# A handful of Mario Kart Wii courses to attach to the in-progress cup's races,
-# so it looks like a session already underway.
-IN_PROGRESS_MAPS = ["Luigi Circuit", "Coconut Mall", "Maple Treeway", "Bowser's Castle"]
+# The in-progress cup is a MIXED ("Wii + Switch") cup parked exactly at the
+# console swap: both first-half races played, so loading it puts staging on the
+# swap-reminder + second-half-wheel screen — the newest surface for the QA gate
+# to hammer. first_edition is fixed (not flipped) so reseeds stay deterministic.
+IN_PROGRESS_FIRST_EDITION = "wii"
+IN_PROGRESS_MAPS = ["Luigi Circuit", "Coconut Mall"]
+
+
+def seed_cup_edition(index):
+    """Deterministic (game_edition, first_edition) for seeded completed cup N.
+
+    Spreads all three cup editions across the seeded history so staging shows
+    Wii, Switch and both mixed console orders ("Wii → Switch" and
+    "Switch → Wii"). first_edition is NULL for every non-mixed cup.
+    """
+    if index % 4 == 3:
+        return MIXED_EDITION, ("mk8dx" if index % 8 == 3 else "wii")
+    if index % 4 == 2:
+        return "mk8dx", None
+    return "wii", None
+
+
+def mixed_race_maps(first_edition):
+    """[(race_number, map)] for a seeded mixed cup: 2 races on the flipped-to
+    console, then 2 on the other. Courses are taken from the real TRACK_SETS so
+    seeded history can never contain an off-edition course."""
+    second = other_edition(first_edition)
+    return [
+        (1, TRACK_SETS[first_edition][0]),
+        (2, TRACK_SETS[first_edition][1]),
+        (3, TRACK_SETS[second][0]),
+        (4, TRACK_SETS[second][1]),
+    ]
 
 
 def resolve_db_path(args_db, env):
@@ -120,6 +151,8 @@ def _insert_completed_cups(conn, rng, player_ids):
         day = 1 + c
         date_utc = f"2026-{(1 + c % 6):02d}-{day:02d} 19:{(c * 3) % 60:02d}:00"
 
+        edition, first_edition = seed_cup_edition(c)
+
         # Pick 4-6 players for this cup (varied field sizes).
         field_size = rng.randint(4, len(player_ids))
         cup_players = rng.sample(player_ids, field_size)
@@ -128,7 +161,10 @@ def _insert_completed_cups(conn, rng, player_ids):
         for pid in cup_players:
             # Score = skill baseline + noise, clamped to a plausible cup total.
             score = max(12, min(120, skill_by_id[pid] + rng.randint(-25, 25)))
-            line = line_by_id[pid]
+            # Lines are Wii-only — Switch and mixed cups are lineless, so seeded
+            # history must not carry a handicap on them either (a non-zero line
+            # on a lineless cup is exactly the invariant the QA gate audits).
+            line = line_by_id[pid] if edition == "wii" else 0
             rows.append(
                 {
                     "player_id": pid,
@@ -146,10 +182,20 @@ def _insert_completed_cups(conn, rng, player_ids):
 
         notes = None if c % 3 else f"Staging demo cup #{c + 1}"
         cur = conn.execute(
-            "INSERT INTO cups (date, notes, status) VALUES (?, ?, 'completed')",
-            (date_utc, notes),
+            "INSERT INTO cups (date, notes, status, game_edition, first_edition) "
+            "VALUES (?, ?, 'completed', ?, ?)",
+            (date_utc, notes, edition, first_edition),
         )
         cup_id = cur.lastrowid
+        # Mixed cups get real race rows so the completion/edit screens have
+        # per-race console dropdowns to exercise. (Pure seeded cups keep their
+        # existing race-less shape.)
+        if edition == MIXED_EDITION:
+            for race_number, course in mixed_race_maps(first_edition):
+                conn.execute(
+                    "INSERT INTO races (cup_id, race_number, map) VALUES (?, ?, ?)",
+                    (cup_id, race_number, course),
+                )
         for r in rows:
             conn.execute(
                 "INSERT INTO scores (cup_id, player_id, score, line, line_score, won_tiebreaker) "
@@ -159,11 +205,13 @@ def _insert_completed_cups(conn, rng, player_ids):
 
 
 def _insert_in_progress_cup(conn, rng, player_ids):
-    """Insert one in-progress cup (players joined, a few races played, no scores yet)."""
+    """Insert one in-progress MIXED cup, parked at the console swap (first-half
+    races played, none of the second half, no scores yet)."""
     date_utc = "2026-07-01 20:00:00"
     cur = conn.execute(
-        "INSERT INTO cups (date, status, voto_count) VALUES (?, 'in_progress', 0)",
-        (date_utc,),
+        "INSERT INTO cups (date, status, voto_count, game_edition, first_edition) "
+        "VALUES (?, 'in_progress', 0, ?, ?)",
+        (date_utc, MIXED_EDITION, IN_PROGRESS_FIRST_EDITION),
     )
     cup_id = cur.lastrowid
 

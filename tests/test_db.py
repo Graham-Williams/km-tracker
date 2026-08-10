@@ -93,6 +93,47 @@ def test_migration_adds_game_edition_to_existing_db(db_path):
     assert row["game_edition"] == "wii"  # existing row backfilled
 
 
+def test_migration_adds_first_edition_to_existing_db(db_path):
+    """A cups table created before mixed-edition cups gets first_edition (NULL
+    for existing rows, whose game_edition is left untouched). Idempotent."""
+    conn = get_connection(db_path)
+    conn.execute(
+        "CREATE TABLE cups (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "date DATETIME NOT NULL UNIQUE, notes TEXT, deleted_at DATETIME, "
+        "status TEXT NOT NULL DEFAULT 'completed', voto_count INTEGER NOT NULL DEFAULT 0, "
+        "game_edition TEXT NOT NULL DEFAULT 'wii')"
+    )
+    conn.execute("INSERT INTO cups (date) VALUES ('2026-01-01')")
+    conn.execute(
+        "INSERT INTO cups (date, game_edition) VALUES ('2026-01-02', 'mk8dx')"
+    )
+    conn.commit()
+    conn.close()
+
+    init_db(db_path)
+    init_db(db_path)  # idempotent — must not error on second run
+
+    conn = get_connection(db_path)
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(cups)")}
+    assert "first_edition" in cols
+    rows = conn.execute(
+        "SELECT game_edition, first_edition FROM cups ORDER BY id"
+    ).fetchall()
+    conn.close()
+    # Existing rows: first_edition NULL, game_edition preserved.
+    assert [r["first_edition"] for r in rows] == [None, None]
+    assert [r["game_edition"] for r in rows] == ["wii", "mk8dx"]
+
+
+def test_cups_first_edition_column_is_nullable(db_path):
+    init_db(db_path)
+    conn = get_connection(db_path)
+    columns = {row["name"]: row for row in conn.execute("PRAGMA table_info(cups)")}
+    conn.close()
+    assert "first_edition" in columns
+    assert columns["first_edition"]["notnull"] == 0  # NULL for every pure cup
+
+
 def test_migration_adds_default_character_columns_to_existing_db(db_path):
     """A players table created without the default-character columns gets them
     (NULL for existing rows) and the migration is idempotent."""
