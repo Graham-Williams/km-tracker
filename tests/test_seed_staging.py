@@ -53,6 +53,64 @@ def test_seed_populates_expected_players_and_cups(tmp_path):
     assert bad == 0
 
 
+def test_seed_includes_mixed_cups_with_valid_shape(tmp_path):
+    """Staging must carry mixed-cup data for the QA gate to hammer: completed
+    mixed cups in BOTH console orders, an in-progress mixed cup parked at the
+    swap, and no lines on any lineless (non-Wii) cup."""
+    from maps import MIXED_EDITION, TRACK_SETS, other_edition
+
+    db_path = str(tmp_path / "km_tracker.staging.db")
+    assert seed_staging.main(["--db", db_path, "--reset"]) == 0
+
+    conn = get_connection(db_path)
+    try:
+        cups = conn.execute(
+            "SELECT id, status, game_edition, first_edition FROM cups ORDER BY id"
+        ).fetchall()
+        races = conn.execute(
+            "SELECT cup_id, race_number, map FROM races ORDER BY cup_id, race_number"
+        ).fetchall()
+        lined_lineless = conn.execute(
+            "SELECT COUNT(*) AS n FROM scores s JOIN cups c ON c.id = s.cup_id "
+            "WHERE c.game_edition != 'wii' AND s.line != 0"
+        ).fetchone()["n"]
+    finally:
+        conn.close()
+
+    mixed = [c for c in cups if c["game_edition"] == MIXED_EDITION]
+    completed_mixed = [c for c in mixed if c["status"] == "completed"]
+    in_progress = [c for c in cups if c["status"] == "in_progress"]
+
+    assert completed_mixed, "expected at least one completed mixed cup"
+    # Both coin-flip orders present so history shows both order badges.
+    assert {c["first_edition"] for c in completed_mixed} == {"wii", "mk8dx"}
+    # Every pure cup leaves first_edition NULL.
+    for c in cups:
+        if c["game_edition"] != MIXED_EDITION:
+            assert c["first_edition"] is None
+
+    # The in-progress cup is mixed and sits exactly at the console swap.
+    assert len(in_progress) == 1
+    ip = in_progress[0]
+    assert ip["game_edition"] == MIXED_EDITION
+    assert ip["first_edition"] == seed_staging.IN_PROGRESS_FIRST_EDITION
+    ip_races = [r for r in races if r["cup_id"] == ip["id"]]
+    assert len(ip_races) == len(seed_staging.IN_PROGRESS_MAPS) == 2
+
+    # Every seeded race sits on the correct console's track list (2-2 blocks).
+    by_cup = {c["id"]: c for c in cups}
+    for r in races:
+        cup = by_cup[r["cup_id"]]
+        first = cup["first_edition"]
+        expected = first if r["race_number"] <= 2 else other_edition(first)
+        assert r["map"] in TRACK_SETS[expected], (
+            f"cup {cup['id']} race {r['race_number']} ({r['map']}) "
+            f"is not a {expected} course"
+        )
+
+    assert lined_lineless == 0
+
+
 def test_seed_is_deterministic(tmp_path):
     """Same seed -> identical scores, so staging looks stable across reseeds."""
     a = str(tmp_path / "a.staging.db")

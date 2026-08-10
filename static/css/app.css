@@ -700,6 +700,72 @@ input[type="checkbox"] {
   }
 }
 
+/* ---------- Photo mix-and-match mapping panel ---------- */
+/* After extraction, one dropdown per roster player mapping them to the
+   highlighted (human) rows the model read off the photo, so mis-matches are
+   easy to correct before submit. photo_score.js populates + toggles this. */
+.photo-mapping {
+  margin-top: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-2);
+}
+
+.photo-mapping[hidden] {
+  display: none;
+}
+
+.photo-mapping-title {
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--color-muted);
+  margin-bottom: var(--space-2);
+}
+
+.photo-map-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) 0;
+}
+
+.photo-map-name {
+  flex: 1;
+  font-size: 0.9rem;
+}
+
+.photo-map-select {
+  flex: 1;
+  max-width: 60%;
+}
+
+/* Read-only reference rows (partial-half photo — a mixed cup). No control,
+   no write path: this is a transcription of what the model read, nothing more. */
+.photo-map-readonly {
+  font-size: 0.9rem;
+  color: var(--color-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Informational banners inside the panel. */
+.photo-map-warning,
+.photo-map-unassigned {
+  margin-top: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  font-size: 0.85rem;
+  font-weight: 600;
+  background: var(--color-danger-soft);
+  color: var(--color-danger);
+  border: 1px solid var(--color-danger);
+}
+
+.photo-map-warning[hidden],
+.photo-map-unassigned[hidden] {
+  display: none;
+}
+
 /* ---------- Empty state ---------- */
 .empty {
   text-align: center;

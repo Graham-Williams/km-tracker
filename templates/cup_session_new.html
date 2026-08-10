@@ -17,6 +17,7 @@
         flex: 1; display: flex; align-items: center; gap: var(--space-2); margin: 0;
     }
     .player-line { font-size: 0.85rem; color: var(--color-muted); }
+    .edition-hint { font-size: 0.8rem; margin-top: var(--space-1); }
     .add-player { display: flex; gap: var(--space-2); align-items: center; }
     .add-player select { flex: 1; }
 </style>
@@ -31,6 +32,10 @@
             <option value="{{ value }}"{% if value == default_edition %} selected{% endif %}>{{ label }}</option>
             {% endfor %}
         </select>
+        <p class="muted edition-hint">
+            <strong>Wii + Switch</strong> is a mixed cup: 2 races on one console, then 2 on the
+            other. A coin flip decides which console goes first.
+        </p>
     </div>
 
     <div>

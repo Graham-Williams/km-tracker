@@ -15,7 +15,8 @@ CREATE TABLE IF NOT EXISTS cups (
     deleted_at DATETIME,
     status TEXT NOT NULL DEFAULT 'completed',
     voto_count INTEGER NOT NULL DEFAULT 0,
-    game_edition TEXT NOT NULL DEFAULT 'wii'
+    game_edition TEXT NOT NULL DEFAULT 'wii',
+    first_edition TEXT              -- mixed cups only: coin-flip winner ('wii'|'mk8dx'); NULL for pure cups
 );
 
 CREATE TABLE IF NOT EXISTS cup_players (

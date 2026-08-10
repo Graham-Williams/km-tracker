@@ -294,9 +294,13 @@ cloudflared (one tunnel) ─┤
   `km_tracker.db` is never touched by staging. Staging is driven purely by its
   `DB_PATH` env var (`docker-compose.staging.yml`); `entrypoint.sh` runs `init_db()`
   against it on startup (idempotent schema create).
-- **Separate Cloudflare Access application → separate AUD.** Staging gets its own
-  Access app, so its own Application Audience (AUD) tag, provided to the container
-  as `STAGING_CF_ACCESS_AUD`. **Do not reuse the prod `CF_ACCESS_AUD`.**
+- **Sign-in: the shared app-password gate, same as prod.** Staging is gated by
+  `APP_PASSWORD` (inherited from prod unless you set `STAGING_APP_PASSWORD`).
+  Its separate Cloudflare Access application was **retired 2026-08-05** and the
+  edge app deleted, so the password gate is staging's only gate and
+  `STAGING_CF_ACCESS_AUD` stays blank. If you ever re-gate staging with an
+  Access PIN, give it its **own** AUD — **do not reuse the prod
+  `CF_ACCESS_AUD`.**
 
 ### Cloudflare dashboard steps (human, one-time)
 
@@ -310,21 +314,29 @@ cloudflared (one tunnel) ─┤
      `*.graham-williams.com` (one label), so a two-level host like
      `staging.km.graham-williams.com` fails the TLS handshake at the edge and
      would require paid Advanced Certificate Manager.
-2. **Add a self-hosted Access application** (Zero Trust → Access → Applications →
-   Add an application → Self-hosted):
-   - Application domain: `staging-km.graham-williams.com`.
-   - Add the **same Allow policy** you use for prod (scope to your email(s)).
-3. Copy the **new app's AUD** (that Access app → Overview → Application Audience
-   (AUD) Tag) into the box `.env` as:
+2. **Sign-in — nothing to do in Cloudflare.** Staging is gated by the app-level
+   shared password, so it needs **no** Access application. Just make sure
+   `APP_PASSWORD` is set in the box `.env` (prod already requires it) and leave
+   `STAGING_CF_ACCESS_AUD` blank. Set `STAGING_APP_PASSWORD` only if you want
+   staging to use a *different* password from prod.
+
+   <details><summary>Re-gating staging with a Cloudflare Access PIN instead (not the current setup)</summary>
+
+   Add a self-hosted Access application (Zero Trust → Access → Applications →
+   Add an application → Self-hosted) with application domain
+   `staging-km.graham-williams.com` and the same Allow policy you use for prod,
+   then copy the **new app's AUD** (that Access app → Overview → Application
+   Audience (AUD) Tag) into the box `.env` as:
 
    ```
    STAGING_CF_ACCESS_AUD=<the staging app's AUD>
    ```
 
-   Also ensure `CF_ACCESS_TEAM_DOMAIN` is set (shared with prod). Leaving
-   `STAGING_CF_ACCESS_AUD` blank disables app-side JWT verification for staging
-   (Cloudflare Access still gates it at the edge, but set the AUD for
-   defense-in-depth parity with prod).
+   Also ensure `CF_ACCESS_TEAM_DOMAIN` is set (shared with prod). Note that
+   `break-staging` and any other automated agent can't complete an email PIN,
+   which is part of why the PIN was retired.
+
+   </details>
 
 ### Deploy (prod + staging together)
 
@@ -343,7 +355,8 @@ docker compose -f docker-compose.yml -f docker-compose.access.yml \
 `CF_ACCESS_TEAM_DOMAIN`, `CF_ACCESS_AUD`) onto the prod `app`;
 `docker-compose.staging.yml` adds the `staging-app` service with its own
 `DB_PATH`, `APP_HOST=staging-km.graham-williams.com`,
-`CF_ACCESS_AUD=${STAGING_CF_ACCESS_AUD}`, and `APP_ENV=staging`.
+`CF_ACCESS_AUD=${STAGING_CF_ACCESS_AUD:-}` (blank — see sign-in above), and
+`APP_ENV=staging`.
 
 `APP_ENV` tells the app which environment it is: `staging` prefixes the browser
 tab title with `[STG] ` (and is exposed to all templates as

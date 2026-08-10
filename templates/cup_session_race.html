@@ -5,9 +5,9 @@
 {% block heading %}Cup Session{% endblock %}
 {% block subtitle %}
 {% if current_race <= max_races %}
-<p class="page-subtitle">Race {{ current_race }} of {{ max_races }} · {{ edition_label }}</p>
+<p class="page-subtitle">Race {{ current_race }} of {{ max_races }} · {{ race_edition_label }}{% if is_mixed %} <span class="console-order">({{ cup_edition_label }})</span>{% endif %}</p>
 {% else %}
-<p class="page-subtitle">All races complete! · {{ edition_label }}</p>
+<p class="page-subtitle">All races complete! · {{ cup_edition_label }}</p>
 {% endif %}
 {% endblock %}
 
@@ -18,6 +18,22 @@
     .completed-races li { font-size: 0.9rem; color: var(--color-text); padding: 0.15rem 0; }
     .completed-races .race-num { color: var(--color-faint); min-width: 4rem; display: inline-block; }
     .veto-status { font-size: 0.85rem; color: var(--color-muted); margin-bottom: var(--space-1); }
+
+    /* Mixed cups: per-race console badges + the swap banner */
+    .console-order { color: var(--color-faint); font-size: 0.85em; }
+    .console-badge {
+        display: inline-block; font-size: 0.7rem; font-weight: 600;
+        padding: 0.05rem 0.4rem; border-radius: var(--radius-sm);
+        border: 1px solid var(--color-border); color: var(--color-muted);
+        margin-left: var(--space-1); vertical-align: middle;
+    }
+    .console-badge.current { border-color: var(--color-text); color: var(--color-text); }
+    .swap-banner {
+        border: 1px solid var(--color-border); border-radius: var(--radius-md);
+        background: var(--color-surface-2); padding: var(--space-3);
+        margin-bottom: var(--space-4); font-size: 0.9rem;
+    }
+    .swap-banner strong { color: var(--color-text); }
 
     /* Wheel */
     .wheel-container {
@@ -108,6 +124,13 @@
     }
     .coin.success { background: var(--color-success-soft); color: var(--color-success); }
     .coin.fail { background: var(--color-danger-soft); color: var(--color-danger); }
+    /* Console flip: same coin, but it lands on a console NAME rather than a
+       ✓/✗ glyph — so it needs to be wider and the text smaller. */
+    .coin.console {
+        width: auto; min-width: 64px; padding: 0 var(--space-3);
+        border-radius: var(--radius-lg); font-size: 1.1rem;
+    }
+    .coin.console.landed { background: var(--color-success-soft); color: var(--color-success); }
     .coin.flipping {
         animation: coinFlip 1.2s ease-out;
     }
@@ -132,6 +155,21 @@
 
     /* Cancel link */
     .cancel-link { display: block; margin-top: var(--space-5); text-align: center; color: var(--color-danger); font-size: 0.85rem; cursor: pointer; }
+
+    /* Mid-cup roster editor */
+    .roster-editor { margin-top: var(--space-3); font-size: 0.85rem; }
+    .roster-editor > summary { cursor: pointer; color: var(--color-muted); user-select: none; }
+    .roster-editor > summary:hover { color: var(--color-text); }
+    .roster-editor .roster-list { list-style: none; margin: var(--space-2) 0; padding: 0; }
+    .roster-editor .roster-list li { display: flex; align-items: center; justify-content: space-between; padding: 0.2rem 0; }
+    .roster-editor .roster-remove {
+        background: none; border: none; color: var(--color-danger); cursor: pointer;
+        font-size: 1rem; line-height: 1; padding: 0 0.35rem; margin: 0;
+    }
+    .roster-editor .roster-remove:disabled { color: var(--color-faint); cursor: default; }
+    .roster-editor .roster-add { display: flex; gap: var(--space-2); align-items: center; margin-top: var(--space-2); }
+    .roster-editor .roster-add select { flex: 1; }
+    .roster-editor .roster-hint { color: var(--color-faint); font-size: 0.8rem; margin-top: var(--space-1); }
 </style>
 {% endblock %}
 
@@ -141,7 +179,7 @@
         {% if races %}
         <ul class="completed-races">
             {% for race in races %}
-            <li><span class="race-num">Race {{ race.race_number }}:</span> {{ race.map }}</li>
+            <li><span class="race-num">Race {{ race.race_number }}:</span> {{ race.map }}{% if is_mixed %} <span class="console-badge">{{ race_editions[race.race_number]|edition_label }}</span>{% endif %}</li>
             {% endfor %}
         </ul>
         {% endif %}
@@ -154,7 +192,54 @@
             {{ p.name }} (<strong class="hv-count" data-player-id="{{ p.player_id }}">{{ max_half_vetoes - p.half_veto_count }}</strong>){% if not loop.last %}, {% endif %}
             {% endfor %}
         </div>
+
+        <!-- Mid-cup roster editing: add/remove players while the cup is in
+             progress. Plain form POSTs that redirect back here, so the reloaded
+             page always reflects the live roster. -->
+        <details class="roster-editor">
+            <summary>Edit players</summary>
+            <ul class="roster-list">
+                {% for p in players %}
+                <li>
+                    <span>{{ p.name }}</span>
+                    <form method="post" action="{{ url_for('cup_session_remove_player', cup_id=cup.id) }}" style="margin:0">
+                        <input type="hidden" name="player_id" value="{{ p.player_id }}">
+                        <button type="submit" class="roster-remove" title="Remove {{ p.name }}"
+                            aria-label="Remove {{ p.name }}"
+                            {% if players|length <= min_roster_size %}disabled{% endif %}>&times;</button>
+                    </form>
+                </li>
+                {% endfor %}
+            </ul>
+            {% if available_players %}
+            <form method="post" action="{{ url_for('cup_session_add_player', cup_id=cup.id) }}" class="roster-add">
+                <select name="player_id" required aria-label="Player to add">
+                    <option value="" disabled selected>Add a player…</option>
+                    {% for ap in available_players %}
+                    <option value="{{ ap.id }}">{{ ap.name }}</option>
+                    {% endfor %}
+                </select>
+                <button type="submit" class="btn btn-secondary btn-sm">Add</button>
+            </form>
+            {% else %}
+            <p class="roster-hint">All players are already in this cup.</p>
+            {% endif %}
+            {% if players|length <= min_roster_size %}
+            <p class="roster-hint">A cup must keep at least {{ min_roster_size }} player{{ 's' if min_roster_size != 1 else '' }}.</p>
+            {% endif %}
+        </details>
     </div>
+
+    {% if is_mixed and current_race > races_per_block %}
+    <!-- Second half of a mixed cup: the console scoreboard restarted at zero,
+         so the first half's totals only exist in the photo they took at the
+         swap. Keep that visible for the rest of the cup. -->
+    <div class="swap-banner" id="second-console-banner">
+        📸 Second console (<strong>{{ race_edition_label }}</strong>). Its scoreboard started from
+        <strong>zero</strong> — the first {{ races_per_block }} races' points live only in the photo you
+        took at the swap. Add both halves together when you enter final scores.
+    </div>
+    {% endif %}
 
     {% if current_race <= max_races %}
     <!-- Wheel -->
@@ -249,6 +334,41 @@
         </div>
     </div>
 
+    {% if show_console_flip %}
+    <!-- Console Coin Flip (mixed cups, before race 1).
+         Pure theater: the outcome was decided server-side at cup creation and
+         is already rendered below from cups.first_edition, so this modal can
+         never change it — a refresh replays nothing (sessionStorage guard) and
+         re-rolls nothing. -->
+    <div class="modal-overlay" id="console-flip-modal">
+        <div class="modal">
+            <h3>Which console first?</h3>
+            <div class="coin console" id="console-coin">?</div>
+            <p class="coin-result" id="console-flip-message"></p>
+            <div class="modal-buttons">
+                <button class="btn btn-primary" id="console-flip-ok-btn" style="display:none">Let's go</button>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
+    {% if show_swap_reminder %}
+    <!-- Console Swap Reminder (mixed cups, entering the second half). -->
+    <div class="modal-overlay" id="swap-reminder-modal">
+        <div class="modal">
+            <h3>📸 Photograph the results now</h3>
+            <p>
+                Photograph the results screen <strong>before</strong> you switch to
+                <strong>{{ next_console_label }}</strong> — the second console starts scoring from
+                zero, so these points won't be on screen again.
+            </p>
+            <div class="modal-buttons">
+                <button class="btn btn-primary" id="swap-reminder-ok-btn">OK, got it</button>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
     <!-- Cancel Cup Modal -->
     <div class="modal-overlay" id="cancel-modal">
         <div class="modal">
@@ -276,6 +396,11 @@
         var CUP_ID = {{ cup.id }};
         var COURSES = {{ all_courses|tojson }};
         var PLAYED_MAPS = {{ played_maps|tojson }};
+        // The console THIS race is on. On a mixed cup the wheel changes track
+        // list mid-cup, so a page left open across the swap would hold the wrong
+        // COURSES; the spin response echoes its edition and we reload on
+        // mismatch rather than indexing into the wrong list.
+        var RACE_EDITION = {{ race_edition|tojson }};
         var NUM_SLICES = COURSES.length;
         var SLICE_ANGLE = 360 / NUM_SLICES;
         var currentMap = null;
@@ -484,6 +609,14 @@
                     .then(function(r) { return r.json(); })
                     .then(function(data) {
                         if (data.error) { alert(data.error); spinBtn.disabled = false; return; }
+                        // Stale page across a mixed cup's console swap: the
+                        // result belongs to a different track list, so data.index
+                        // means nothing here. Reload instead of showing a wrong
+                        // course.
+                        if (data.edition && RACE_EDITION && data.edition !== RACE_EDITION) {
+                            window.location.reload();
+                            return;
+                        }
                         currentMap = data.map;
                         currentIndex = data.index;
                         landOnIndex(data.index);
@@ -711,7 +844,18 @@
                     body: JSON.stringify({ map: currentMap }),
                 }).then(function(r) { return r.json(); })
                   .then(function(data) {
-                    if (data.error) { alert(data.error); return; }
+                    if (data.error) {
+                        // Recovery for a page left open across a mixed cup's
+                        // console swap. The spin handler catches that case via
+                        // the edition echo, but Manual override picks straight
+                        // out of this page's (now stale) COURSES — the server
+                        // correctly rejects the off-half course, and without a
+                        // reload the page would sit here failing forever.
+                        // Reloading re-renders the correct console's wheel.
+                        alert(data.error);
+                        window.location.reload();
+                        return;
+                    }
                     // Add to played maps
                     PLAYED_MAPS.push(currentMap);
                     if (data.complete) {
@@ -719,8 +863,90 @@
                     } else {
                         window.location.reload();
                     }
+                }).catch(function () {
+                    // A non-JSON response (e.g. a 500 HTML error page) or a
+                    // dropped connection rejects r.json(). Without this the
+                    // page would just sit there doing nothing — the same
+                    // dead-end the error-response reload above removes, via a
+                    // different failure path. Reload so the page re-syncs with
+                    // whatever the server actually recorded.
+                    window.location.reload();
                 });
             });
         }
+
+        // --- Mixed cups: console coin flip (before race 1) ---
+        // The winner is ALREADY decided and persisted server-side; this only
+        // animates it. sessionStorage suppresses a REPLAY on refresh — it is
+        // never the source of the outcome, so clearing it can at worst replay
+        // the same animation, never change which console goes first.
+        (function () {
+            var modal = document.getElementById("console-flip-modal");
+            if (!modal) return;
+            var coin = document.getElementById("console-coin");
+            var msgEl = document.getElementById("console-flip-message");
+            var okBtn = document.getElementById("console-flip-ok-btn");
+            var firstLabel = {{ (first_edition_label or "")|tojson }};
+            var nextLabel = {{ (next_console_label or "")|tojson }};
+            var storageKey = "km-console-flip-" + CUP_ID;
+
+            var alreadyShown = false;
+            try { alreadyShown = sessionStorage.getItem(storageKey) === "1"; }
+            catch (e) { alreadyShown = false; }
+            if (alreadyShown) return;
+
+            function reveal() {
+                coin.textContent = firstLabel;
+                coin.classList.add("landed");
+                SFX.success();
+            }
+            function revealMessage() {
+                msgEl.textContent = firstLabel + " first, then " + nextLabel + ".";
+                msgEl.className = "coin-result success";
+                okBtn.style.display = "";
+            }
+
+            openModal("console-flip-modal");
+            if (skipAnim) {
+                reveal();
+                revealMessage();
+            } else {
+                requestAnimationFrame(function () {
+                    coin.classList.add("flipping");
+                    SFX.whoosh();
+                });
+                setTimeout(reveal, 1100);
+                setTimeout(revealMessage, 1300);
+            }
+            okBtn.onclick = function () {
+                closeModal("console-flip-modal");
+                try { sessionStorage.setItem(storageKey, "1"); } catch (e) {}
+            };
+        })();
+
+        // --- Mixed cups: swap reminder (entering the second half) ---
+        // Auto-opened once, dismissed with OK. Server-side it's gated purely on
+        // "2 races played", which is true for every load of the race-3 page —
+        // so without this sessionStorage one-shot (mirroring the flip modal's)
+        // a refresh would re-block the controls. Nothing is lost by
+        // suppressing it: the persistent #second-console-banner carries the
+        // same message for the rest of the cup.
+        (function () {
+            var modal = document.getElementById("swap-reminder-modal");
+            if (!modal) return;
+            var storageKey = "km-swap-reminder-" + CUP_ID;
+            var okBtn = document.getElementById("swap-reminder-ok-btn");
+            if (okBtn) {
+                okBtn.addEventListener("click", function () {
+                    closeModal("swap-reminder-modal");
+                    try { sessionStorage.setItem(storageKey, "1"); } catch (e) {}
+                });
+            }
+            var alreadyShown = false;
+            try { alreadyShown = sessionStorage.getItem(storageKey) === "1"; }
+            catch (e) { alreadyShown = false; }
+            if (alreadyShown) return;
+            openModal("swap-reminder-modal");
+        })();
     </script>
 {% endblock %}
