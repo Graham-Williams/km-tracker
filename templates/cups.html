@@ -15,7 +15,7 @@
     {% for cup in cups %}
     <li class="list-item" style="align-items:flex-start;">
         <div class="list-content">
-            <span class="list-title"><time datetime="{{ cup.date }}">{{ cup.date }}</time> <span class="badge badge-info">{{ cup.game_edition|edition_label }}</span></span>
+            <span class="list-title"><time datetime="{{ cup.date }}">{{ cup.date }}</time> <span class="badge badge-info">{{ cup|cup_edition_label }}</span></span>
             {% if cup.notes %}
             <span class="list-meta">{{ cup.notes }}</span>
             {% endif %}

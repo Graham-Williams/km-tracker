@@ -3,7 +3,7 @@
 {% block title %}Complete Cup — KM Tracker{% endblock %}
 {% block back %}<a class="back-link" href="/">← Home</a>{% endblock %}
 {% block heading %}Complete Cup{% endblock %}
-{% block subtitle %}<p class="page-subtitle">{{ edition_label }} · Confirm courses, enter final scores, and submit the cup.</p>{% endblock %}
+{% block subtitle %}<p class="page-subtitle">{{ cup_edition_label }} · Confirm courses, enter final scores, and submit the cup.</p>{% endblock %}
 
 {% block styles %}
 <style>
@@ -16,7 +16,14 @@
     .race-item label {
         min-width: 4.5rem; font-size: 0.9rem; color: var(--color-muted); margin: 0;
     }
-    .race-item select { flex: 1; }
+    .race-item select { flex: 1; min-width: 0; }
+    .mixed-score-note { font-size: 0.85rem; margin-bottom: var(--space-2); }
+    .photo-half-warning {
+        font-size: 0.85rem; margin-bottom: var(--space-2);
+        padding: var(--space-2) var(--space-3);
+        border: 1px solid var(--color-border); border-radius: var(--radius-sm);
+        background: var(--color-surface-2); color: var(--color-text);
+    }
 
     .score-row {
         display: flex; align-items: center; gap: var(--space-2);
@@ -68,12 +75,14 @@
     <div>
         <div class="section-heading">Races</div>
         <ul class="race-list">
-            {% for race in races %}
+            {# Each race offers only ITS OWN console's track list — on a mixed
+               cup race 3's dropdown must not list Wii courses. #}
+            {% for choice in race_choices %}
             <li class="race-item">
-                <label for="race-{{ race.race_number }}">Race {{ race.race_number }}:</label>
-                <select name="race_{{ race.race_number }}" id="race-{{ race.race_number }}">
-                    {% for course in all_courses %}
-                    <option value="{{ course }}" {% if course == race.map %}selected{% endif %}>{{ course }} ({{ loop.index }})</option>
+                <label for="race-{{ choice.race_number }}">Race {{ choice.race_number }}{% if is_mixed %} ({{ choice.edition_label }}){% endif %}:</label>
+                <select name="race_{{ choice.race_number }}" id="race-{{ choice.race_number }}">
+                    {% for course in choice.courses %}
+                    <option value="{{ course }}" {% if course == choice.map %}selected{% endif %}>{{ course }} ({{ loop.index }})</option>
                     {% endfor %}
                 </select>
             </li>
@@ -83,9 +92,17 @@
 
     <div>
         <div class="section-heading">Scores</div>
+        {% if is_mixed %}
+        <p class="muted mixed-score-note">
+            📸 Mixed cup — the second console's scoreboard started from zero. Enter each player's
+            <strong>combined total</strong> across both halves (add the photo you took at the swap to
+            what's on screen now).
+        </p>
+        {% endif %}
         <div id="score-rows">
-        {# Lines are a Wii-only mechanic; Switch cups are lineless. #}
-        {% set lines_on = cup.game_edition == 'wii' %}
+        {# Lines are a Wii-only mechanic; Switch AND mixed cups are lineless.
+           `lines_on` comes from the route (cup_uses_lines) — do not re-derive it
+           from a game_edition string test here. #}
         {% for player in players %}
         {% set existing = existing_scores.get(player.player_id) %}
         {% set show_line = player.has_line and lines_on %}
@@ -108,6 +125,17 @@
 
     <div id="photo-score">
         <div class="section-heading">{% if photo_extraction_enabled %}Score from photo{% else %}Attach photo{% endif %}</div>
+        {% if is_mixed %}
+        {# The photographed screen is the SECOND console's only — its numbers are
+           half totals. Auto-fill is disabled server-side for mixed cups; this
+           says why, right where the photo is taken. #}
+        <p class="photo-half-warning">
+            ⚠️ This photo shows the <strong>{{ second_console_label }}</strong> half only — the
+            {{ first_console_label }} screen started over at zero. Scores are <strong>not</strong>
+            filled in automatically for a mixed cup: add both halves together and enter each
+            player's combined total.
+        </p>
+        {% endif %}
         <div class="field-row">
             {# Buttons ship disabled; photo_score.js enables + wires them. If the
                script fails to load, the picker can't open — so a photo can never

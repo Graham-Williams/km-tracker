@@ -8,7 +8,8 @@ A tracker and suite of tools for Kario Mart game nights.
 - **Cup & Score Tracking** — record cups with per-player scores, placements, and tiebreaker results
 - **Lines (Handicaps)** — optional per-player handicap that adjusts scores and auto-adjusts after 3-player cups based on placement
 - **Cup Sessions** — guided race-by-race cup flow with a spinning wheel course picker, half-veto/voto mechanics, and score entry at the end
-- **Game Editions** — choose **Mario Kart Wii** (32 tracks) or **Mario Kart 8 Deluxe** (96 tracks: 48 base + 48 Booster Course Pass) per cup session. Only the track list differs — all house rules (race count, vetoes, votoes, line deltas) are identical across editions
+- **Game Editions** — choose **Mario Kart Wii** (32 tracks), **Mario Kart 8 Deluxe** (96 tracks: 48 base + 48 Booster Course Pass), or a mixed **Wii + Switch** cup per session. On a pure cup only the track list differs — all house rules (race count, vetoes, votoes, line deltas) are identical across editions
+- **Mixed Cups (Wii + Switch)** — a 4-race cup split across both consoles in blocks: a coin flip at cup creation picks which console goes first, then it's 2 races there and 2 on the other. The wheel, the course validation, and the "already played" list all follow the current race's console; a reminder prompts you to photograph the standings before the swap (the second console starts scoring from zero), and you enter one combined total per player at the end. Mixed cups are lineless
 - **Stats & Leaderboards** — track standings, wins, and trends across cups
 - **Game Night Utilities** — tools to assist with running sessions smoothly
 
@@ -63,7 +64,7 @@ backups/
 
 ### Schema Migrations
 
-Fresh databases are created from `schema.sql`. For changes to **existing** tables (which `CREATE TABLE IF NOT EXISTS` can't apply), `db.run_migrations()` runs on every startup (called from `init_db()`, which the Docker entrypoint invokes before serving). Each migration is guarded by a `PRAGMA table_info` check so it is idempotent and safe to run repeatedly against a populated production DB. Example: the `cups.game_edition` column (multi-edition support) is added via `ALTER TABLE ... ADD COLUMN game_edition TEXT NOT NULL DEFAULT 'wii'`, which backfills existing cups to Wii. To add a new migration, append another guarded step to `run_migrations()` and mirror the final shape in `schema.sql`.
+Fresh databases are created from `schema.sql`. For changes to **existing** tables (which `CREATE TABLE IF NOT EXISTS` can't apply), `db.run_migrations()` runs on every startup (called from `init_db()`, which the Docker entrypoint invokes before serving). Each migration is guarded by a `PRAGMA table_info` check so it is idempotent and safe to run repeatedly against a populated production DB. Example: the `cups.game_edition` column (multi-edition support) is added via `ALTER TABLE ... ADD COLUMN game_edition TEXT NOT NULL DEFAULT 'wii'`, which backfills existing cups to Wii; `cups.first_edition` (mixed cups' coin-flip winner) follows the same pattern as a nullable column, so pure cups need no backfill. To add a new migration, append another guarded step to `run_migrations()` and mirror the final shape in `schema.sql` — `tests/test_db.py::test_fresh_db_matches_migrated_db` compares a fresh DB against a migrated one and fails if you update only one.
 
 ### Staging Database
 

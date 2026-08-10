@@ -740,6 +740,14 @@ input[type="checkbox"] {
   max-width: 60%;
 }
 
+/* Read-only reference rows (partial-half photo — a mixed cup). No control,
+   no write path: this is a transcription of what the model read, nothing more. */
+.photo-map-readonly {
+  font-size: 0.9rem;
+  color: var(--color-muted);
+  font-variant-numeric: tabular-nums;
+}
+
 /* Informational banners inside the panel. */
 .photo-map-warning,
 .photo-map-unassigned {

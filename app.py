@@ -37,12 +37,17 @@ from werkzeug.routing import IntegerConverter, ValidationError
 from db import get_connection, get_db_path, init_db
 from extraction import ExtractionError, extract_standings, extraction_enabled
 from maps import (
+    BASE_EDITIONS,
     DEFAULT_EDITION,
     EDITION_LABELS,
+    MIXED_EDITION,
     TRACK_SETS,
+    VALID_CUP_EDITIONS,
     characters_for,
     courses_for,
     edition_label,
+    edition_order_label,
+    other_edition,
 )
 
 load_dotenv()
@@ -613,6 +618,20 @@ def edition_label_filter(value):
     return edition_label(value)
 
 
+@app.template_filter("cup_edition_label")
+def cup_edition_label_filter(cup):
+    """Render a CUP ROW's edition, including a mixed cup's console order.
+
+    Takes the row (not a string) because a mixed cup's label depends on both
+    game_edition and first_edition: '{{ cup|cup_edition_label }}' →
+    "Wii", "Switch", or "Wii → Switch". Any row passed here MUST have
+    first_edition in its SELECT — row_value raises if it doesn't, deliberately,
+    so a short SELECT is a loud failure rather than a Switch-first mixed cup
+    quietly labeled "Wii → Switch".
+    """
+    return edition_order_label(cup["game_edition"], row_value(cup, "first_edition"))
+
+
 def get_in_progress_cup():
     conn = get_connection()
     cup = conn.execute(
@@ -794,7 +813,8 @@ def delete_player(player_id):
 def cups():
     conn = get_connection()
     rows = conn.execute(
-        "SELECT id, date, notes, game_edition FROM cups WHERE deleted_at IS NULL AND status = 'completed' ORDER BY date DESC"
+        "SELECT id, date, notes, game_edition, first_edition FROM cups "
+        "WHERE deleted_at IS NULL AND status = 'completed' ORDER BY date DESC"
     ).fetchall()
     cup_ids = [r["id"] for r in rows]
     results = {}
@@ -925,7 +945,7 @@ def create_cup():
 def edit_cup(cup_id):
     conn = get_connection()
     cup = conn.execute(
-        "SELECT id, date, notes, game_edition FROM cups WHERE id = ? AND deleted_at IS NULL",
+        "SELECT id, date, notes, game_edition, first_edition FROM cups WHERE id = ? AND deleted_at IS NULL",
         (cup_id,),
     ).fetchone()
     if cup is None:
@@ -946,6 +966,9 @@ def edit_cup(cup_id):
         ).fetchone()
         is not None
     )
+    # Single source of truth for the line UI (the template used to re-derive it
+    # from a `game_edition == 'wii'` string test in two places, HTML and JS).
+    lines_on = cup_uses_lines(conn, cup_id)
     conn.close()
     scores_by_player = {s["player_id"]: s for s in existing_scores}
     cup_players = [{"id": s["player_id"], "name": s["name"], "line": s["line"], "has_line": s["has_line"]} for s in existing_scores]
@@ -957,6 +980,7 @@ def edit_cup(cup_id):
         all_players=all_players,
         scores_by_player=scores_by_player,
         lines_by_id=lines_by_id,
+        lines_on=lines_on,
         has_photo=has_photo,
     )
 
@@ -1211,7 +1235,14 @@ def calculate_placements(scores_with_lines):
 
 def cup_uses_lines(conn, cup_id):
     """Whether a cup uses the line handicap. Lines are a Wii-only mechanic;
-    Switch (mk8dx) — and any non-Wii edition — cups are lineless."""
+    Switch (mk8dx) — and any non-Wii edition — cups are lineless.
+
+    MIXED cups are lineless too, by Graham's house rule: the halves are scored
+    on two consoles and the line is worked out manually, so the app must never
+    touch players.line or write line_changes for a mixed cup. That falls out of
+    the `== 'wii'` test below — deliberately NOT special-cased, so there is one
+    rule and no second code path to keep in sync.
+    """
     row = conn.execute(
         "SELECT game_edition FROM cups WHERE id = ?", (cup_id,)
     ).fetchone()
@@ -1376,6 +1407,14 @@ def create_score():
             "SELECT line FROM players WHERE id = ?", (player_id,)
         ).fetchone()
         player_line = player["line"] if player else 0
+        # Lineless cups (Switch and MIXED) never carry a handicap. This route
+        # used to stamp players.line in unconditionally, which was a live write
+        # path around the "mixed cups are lineless" rule: POST /scores on a
+        # mixed cup persisted line=5 / line_score=score+5. The completion paths
+        # (cup_session_submit, update_cup) route through zero_lines_if_lineless
+        # for exactly this reason; the raw score routes must agree.
+        if not cup_uses_lines(conn, cup_id):
+            player_line = 0
         try:
             line_score_val = checked_line_score(score, player_line)
         except InvalidInput as e:
@@ -1421,7 +1460,7 @@ def edit_score(score_id):
 def update_score(score_id):
     conn = get_connection()
     existing = conn.execute(
-        "SELECT id, player_id FROM scores WHERE id = ?", (score_id,)
+        "SELECT id, cup_id, player_id FROM scores WHERE id = ?", (score_id,)
     ).fetchone()
     if existing is None:
         conn.close()
@@ -1447,6 +1486,10 @@ def update_score(score_id):
             "SELECT line FROM players WHERE id = ?", (existing["player_id"],)
         ).fetchone()
         player_line = player["line"] if player else 0
+        # Same lineless gate as create_score: editing a score on a Switch or
+        # MIXED cup must not re-stamp players.line onto the row.
+        if not cup_uses_lines(conn, existing["cup_id"]):
+            player_line = 0
         try:
             line_score_val = checked_line_score(score_int, player_line)
         except InvalidInput as e:
@@ -1484,6 +1527,114 @@ STALE_VETO_CHECK_RACE = 3
 # mid-cup removal must never drop the roster below this — a cup can never be
 # emptied of players.
 MIN_ROSTER_SIZE = 1
+
+# --- Mixed-edition cups ("2 Wii + 2 Switch") ---------------------------------
+#
+# A mixed cup plays in BLOCKS, never alternating: races 1..RACES_PER_BLOCK on
+# the console the coin flip picked at cup creation (cups.first_edition), then
+# the remaining races on the other one. Exactly one console swap per cup.
+#
+# The per-race edition is DERIVED, never stored per race. `races` rows are only
+# INSERTed as races are played, so a races.game_edition column could never
+# answer "which console is the NEXT race on?" — and the wheel has to be drawn
+# before that row exists. Deriving from (game_edition, first_edition) makes
+# edition_for_race total over race numbers 1..MAX_RACES and makes the 2-2 split
+# structurally unbreakable: there is no writable state that could hold a 3-1.
+RACES_PER_BLOCK = MAX_RACES // 2
+
+
+_REQUIRED = object()
+
+
+def row_value(row, key, default=_REQUIRED):
+    """Read a column from a sqlite3.Row, LOUDLY by default.
+
+    sqlite3.Row raises IndexError for an absent column, and cup rows are fetched
+    by a dozen routes with differing column lists — so this used to swallow that
+    and return None. That was the wrong trade: a route that forgot to SELECT
+    `first_edition` would hand None to edition_for_race, which falls back to
+    DEFAULT_EDITION, and a **Switch-first mixed cup would silently render and
+    validate as Wii-first** with no error anywhere. Reachable today via the
+    globally-registered `cup_edition_label` Jinja filter on a short-SELECT row.
+
+    So: omitting `default` means the column is REQUIRED and a missing one raises.
+    Pass an explicit `default` only where absence is genuinely expected. The
+    documented contract stands — every route that SELECTs a cup row for edition
+    purposes must include `first_edition`; this makes violating it a loud 500
+    rather than quiet data corruption.
+    """
+    if row is not None:
+        try:
+            return row[key]
+        except (IndexError, KeyError):
+            pass
+    if default is _REQUIRED:
+        raise KeyError(
+            f"row is missing required column {key!r} — add it to this route's "
+            f"SELECT (pass an explicit default if absence is expected)"
+        )
+    return default
+
+
+def flip_first_console():
+    """Coin-flip the console a mixed cup starts on. Called EXACTLY once, at cup
+    creation; the result is persisted in cups.first_edition and never re-rolled
+    (a refresh must not change which console goes first). Wrapped in its own
+    named function so tests can monkeypatch it deterministically instead of
+    stubbing random.choice globally."""
+    return random.choice(BASE_EDITIONS)
+
+
+def edition_for_race(cup_edition, first_edition, race_number):
+    """Which console race `race_number` is played on.
+
+    Pure cups: always the cup's own edition. Mixed cups: `first_edition` for
+    races 1..RACES_PER_BLOCK, the other console after that. A hand-edited
+    'mixed' row with a NULL/garbage first_edition falls back deterministically
+    to DEFAULT_EDITION — never re-flips, never 500s.
+    """
+    if cup_edition != MIXED_EDITION:
+        return cup_edition
+    first = first_edition if first_edition in BASE_EDITIONS else DEFAULT_EDITION
+    return first if race_number <= RACES_PER_BLOCK else other_edition(first)
+
+
+def race_edition(cup, race_number):
+    """edition_for_race for a cup ROW (needs game_edition; first_edition optional)."""
+    return edition_for_race(
+        cup["game_edition"], row_value(cup, "first_edition"), race_number
+    )
+
+
+def courses_for_race(cup, race_number):
+    """The track list a given race of this cup may draw from / record."""
+    return courses_for(race_edition(cup, race_number))
+
+
+def race_editions_map(cup):
+    """{race_number: edition} for every race of the cup, e.g.
+    {1: 'wii', 2: 'wii', 3: 'mk8dx', 4: 'mk8dx'}. Used for per-race console
+    badges in the templates."""
+    return {n: race_edition(cup, n) for n in range(1, MAX_RACES + 1)}
+
+
+def played_maps_for_edition(cup, races, edition):
+    """Maps already played ON THIS CONSOLE.
+
+    Seven course names exist in BOTH track lists (Rainbow Road, Bowser's Castle,
+    Mario Circuit, DS Peach Gardens, GCN DK Mountain, GCN Waluigi Stadium,
+    SNES Mario Circuit 3). Excluding played maps cup-wide would mean playing Wii
+    Rainbow Road in race 1 silently removed the (different) MK8DX Rainbow Road
+    from the Switch half's pool — and greyed the wrong wheel slice. Filtering per
+    console keeps each half's pool correct. `races` rows need race_number + map.
+    """
+    return [
+        r["map"] for r in races if race_edition(cup, r["race_number"]) == edition
+    ]
+
+
+def is_mixed_cup(cup):
+    return cup["game_edition"] == MIXED_EDITION
 
 
 def increment_voto(conn, cup_id):
@@ -1599,8 +1750,14 @@ def cup_session_create():
         return redirect(url_for("cup_session_new"))
 
     edition = request.form.get("game_edition", DEFAULT_EDITION)
-    if edition not in TRACK_SETS:
+    if edition not in VALID_CUP_EDITIONS:
         edition = DEFAULT_EDITION
+
+    # Mixed cups: flip for the starting console ONCE, here, server-side. The
+    # result is persisted and is the only source of truth for race order — a
+    # refresh, a re-POST, or a stale page can never re-roll it. Pure cups store
+    # NULL.
+    first_edition = flip_first_console() if edition == MIXED_EDITION else None
 
     # Use second precision (not :00) so two sessions started in the same minute
     # don't collide on the cups.date UNIQUE constraint (issue #32).
@@ -1613,10 +1770,10 @@ def cup_session_create():
         # conditional INSERT only creates the cup if no in-progress cup exists,
         # so at most one wins the race; the loser sees rowcount == 0.
         cursor = conn.execute(
-            "INSERT INTO cups (date, status, game_edition) "
-            "SELECT ?, 'in_progress', ? "
+            "INSERT INTO cups (date, status, game_edition, first_edition) "
+            "SELECT ?, 'in_progress', ?, ? "
             "WHERE NOT EXISTS (SELECT 1 FROM cups WHERE status = 'in_progress')",
-            (date_utc, edition),
+            (date_utc, edition, first_edition),
         )
         if cursor.rowcount == 0:
             # Lost the race: another request started a cup in the gap. Redirect
@@ -1648,7 +1805,8 @@ def _get_cup_session(cup_id):
     """Fetch a cup session with its players, races, and veto state. Returns None if not found."""
     conn = get_connection()
     cup = conn.execute(
-        "SELECT id, date, notes, status, voto_count, game_edition FROM cups WHERE id = ? AND status = 'in_progress'",
+        "SELECT id, date, notes, status, voto_count, game_edition, first_edition "
+        "FROM cups WHERE id = ? AND status = 'in_progress'",
         (cup_id,),
     ).fetchone()
     if cup is None:
@@ -1690,23 +1848,50 @@ def cup_session_race(cup_id):
     session = _get_cup_session(cup_id)
     if session is None:
         abort(404)
-    played_maps = [r["map"] for r in session["races"]]
-    current_race = len(session["races"]) + 1
-    edition = session["cup"]["game_edition"]
+    cup = session["cup"]
+    races = session["races"]
+    current_race = len(races) + 1
+    # Clamp for track-list lookups: once all races are played current_race is
+    # MAX_RACES + 1, which has no console. The wheel isn't rendered then, but the
+    # lookups still run.
+    cur = min(current_race, MAX_RACES)
+    cur_edition = race_edition(cup, cur)
+    mixed = is_mixed_cup(cup)
+    first_edition = race_edition(cup, 1)
+    swap_edition = race_edition(cup, RACES_PER_BLOCK + 1)
     return render_template(
         "cup_session_race.html",
-        cup=session["cup"],
+        cup=cup,
         players=session["players"],
         available_players=session["available_players"],
-        races=session["races"],
-        played_maps=played_maps,
+        races=races,
+        # Per-console played maps: a name shared by both track lists (e.g.
+        # Rainbow Road) stays available in the other half and only greys out the
+        # slice on the console it was actually played on.
+        played_maps=played_maps_for_edition(cup, races, cur_edition),
         current_race=current_race,
         max_races=MAX_RACES,
         max_half_vetoes=MAX_HALF_VETOES,
         max_votoes=MAX_VOTOES,
         min_roster_size=MIN_ROSTER_SIZE,
-        all_courses=courses_for(edition),
-        edition_label=edition_label(edition),
+        all_courses=courses_for(cur_edition),
+        race_editions=race_editions_map(cup),
+        race_edition=cur_edition,
+        race_edition_label=edition_label(cur_edition),
+        cup_edition_label=edition_order_label(
+            cup["game_edition"], row_value(cup, "first_edition")
+        ),
+        is_mixed=mixed,
+        # Console coin-flip reveal: only before race 1 of a mixed cup. The
+        # outcome is already persisted, so the modal is pure theater.
+        show_console_flip=mixed and not races,
+        first_edition_label=edition_label(first_edition),
+        # Entering race RACES_PER_BLOCK + 1 = the console swap. Remind them to
+        # photograph the standings BEFORE switching — the second console starts
+        # scoring from zero.
+        show_swap_reminder=mixed and len(races) == RACES_PER_BLOCK,
+        next_console_label=edition_label(swap_edition),
+        races_per_block=RACES_PER_BLOCK,
     )
 
 
@@ -1714,29 +1899,39 @@ def cup_session_race(cup_id):
 def cup_session_spin(cup_id):
     conn = get_connection()
     cup = conn.execute(
-        "SELECT id, status, game_edition FROM cups WHERE id = ? AND status = 'in_progress'",
+        "SELECT id, status, game_edition, first_edition FROM cups WHERE id = ? AND status = 'in_progress'",
         (cup_id,),
     ).fetchone()
     if cup is None:
         conn.close()
         return jsonify({"error": "Cup not found or not in progress"}), 404
 
+    # race_number is needed per row to resolve which console each played map
+    # belongs to on a mixed cup.
     races = conn.execute(
-        "SELECT map FROM races WHERE cup_id = ?", (cup_id,)
+        "SELECT race_number, map FROM races WHERE cup_id = ?", (cup_id,)
     ).fetchall()
     conn.close()
 
     if len(races) >= MAX_RACES:
         return jsonify({"error": "All races completed"}), 400
 
-    courses = courses_for(cup["game_edition"])
-    played_maps = {r["map"] for r in races}
+    # The pool comes from the console THIS race is played on, and excludes only
+    # the maps already played on that same console.
+    edition = race_edition(cup, len(races) + 1)
+    courses = courses_for(edition)
+    played_maps = set(played_maps_for_edition(cup, races, edition))
     valid = [c for c in courses if c not in played_maps]
     if not valid:
         return jsonify({"error": "No valid maps remaining"}), 400
 
     chosen = random.choice(valid)
-    return jsonify({"map": chosen, "index": courses.index(chosen)})
+    # "edition" lets a stale page (one loaded before the console swapped) notice
+    # the result belongs to a different track list and reload instead of
+    # rendering an index into the wrong wheel.
+    return jsonify(
+        {"map": chosen, "index": courses.index(chosen), "edition": edition}
+    )
 
 
 @app.route("/cup-session/<int:cup_id>/half-veto", methods=["POST"])
@@ -1821,19 +2016,16 @@ def cup_session_next_race(cup_id):
 
     conn = get_connection()
     cup = conn.execute(
-        "SELECT id, game_edition FROM cups WHERE id = ? AND status = 'in_progress'", (cup_id,)
+        "SELECT id, game_edition, first_edition FROM cups WHERE id = ? AND status = 'in_progress'",
+        (cup_id,),
     ).fetchone()
     if cup is None:
         conn.close()
         return jsonify({"error": "Cup not found"}), 404
 
-    # Validate the course against this cup's edition (issue #41). Without this an
-    # arbitrary or off-edition course name gets persisted into races/history,
-    # polluting stats. Only names in the edition's track set are accepted.
-    if map_name not in courses_for(cup["game_edition"]):
-        conn.close()
-        return jsonify({"error": "Invalid course for this edition"}), 400
-
+    # Order matters: the race NUMBER decides which console this race is on for a
+    # mixed cup, so the count/cap check must run BEFORE the course check (it used
+    # to be the other way round, when every race shared one track list).
     race_count = conn.execute(
         "SELECT COUNT(*) as cnt FROM races WHERE cup_id = ?", (cup_id,)
     ).fetchone()["cnt"]
@@ -1843,6 +2035,15 @@ def cup_session_next_race(cup_id):
         return jsonify({"error": "All races completed"}), 400
 
     race_number = race_count + 1
+
+    # Validate the course against THIS RACE's edition (issue #41). Without this
+    # an arbitrary or off-edition course name gets persisted into races/history,
+    # polluting stats. On a mixed cup this is also what stops a crafted POST
+    # recording a Wii course on a Switch race (or vice versa).
+    if map_name not in courses_for_race(cup, race_number):
+        conn.close()
+        return jsonify({"error": "Invalid course for this edition"}), 400
+
     try:
         conn.execute(
             "INSERT INTO races (cup_id, race_number, map) VALUES (?, ?, ?)",
@@ -1877,7 +2078,7 @@ def cup_session_next_race(cup_id):
 def cup_session_complete(cup_id):
     conn = get_connection()
     cup = conn.execute(
-        "SELECT id, date, notes, status, voto_count, game_edition FROM cups WHERE id = ?",
+        "SELECT id, date, notes, status, voto_count, game_edition, first_edition FROM cups WHERE id = ?",
         (cup_id,),
     ).fetchone()
     if cup is None:
@@ -1906,14 +2107,37 @@ def cup_session_complete(cup_id):
         ).fetchall()
         existing_scores = {s["player_id"]: s for s in score_rows}
 
+    # Compute before the connection closes.
+    lines_on = cup_uses_lines(conn, cup_id)
     conn.close()
+
+    # One dropdown per PLAYED race, each offering only its own console's track
+    # list — a mixed cup's race-3 override must not list Wii courses.
+    race_choices = [
+        {
+            "race_number": r["race_number"],
+            "map": r["map"],
+            "edition": race_edition(cup, r["race_number"]),
+            "edition_label": edition_label(race_edition(cup, r["race_number"])),
+            "courses": courses_for_race(cup, r["race_number"]),
+        }
+        for r in races
+    ]
     return render_template(
         "cup_session_complete.html",
         cup=cup,
         players=players,
         races=races,
-        all_courses=courses_for(cup["game_edition"]),
-        edition_label=edition_label(cup["game_edition"]),
+        race_choices=race_choices,
+        cup_edition_label=edition_order_label(
+            cup["game_edition"], row_value(cup, "first_edition")
+        ),
+        is_mixed=is_mixed_cup(cup),
+        # Which console's results screen is (and isn't) on display when the
+        # completion photo is taken — used by the mixed-cup photo warning.
+        first_console_label=edition_label(race_edition(cup, 1)),
+        second_console_label=edition_label(race_edition(cup, MAX_RACES)),
+        lines_on=lines_on,
         existing_scores=existing_scores,
     )
 
@@ -1922,23 +2146,24 @@ def cup_session_complete(cup_id):
 def cup_session_submit(cup_id):
     conn = get_connection()
     cup = conn.execute(
-        "SELECT id, status, game_edition FROM cups WHERE id = ? AND status = 'in_progress'",
+        "SELECT id, status, game_edition, first_edition FROM cups WHERE id = ? AND status = 'in_progress'",
         (cup_id,),
     ).fetchone()
     if cup is None:
         conn.close()
         abort(404)
 
-    # Update races if edited. Validate each edited map against this cup's edition
-    # (issue #41 — second door): the completion form lets you override race maps,
-    # and a crafted/stale POST could otherwise persist an arbitrary or off-edition
-    # course name straight into history, polluting stats. Only submitted (non-empty)
-    # values are checked; unchanged/empty fields are skipped as before.
-    edition_courses = courses_for(cup["game_edition"])
+    # Update races if edited. Validate each edited map against THAT RACE's
+    # edition (issue #41 — second door): the completion form lets you override
+    # race maps, and a crafted/stale POST could otherwise persist an arbitrary or
+    # off-edition course name straight into history, polluting stats. On a mixed
+    # cup the check is per race, so a Wii course can't be smuggled onto a Switch
+    # race here either. Only submitted (non-empty) values are checked;
+    # unchanged/empty fields are skipped as before.
     for i in range(1, MAX_RACES + 1):
         new_map = request.form.get(f"race_{i}")
         if new_map:
-            if new_map not in edition_courses:
+            if new_map not in courses_for_race(cup, i):
                 conn.close()
                 flash("Invalid course for this edition.")
                 return redirect(url_for("cup_session_complete", cup_id=cup_id))
@@ -2412,8 +2637,14 @@ def match_standings_to_players(rows, players, edition):
 
 
 def _players_for_extraction(data):
-    """Resolve (edition, players) for /extract-scores from cup_id OR
-    edition + player_ids. Returns (edition, players, error_response)."""
+    """Resolve the extraction context for /extract-scores from cup_id OR
+    edition + player_ids.
+
+    Returns (edition, players, partial_half, error_response). `partial_half` is
+    True when the photo can only ever show PART of the cup's scoring — today
+    that means a mixed cup, whose second console restarted at zero — which the
+    caller uses to suppress auto-fill entirely.
+    """
     player_select = (
         "SELECT p.id AS player_id, p.name, p.default_character_wii, "
         "p.default_character_switch FROM players p"
@@ -2421,46 +2652,63 @@ def _players_for_extraction(data):
     cup_id = data.get("cup_id")
     if cup_id is not None:
         if isinstance(cup_id, bool) or not isinstance(cup_id, (int, str)):
-            return None, None, (jsonify({"error": "Invalid cup_id"}), 400)
+            return None, None, False, (jsonify({"error": "Invalid cup_id"}), 400)
         try:
             cup_id = parse_int_field(cup_id)
         except ValueError:
-            return None, None, (jsonify({"error": "Invalid cup_id"}), 400)
+            return None, None, False, (jsonify({"error": "Invalid cup_id"}), 400)
         conn = get_connection()
         cup = conn.execute(
-            "SELECT id, game_edition FROM cups WHERE id = ? AND deleted_at IS NULL",
+            "SELECT id, game_edition, first_edition FROM cups WHERE id = ? AND deleted_at IS NULL",
             (cup_id,),
         ).fetchone()
         if cup is None:
             conn.close()
-            return None, None, (jsonify({"error": "Cup not found"}), 404)
+            return None, None, False, (jsonify({"error": "Cup not found"}), 404)
         players = conn.execute(
             player_select + " JOIN cup_players cp ON cp.player_id = p.id WHERE cp.cup_id = ?",
             (cup_id,),
         ).fetchall()
         conn.close()
         if not players:
-            return None, None, (jsonify({"error": "Cup has no players"}), 400)
-        return cup["game_edition"], [dict(p) for p in players], None
+            return None, None, False, (jsonify({"error": "Cup has no players"}), 400)
+        # A mixed cup's photo is taken at the END, so the results screen on
+        # display belongs to the SECOND half's console — use that edition for
+        # character matching and the extraction prompt. Passing 'mixed' through
+        # would drop default_character_field and build_extraction_prompt into
+        # their unknown-edition branches.
+        #
+        # But that screen only shows the SECOND HALF's points: the first
+        # console's scoreboard is gone and its console restarted at zero. So the
+        # extracted numbers are HALF totals that look completely plausible next
+        # to a cup total (42 where the truth is 88). partial_half=True tells the
+        # caller to return NO auto-fill for this cup — a plausible-looking wrong
+        # number written into the primary record with no signal is the one
+        # failure mode nothing downstream can detect.
+        edition = cup["game_edition"]
+        partial_half = edition == MIXED_EDITION
+        if partial_half:
+            edition = race_edition(cup, MAX_RACES)
+        return edition, [dict(p) for p in players], partial_half, None
 
     edition = data.get("edition")
     if edition not in TRACK_SETS:
-        return None, None, (jsonify({"error": "Unknown edition"}), 400)
+        return None, None, False, (jsonify({"error": "Unknown edition"}), 400)
     player_ids = data.get("player_ids")
     if (
         not isinstance(player_ids, list)
         or not player_ids
         or len(player_ids) > MAX_SCORE_ROWS
     ):
-        return None, None, (jsonify({"error": "player_ids must be a non-empty list"}), 400)
+        return None, None, False, (jsonify({"error": "player_ids must be a non-empty list"}), 400)
     parsed_ids = []
     for pid in player_ids:
         if isinstance(pid, bool) or not isinstance(pid, (int, str)):
-            return None, None, (jsonify({"error": "Invalid player id"}), 400)
+            return None, None, False, (jsonify({"error": "Invalid player id"}), 400)
         try:
             parsed_ids.append(parse_int_field(pid))
         except ValueError:
-            return None, None, (jsonify({"error": "Invalid player id"}), 400)
+            return None, None, False, (jsonify({"error": "Invalid player id"}), 400)
     placeholders = ",".join("?" * len(parsed_ids))
     conn = get_connection()
     players = conn.execute(
@@ -2468,8 +2716,10 @@ def _players_for_extraction(data):
     ).fetchall()
     conn.close()
     if len(players) != len(set(parsed_ids)):
-        return None, None, (jsonify({"error": "Unknown player id"}), 400)
-    return edition, [dict(p) for p in players], None
+        return None, None, False, (jsonify({"error": "Unknown player id"}), 400)
+    # The manual /cups/new path is single-edition by construction (it rejects
+    # anything outside TRACK_SETS above), so its photo is always the whole cup.
+    return edition, [dict(p) for p in players], False, None
 
 
 @app.route("/extract-scores", methods=["POST"])
@@ -2481,7 +2731,13 @@ def extract_scores():
               cup_id: <id>}  — live session form, players/edition from the cup
            or {edition, player_ids: [...]} — manual /cups/new form.
     Response: {scores: {player_id: points}, ambiguous: [names],
-               unmatched_players: [names], raw_rows: [...]}.
+               unmatched_players: [names], raw_rows: [...],
+               partial_half: bool}.
+
+    `partial_half` is True for a MIXED cup, where the photographed screen holds
+    only the second console's half of the scoring. In that case `scores` is
+    ALWAYS empty — the client must not auto-fill — while `raw_rows` is still
+    returned so the mapping panel can be used as a reference.
     """
     if not extraction_enabled():
         return jsonify({"error": "extraction not configured"}), 503
@@ -2496,7 +2752,7 @@ def extract_scores():
     except InvalidInput as e:
         return jsonify({"error": str(e)}), 400
 
-    edition, players, error = _players_for_extraction(data)
+    edition, players, partial_half, error = _players_for_extraction(data)
     if error:
         return error
 
@@ -2512,11 +2768,22 @@ def extract_scores():
     scores, ambiguous, unmatched = match_standings_to_players(
         standings.rows, players, edition
     )
+    if partial_half:
+        # Mixed cup: the photo is one HALF of the cup, so every extracted number
+        # is a half total. Auto-filling those would silently record roughly half
+        # the true points — they look entirely plausible and nothing downstream
+        # can catch it. Suppress the fill SERVER-SIDE (not just in the client)
+        # so an old cached photo_score.js can't reintroduce it, and drop the
+        # ambiguous/unmatched notes, which describe an auto-fill that no longer
+        # happens. raw_rows still ships: the mapping panel stays useful as a
+        # read-off-the-photo reference.
+        scores, ambiguous, unmatched = {}, [], []
     return jsonify(
         {
             "scores": scores,
             "ambiguous": ambiguous,
             "unmatched_players": unmatched,
+            "partial_half": partial_half,
             "raw_rows": [
                 {
                     "position": r.position,
