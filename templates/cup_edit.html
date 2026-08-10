@@ -3,6 +3,7 @@
 {% block title %}Edit Cup — KM Tracker{% endblock %}
 {% block back %}<a class="back-link" href="{{ url_for('cups') }}">← Cups</a>{% endblock %}
 {% block heading %}Edit Cup{% endblock %}
+{% block subtitle %}<p class="page-subtitle">{{ cup|cup_edition_label }}</p>{% endblock %}
 
 {% block styles %}
 <style>
@@ -84,8 +85,9 @@
 
     <h2 class="section-heading">Scores</h2>
     <div id="score-rows">
-    {# Lines are a Wii-only mechanic; Switch cups are lineless. #}
-    {% set lines_on = cup.game_edition == 'wii' %}
+    {# Lines are a Wii-only mechanic; Switch AND mixed cups are lineless.
+       `lines_on` comes from the route (cup_uses_lines) — do not re-derive it
+       from a game_edition string test here. #}
     {% for player in players %}
     {% set s = scores_by_player.get(player.id) %}
     {% set show_line = player.has_line and lines_on %}
@@ -146,8 +148,10 @@
         {% endfor %}
     ];
 
-    // Lines are Wii-only; on a Switch cup, added players get no line UI either.
-    var linesOn = {{ (cup.game_edition == 'wii')|int }};
+    // Lines are Wii-only; on a Switch or mixed cup, added players get no line UI
+    // either. Same route-supplied flag as the server-rendered rows above —
+    // missing this one silently re-enables line inputs on newly added rows.
+    var linesOn = {{ lines_on|int }};
 
     function getActivePlayerIds() {
         var ids = new Set();

@@ -62,6 +62,14 @@ def run_migrations(conn):
             "ALTER TABLE cups ADD COLUMN game_edition TEXT NOT NULL DEFAULT 'wii'"
         )
 
+    # Add cups.first_edition for DBs created before mixed-edition cups. Holds
+    # the coin-flip winner ('wii'|'mk8dx') for a game_edition='mixed' cup and is
+    # NULL for every pure cup — so existing rows need no backfill. The per-race
+    # edition of a mixed cup is DERIVED from this column (races 1..2 on it, 3..4
+    # on the other console), never stored per race.
+    if "first_edition" not in cup_columns:
+        conn.execute("ALTER TABLE cups ADD COLUMN first_edition TEXT")
+
     # Add per-edition default-character columns for DBs created before
     # photo score entry. Nullable — no default character until set.
     player_columns = {row["name"] for row in conn.execute("PRAGMA table_info(players)")}

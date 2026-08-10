@@ -179,10 +179,24 @@ MK8DX_COURSES = [
 ]
 
 # Track lists keyed by edition. The DB stores the edition string on each cup.
+#
+# IMPORTANT: TRACK_SETS means "editions you can play a RACE on". The mixed cup
+# edition ("mixed") is deliberately NOT a member — a mixed cup has no single
+# track list; each of its races resolves to one of these base editions. Keeping
+# "mixed" out of TRACK_SETS is what makes `courses_for("mixed")` an error and
+# what keeps the photo-extraction/character paths from ever seeing it.
 TRACK_SETS = {
     "wii": WII_COURSES,
     "mk8dx": MK8DX_COURSES,
 }
+
+# The editions a single race can actually be played on, in flip order.
+BASE_EDITIONS = ("wii", "mk8dx")
+
+# The mixed CUP edition: 2 races on one console, then 2 on the other. Stored in
+# cups.game_edition; the per-race edition is DERIVED from cups.first_edition
+# (see app.edition_for_race). Never a valid *race* edition.
+MIXED_EDITION = "mixed"
 
 # Playable-character rosters, keyed by edition — used for the per-player
 # default-character pickers and for matching photo-extracted standings rows
@@ -277,18 +291,55 @@ CHARACTERS = {
     "mk8dx": MK8DX_CHARACTERS,
 }
 
-# Human-readable labels for display.
+# Human-readable labels for display. The "mixed" entry is what puts the third
+# option in the new-cup edition <select> (the route passes EDITION_LABELS
+# straight to the template, which loops it).
 EDITION_LABELS = {
     "wii": "Wii",
     "mk8dx": "Switch",
+    MIXED_EDITION: "Wii + Switch",
 }
 
 DEFAULT_EDITION = "wii"
 
+# Editions accepted by the new-cup form: every playable edition plus "mixed".
+VALID_CUP_EDITIONS = frozenset(TRACK_SETS) | {MIXED_EDITION}
+
 
 def courses_for(edition):
-    """Return the track list for an edition, falling back to the default."""
+    """Return the track list for a RACE edition, falling back to the default.
+
+    Raises ValueError for MIXED_EDITION: a mixed cup has no single track list,
+    so asking for one means a caller forgot to resolve the per-race edition
+    first (see app.courses_for_race). The old silent fallback would have handed
+    back the Wii list and let a Switch race record a Wii course — exactly the
+    silent-corruption path this guard exists to prevent.
+    """
+    if edition == MIXED_EDITION:
+        raise ValueError(
+            "courses_for() needs a race edition, not the mixed cup edition; "
+            "resolve the per-race edition first (see edition_for_race)."
+        )
     return TRACK_SETS.get(edition, TRACK_SETS[DEFAULT_EDITION])
+
+
+def other_edition(edition):
+    """The other base (playable) edition — the console a mixed cup swaps to."""
+    if edition not in BASE_EDITIONS:
+        edition = DEFAULT_EDITION
+    return BASE_EDITIONS[1] if edition == BASE_EDITIONS[0] else BASE_EDITIONS[0]
+
+
+def edition_order_label(cup_edition, first_edition=None):
+    """Display label for a CUP's edition.
+
+    Mixed cups show the console order decided by the coin flip
+    ("Wii → Switch" / "Switch → Wii"); pure cups show their plain label.
+    """
+    if cup_edition == MIXED_EDITION:
+        first = first_edition if first_edition in BASE_EDITIONS else DEFAULT_EDITION
+        return f"{edition_label(first)} → {edition_label(other_edition(first))}"
+    return edition_label(cup_edition)
 
 
 def edition_label(edition):

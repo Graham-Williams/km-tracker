@@ -16,7 +16,8 @@
     .race-item label {
         min-width: 4.5rem; font-size: 0.9rem; color: var(--color-muted); margin: 0;
     }
-    .race-item select { flex: 1; }
+    .race-item select { flex: 1; min-width: 0; }
+    .mixed-score-note { font-size: 0.85rem; margin-bottom: var(--space-2); }
 
     .score-row {
         display: flex; align-items: center; gap: var(--space-2);
@@ -68,12 +69,14 @@
     <div>
         <div class="section-heading">Races</div>
         <ul class="race-list">
-            {% for race in races %}
+            {# Each race offers only ITS OWN console's track list — on a mixed
+               cup race 3's dropdown must not list Wii courses. #}
+            {% for choice in race_choices %}
             <li class="race-item">
-                <label for="race-{{ race.race_number }}">Race {{ race.race_number }}:</label>
-                <select name="race_{{ race.race_number }}" id="race-{{ race.race_number }}">
-                    {% for course in all_courses %}
-                    <option value="{{ course }}" {% if course == race.map %}selected{% endif %}>{{ course }} ({{ loop.index }})</option>
+                <label for="race-{{ choice.race_number }}">Race {{ choice.race_number }}{% if is_mixed %} ({{ choice.edition_label }}){% endif %}:</label>
+                <select name="race_{{ choice.race_number }}" id="race-{{ choice.race_number }}">
+                    {% for course in choice.courses %}
+                    <option value="{{ course }}" {% if course == choice.map %}selected{% endif %}>{{ course }} ({{ loop.index }})</option>
                     {% endfor %}
                 </select>
             </li>
@@ -83,9 +86,17 @@
 
     <div>
         <div class="section-heading">Scores</div>
+        {% if is_mixed %}
+        <p class="muted mixed-score-note">
+            📸 Mixed cup — the second console's scoreboard started from zero. Enter each player's
+            <strong>combined total</strong> across both halves (add the photo you took at the swap to
+            what's on screen now).
+        </p>
+        {% endif %}
         <div id="score-rows">
-        {# Lines are a Wii-only mechanic; Switch cups are lineless. #}
-        {% set lines_on = cup.game_edition == 'wii' %}
+        {# Lines are a Wii-only mechanic; Switch AND mixed cups are lineless.
+           `lines_on` comes from the route (cup_uses_lines) — do not re-derive it
+           from a game_edition string test here. #}
         {% for player in players %}
         {% set existing = existing_scores.get(player.player_id) %}
         {% set show_line = player.has_line and lines_on %}
