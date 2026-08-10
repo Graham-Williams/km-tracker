@@ -1529,19 +1529,37 @@ MIN_ROSTER_SIZE = 1
 RACES_PER_BLOCK = MAX_RACES // 2
 
 
-def row_value(row, key, default=None):
-    """Read a column from a sqlite3.Row that may not have been SELECTed.
+_REQUIRED = object()
 
-    sqlite3.Row raises IndexError for an absent column. Cup rows are fetched by
-    a dozen routes with differing column lists, so this keeps a row that predates
-    (or simply omits) first_edition from turning into a 500.
+
+def row_value(row, key, default=_REQUIRED):
+    """Read a column from a sqlite3.Row, LOUDLY by default.
+
+    sqlite3.Row raises IndexError for an absent column, and cup rows are fetched
+    by a dozen routes with differing column lists — so this used to swallow that
+    and return None. That was the wrong trade: a route that forgot to SELECT
+    `first_edition` would hand None to edition_for_race, which falls back to
+    DEFAULT_EDITION, and a **Switch-first mixed cup would silently render and
+    validate as Wii-first** with no error anywhere. Reachable today via the
+    globally-registered `cup_edition_label` Jinja filter on a short-SELECT row.
+
+    So: omitting `default` means the column is REQUIRED and a missing one raises.
+    Pass an explicit `default` only where absence is genuinely expected. The
+    documented contract stands — every route that SELECTs a cup row for edition
+    purposes must include `first_edition`; this makes violating it a loud 500
+    rather than quiet data corruption.
     """
-    if row is None:
-        return default
-    try:
-        return row[key]
-    except (IndexError, KeyError):
-        return default
+    if row is not None:
+        try:
+            return row[key]
+        except (IndexError, KeyError):
+            pass
+    if default is _REQUIRED:
+        raise KeyError(
+            f"row is missing required column {key!r} — add it to this route's "
+            f"SELECT (pass an explicit default if absence is expected)"
+        )
+    return default
 
 
 def flip_first_console():
@@ -2101,6 +2119,10 @@ def cup_session_complete(cup_id):
             cup["game_edition"], row_value(cup, "first_edition")
         ),
         is_mixed=is_mixed_cup(cup),
+        # Which console's results screen is (and isn't) on display when the
+        # completion photo is taken — used by the mixed-cup photo warning.
+        first_console_label=edition_label(race_edition(cup, 1)),
+        second_console_label=edition_label(race_edition(cup, MAX_RACES)),
         lines_on=lines_on,
         existing_scores=existing_scores,
     )
@@ -2601,8 +2623,14 @@ def match_standings_to_players(rows, players, edition):
 
 
 def _players_for_extraction(data):
-    """Resolve (edition, players) for /extract-scores from cup_id OR
-    edition + player_ids. Returns (edition, players, error_response)."""
+    """Resolve the extraction context for /extract-scores from cup_id OR
+    edition + player_ids.
+
+    Returns (edition, players, partial_half, error_response). `partial_half` is
+    True when the photo can only ever show PART of the cup's scoring — today
+    that means a mixed cup, whose second console restarted at zero — which the
+    caller uses to suppress auto-fill entirely.
+    """
     player_select = (
         "SELECT p.id AS player_id, p.name, p.default_character_wii, "
         "p.default_character_switch FROM players p"
@@ -2610,11 +2638,11 @@ def _players_for_extraction(data):
     cup_id = data.get("cup_id")
     if cup_id is not None:
         if isinstance(cup_id, bool) or not isinstance(cup_id, (int, str)):
-            return None, None, (jsonify({"error": "Invalid cup_id"}), 400)
+            return None, None, False, (jsonify({"error": "Invalid cup_id"}), 400)
         try:
             cup_id = parse_int_field(cup_id)
         except ValueError:
-            return None, None, (jsonify({"error": "Invalid cup_id"}), 400)
+            return None, None, False, (jsonify({"error": "Invalid cup_id"}), 400)
         conn = get_connection()
         cup = conn.execute(
             "SELECT id, game_edition, first_edition FROM cups WHERE id = ? AND deleted_at IS NULL",
@@ -2622,45 +2650,51 @@ def _players_for_extraction(data):
         ).fetchone()
         if cup is None:
             conn.close()
-            return None, None, (jsonify({"error": "Cup not found"}), 404)
+            return None, None, False, (jsonify({"error": "Cup not found"}), 404)
         players = conn.execute(
             player_select + " JOIN cup_players cp ON cp.player_id = p.id WHERE cp.cup_id = ?",
             (cup_id,),
         ).fetchall()
         conn.close()
         if not players:
-            return None, None, (jsonify({"error": "Cup has no players"}), 400)
+            return None, None, False, (jsonify({"error": "Cup has no players"}), 400)
         # A mixed cup's photo is taken at the END, so the results screen on
         # display belongs to the SECOND half's console — use that edition for
         # character matching and the extraction prompt. Passing 'mixed' through
         # would drop default_character_field and build_extraction_prompt into
-        # their unknown-edition branches. (Auto-filled values are then the
-        # second console's HALF totals, not the cup total — the mapping panel
-        # never auto-submits and manual entry always wins, so this is a hint, not
-        # a source of truth. See .claude/features/mixed-edition-cups/context.md.)
+        # their unknown-edition branches.
+        #
+        # But that screen only shows the SECOND HALF's points: the first
+        # console's scoreboard is gone and its console restarted at zero. So the
+        # extracted numbers are HALF totals that look completely plausible next
+        # to a cup total (42 where the truth is 88). partial_half=True tells the
+        # caller to return NO auto-fill for this cup — a plausible-looking wrong
+        # number written into the primary record with no signal is the one
+        # failure mode nothing downstream can detect.
         edition = cup["game_edition"]
-        if edition == MIXED_EDITION:
+        partial_half = edition == MIXED_EDITION
+        if partial_half:
             edition = race_edition(cup, MAX_RACES)
-        return edition, [dict(p) for p in players], None
+        return edition, [dict(p) for p in players], partial_half, None
 
     edition = data.get("edition")
     if edition not in TRACK_SETS:
-        return None, None, (jsonify({"error": "Unknown edition"}), 400)
+        return None, None, False, (jsonify({"error": "Unknown edition"}), 400)
     player_ids = data.get("player_ids")
     if (
         not isinstance(player_ids, list)
         or not player_ids
         or len(player_ids) > MAX_SCORE_ROWS
     ):
-        return None, None, (jsonify({"error": "player_ids must be a non-empty list"}), 400)
+        return None, None, False, (jsonify({"error": "player_ids must be a non-empty list"}), 400)
     parsed_ids = []
     for pid in player_ids:
         if isinstance(pid, bool) or not isinstance(pid, (int, str)):
-            return None, None, (jsonify({"error": "Invalid player id"}), 400)
+            return None, None, False, (jsonify({"error": "Invalid player id"}), 400)
         try:
             parsed_ids.append(parse_int_field(pid))
         except ValueError:
-            return None, None, (jsonify({"error": "Invalid player id"}), 400)
+            return None, None, False, (jsonify({"error": "Invalid player id"}), 400)
     placeholders = ",".join("?" * len(parsed_ids))
     conn = get_connection()
     players = conn.execute(
@@ -2668,8 +2702,10 @@ def _players_for_extraction(data):
     ).fetchall()
     conn.close()
     if len(players) != len(set(parsed_ids)):
-        return None, None, (jsonify({"error": "Unknown player id"}), 400)
-    return edition, [dict(p) for p in players], None
+        return None, None, False, (jsonify({"error": "Unknown player id"}), 400)
+    # The manual /cups/new path is single-edition by construction (it rejects
+    # anything outside TRACK_SETS above), so its photo is always the whole cup.
+    return edition, [dict(p) for p in players], False, None
 
 
 @app.route("/extract-scores", methods=["POST"])
@@ -2681,7 +2717,13 @@ def extract_scores():
               cup_id: <id>}  — live session form, players/edition from the cup
            or {edition, player_ids: [...]} — manual /cups/new form.
     Response: {scores: {player_id: points}, ambiguous: [names],
-               unmatched_players: [names], raw_rows: [...]}.
+               unmatched_players: [names], raw_rows: [...],
+               partial_half: bool}.
+
+    `partial_half` is True for a MIXED cup, where the photographed screen holds
+    only the second console's half of the scoring. In that case `scores` is
+    ALWAYS empty — the client must not auto-fill — while `raw_rows` is still
+    returned so the mapping panel can be used as a reference.
     """
     if not extraction_enabled():
         return jsonify({"error": "extraction not configured"}), 503
@@ -2696,7 +2738,7 @@ def extract_scores():
     except InvalidInput as e:
         return jsonify({"error": str(e)}), 400
 
-    edition, players, error = _players_for_extraction(data)
+    edition, players, partial_half, error = _players_for_extraction(data)
     if error:
         return error
 
@@ -2712,11 +2754,22 @@ def extract_scores():
     scores, ambiguous, unmatched = match_standings_to_players(
         standings.rows, players, edition
     )
+    if partial_half:
+        # Mixed cup: the photo is one HALF of the cup, so every extracted number
+        # is a half total. Auto-filling those would silently record roughly half
+        # the true points — they look entirely plausible and nothing downstream
+        # can catch it. Suppress the fill SERVER-SIDE (not just in the client)
+        # so an old cached photo_score.js can't reintroduce it, and drop the
+        # ambiguous/unmatched notes, which describe an auto-fill that no longer
+        # happens. raw_rows still ships: the mapping panel stays useful as a
+        # read-off-the-photo reference.
+        scores, ambiguous, unmatched = {}, [], []
     return jsonify(
         {
             "scores": scores,
             "ambiguous": ambiguous,
             "unmatched_players": unmatched,
+            "partial_half": partial_half,
             "raw_rows": [
                 {
                     "position": r.position,

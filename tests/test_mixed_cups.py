@@ -107,6 +107,69 @@ def test_edition_for_race_falls_back_when_first_edition_missing():
         assert got == ["wii", "wii", "mk8dx", "mk8dx"]
 
 
+# =============================================================================
+# row_value: a missing column must be LOUD, never a silent wrong edition
+# =============================================================================
+
+
+def test_row_value_reads_a_present_column(client):
+    _setup_players(client)
+    _create_session(client, ["1", "2"], edition=MIXED_EDITION)
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT game_edition, first_edition FROM cups WHERE id = 1"
+    ).fetchone()
+    conn.close()
+    assert appmod.row_value(row, "first_edition") in ("wii", "mk8dx")
+
+
+def test_row_value_raises_on_a_missing_column(client):
+    # A route that forgets to SELECT first_edition must NOT quietly get None:
+    # None -> edition_for_race -> DEFAULT_EDITION would render and validate a
+    # Switch-first mixed cup as Wii-first, silently, with no error anywhere.
+    _setup_players(client)
+    _create_session(client, ["1", "2"], edition=MIXED_EDITION)
+    conn = get_connection()
+    short_row = conn.execute("SELECT game_edition FROM cups WHERE id = 1").fetchone()
+    conn.close()
+    with pytest.raises(KeyError):
+        appmod.row_value(short_row, "first_edition")
+
+
+def test_row_value_returns_an_explicit_default(client):
+    conn = get_connection()
+    row = conn.execute("SELECT 1 AS present").fetchone()
+    conn.close()
+    assert appmod.row_value(row, "absent", None) is None
+    assert appmod.row_value(row, "absent", "fallback") == "fallback"
+    assert appmod.row_value(None, "anything", "fallback") == "fallback"
+
+
+def test_row_value_raises_for_a_missing_row_with_no_default():
+    with pytest.raises(KeyError):
+        appmod.row_value(None, "first_edition")
+
+
+def test_cup_edition_label_filter_raises_on_a_short_select(client, monkeypatch):
+    # The filter is registered globally, so any template could hand it a row
+    # that omits first_edition. It must fail loudly rather than label a
+    # Switch-first mixed cup "Wii → Switch".
+    _fix_flip(monkeypatch, "mk8dx")
+    _setup_players(client)
+    _create_session(client, ["1", "2"], edition=MIXED_EDITION)
+    conn = get_connection()
+    short_row = conn.execute("SELECT game_edition FROM cups WHERE id = 1").fetchone()
+    full_row = conn.execute(
+        "SELECT game_edition, first_edition FROM cups WHERE id = 1"
+    ).fetchone()
+    conn.close()
+
+    with pytest.raises(KeyError):
+        appmod.cup_edition_label_filter(short_row)
+    # The correctly-SELECTed row still labels the real console order.
+    assert appmod.cup_edition_label_filter(full_row) == "Switch → Wii"
+
+
 def test_courses_for_rejects_the_mixed_cup_edition():
     # The old silent fallback returned the Wii list for anything unknown, which
     # would have let a Switch race record a Wii course.
@@ -696,7 +759,9 @@ def test_pure_cups_never_show_the_console_flip_or_swap_modals(client, edition):
     page = client.get("/cup-session/1").get_data(as_text=True)
     assert 'id="swap-reminder-modal"' not in page
     assert 'class="console-badge"' not in page
-    assert "second-console-banner" not in page
+    # Match the rendered element — the script block mentions the banner's id in
+    # a comment, and the <style> block carries its CSS rule.
+    assert 'id="second-console-banner"' not in page
 
 
 def test_swap_reminder_shows_only_when_entering_the_second_half(
@@ -825,19 +890,156 @@ def test_extraction_uses_the_second_half_edition_for_a_mixed_cup(
     _setup_players(client)
     _create_session(client, ["1", "2"], edition=MIXED_EDITION)
 
-    edition, players, error = appmod._players_for_extraction({"cup_id": 1})
+    edition, players, partial_half, error = appmod._players_for_extraction(
+        {"cup_id": 1}
+    )
     assert error is None
     assert edition == "mk8dx"
+    assert partial_half is True  # the photo is only half the cup
     assert len(players) == 2
+
+
+@pytest.mark.parametrize("edition", ["wii", "mk8dx"])
+def test_extraction_on_a_pure_cup_is_not_partial(client, edition):
+    _setup_players(client)
+    _create_session(client, ["1", "2"], edition=edition)
+    got, players, partial_half, error = appmod._players_for_extraction(
+        {"cup_id": 1}
+    )
+    assert error is None
+    assert got == edition
+    assert partial_half is False
 
 
 def test_extraction_manual_path_still_rejects_mixed(client):
     # The manual /cups/new path has no cup to resolve a half from, so 'mixed'
     # must stay an invalid edition there.
     _setup_players(client)
-    edition, players, error = appmod._players_for_extraction(
+    edition, players, partial_half, error = appmod._players_for_extraction(
         {"edition": MIXED_EDITION, "player_ids": [1]}
     )
     assert edition is None
+    assert partial_half is False
     assert error is not None
     assert error[1] == 400
+
+
+# --- /extract-scores: a mixed cup must never auto-fill half totals ---------
+
+
+def _fake_standings(*rows):
+    """rows: (position, character, points, is_highlighted) -> a fake extractor."""
+    from extraction import Standings, StandingsRow
+
+    standings = Standings(
+        rows=[
+            StandingsRow(
+                position=p, character=c, points=pts, is_highlighted=hl
+            )
+            for p, c, pts, hl in rows
+        ]
+    )
+
+    def fake_extract(image_b64, media_type, edition=None):
+        return standings
+
+    return fake_extract
+
+
+def _setup_character_players(client):
+    for name, wii_char, switch_char in [
+        ("Alice", "Funky Kong", "Yoshi"),
+        ("Bob", "Yoshi", "Mario"),
+    ]:
+        client.post(
+            "/players",
+            data={
+                "name": name,
+                "default_cup": "on",
+                "default_character_wii": wii_char,
+                "default_character_switch": switch_char,
+            },
+        )
+
+
+def _post_photo(client, cup_id):
+    import base64
+
+    return client.post(
+        "/extract-scores",
+        json={
+            "image": base64.b64encode(b"\xff\xd8fake").decode("ascii"),
+            "mime_type": "image/jpeg",
+            "cup_id": cup_id,
+        },
+    )
+
+
+def test_mixed_cup_extract_returns_no_autofill_scores(
+    client, monkeypatch
+):
+    # THE failure this guards: the completion photo shows only the second
+    # console's screen, so every extracted number is a HALF total (Alice 42
+    # where her cup total is 88). Auto-filling those looks completely plausible
+    # and would permanently record roughly half the true points.
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    _fix_flip(monkeypatch, "wii")
+    _setup_character_players(client)
+    _create_session(client, ["1", "2"], edition=MIXED_EDITION)
+    monkeypatch.setattr(
+        appmod,
+        "extract_standings",
+        _fake_standings((1, "Yoshi", 42, True), (2, "Mario", 38, True)),
+    )
+
+    data = _post_photo(client, 1).get_json()
+    assert data["partial_half"] is True
+    assert data["scores"] == {}           # nothing auto-filled
+    assert data["ambiguous"] == []
+    assert data["unmatched_players"] == []
+    # The rows still ship — the mapping panel stays usable as a reference.
+    assert len(data["raw_rows"]) == 2
+    assert data["raw_rows"][0]["points"] == 42
+
+
+def test_pure_cup_extract_still_autofills(client, monkeypatch):
+    # Regression control: suppressing auto-fill must be mixed-only.
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    _setup_character_players(client)
+    _create_session(client, ["1", "2"], edition="mk8dx")
+    monkeypatch.setattr(
+        appmod,
+        "extract_standings",
+        _fake_standings((1, "Yoshi", 42, True), (2, "Mario", 38, True)),
+    )
+
+    data = _post_photo(client, 1).get_json()
+    assert data["partial_half"] is False
+    assert data["scores"] == {"1": 42, "2": 38}
+    assert len(data["raw_rows"]) == 2
+
+
+def test_mixed_complete_page_warns_inside_the_photo_panel(
+    client, monkeypatch
+):
+    _fix_flip(monkeypatch, "wii")
+    _setup_players(client)
+    _create_session(client, ["1", "2"], edition=MIXED_EDITION)
+    page = client.get("/cup-session/1/complete").get_data(as_text=True)
+
+    panel = page.split('id="photo-score"')[1]
+    assert 'class="photo-half-warning"' in panel
+    # Names the console the photo DOES show and the one it doesn't.
+    warning = panel.split('class="photo-half-warning"')[1].split("</p>")[0]
+    assert "Switch" in warning
+    assert "Wii" in warning
+    assert "combined total" in warning
+
+
+@pytest.mark.parametrize("edition", ["wii", "mk8dx"])
+def test_pure_complete_page_has_no_photo_half_warning(client, edition):
+    _setup_players(client)
+    _create_session(client, ["1", "2"], edition=edition)
+    page = client.get("/cup-session/1/complete").get_data(as_text=True)
+    # Match the rendered element, not the .photo-half-warning CSS rule in <style>.
+    assert 'class="photo-half-warning"' not in page

@@ -2,9 +2,28 @@
 other) through a real browser.
 
 Covers the pieces that only exist client-side: the console coin-flip modal, the
-wheel swapping to the other console's track list at race 3, and the one-shot
-swap photo reminder.
+wheel swapping to the other console's track list at race 3, the one-shot swap
+photo reminder, and — most importantly — that a `partial_half` extraction
+response never auto-fills the score inputs.
 """
+
+import base64
+import json
+import os
+
+import pytest
+
+# 1x1 red PNG — any decodable image works; the client re-encodes to JPEG.
+TINY_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ"
+    "AAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+)
+
+# monkeypatching the key only works when the Flask server shares this process.
+requires_in_process_server = pytest.mark.skipif(
+    bool(os.environ.get("E2E_BASE_URL")),
+    reason="needs the in-process e2e server (env-var monkeypatch)",
+)
 
 
 def _create_player(page, base_url, name):
@@ -154,3 +173,168 @@ def test_pure_cup_has_no_mixed_chrome(page, base_url):
     _play_one_race(page, next_race=3)
     assert page.locator("#swap-reminder-modal").count() == 0
     assert page.locator("#second-console-banner").count() == 0
+
+
+@requires_in_process_server
+def test_mixed_cup_photo_never_autofills_scores(page, base_url, monkeypatch):
+    """The regression that matters most: on a mixed cup the completion photo
+    shows only the SECOND console's half, so its numbers are half totals.
+    A `partial_half` response must leave every score input EMPTY — filling
+    plausible-looking half totals would permanently record ~half the true
+    points with no signal."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "e2e-fake-key")
+
+    _create_player(page, base_url, "Alice")
+    _create_player(page, base_url, "Bob")
+    page.goto(f"{base_url}/cup-session/new")
+    page.select_option('select[name="game_edition"]', "mixed")
+    page.click('button[type="submit"]')
+    page.wait_for_url("**/cup-session/*")
+    cup_id = page.url.rstrip("/").split("/")[-1]
+
+    page.goto(f"{base_url}/cup-session/{cup_id}/complete")
+
+    # The warning must be present in the photo panel BEFORE any photo is taken.
+    assert page.locator("#photo-score .photo-half-warning").is_visible()
+
+    # Exactly what the server sends for a mixed cup: rows, but no scores.
+    page.route(
+        "**/extract-scores",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "scores": {},
+                    "ambiguous": [],
+                    "unmatched_players": [],
+                    "partial_half": True,
+                    "raw_rows": [
+                        {"position": 1, "character": "Yoshi", "points": 42, "is_highlighted": True},
+                        {"position": 2, "character": "Mario", "points": 38, "is_highlighted": True},
+                    ],
+                }
+            ),
+        ),
+    )
+
+    page.set_input_files(
+        "#photo-pick",
+        {"name": "standings.png", "mimeType": "image/png", "buffer": TINY_PNG},
+    )
+    page.locator(".photo-attach-status.is-success").wait_for(state="visible")
+    page.locator(".photo-mapping").wait_for(state="visible")
+
+    # NOTHING auto-filled.
+    scores = page.locator(".score-input")
+    for i in range(scores.count()):
+        assert scores.nth(i).input_value() == ""
+
+    # And the status says why, instead of "Filled N scores".
+    status = page.locator(".photo-status").text_content()
+    assert "Filled" not in status
+    assert "combined total" in status
+
+    # The mapping panel is still available as a reference.
+    assert page.locator(".photo-map-select").count() == 2
+
+
+@requires_in_process_server
+def test_pure_cup_photo_still_autofills(page, base_url, monkeypatch):
+    """Regression control: suppressing auto-fill is mixed-only."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "e2e-fake-key")
+
+    _create_player(page, base_url, "Alice")
+    _create_player(page, base_url, "Bob")
+    page.goto(f"{base_url}/cup-session/new")
+    page.select_option('select[name="game_edition"]', "wii")
+    page.click('button[type="submit"]')
+    page.wait_for_url("**/cup-session/*")
+    cup_id = page.url.rstrip("/").split("/")[-1]
+
+    page.goto(f"{base_url}/cup-session/{cup_id}/complete")
+    assert page.locator("#photo-score .photo-half-warning").count() == 0
+
+    player_ids = page.eval_on_selector_all(
+        ".score-row", "rows => rows.map(r => r.dataset.playerId)"
+    )
+    page.route(
+        "**/extract-scores",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "scores": {player_ids[0]: 60},
+                    "ambiguous": [],
+                    "unmatched_players": ["Bob"],
+                    "partial_half": False,
+                    "raw_rows": [
+                        {"position": 1, "character": "Funky Kong", "points": 60, "is_highlighted": True},
+                    ],
+                }
+            ),
+        ),
+    )
+
+    page.set_input_files(
+        "#photo-pick",
+        {"name": "standings.png", "mimeType": "image/png", "buffer": TINY_PNG},
+    )
+    page.locator(".photo-attach-status.is-success").wait_for(state="visible")
+    page.locator(".photo-mapping").wait_for(state="visible")
+
+    assert page.locator(".score-input").nth(0).input_value() == "60"
+    assert "Filled 1 score" in page.locator(".photo-status").text_content()
+
+
+def test_swap_reminder_does_not_reopen_on_refresh(page, base_url):
+    """The reminder is gated server-side purely on "2 races played", which is
+    true for EVERY load of the race-3 page — so a refresh must not re-block the
+    controls. The persistent banner still carries the message."""
+    _start_mixed_session(page, base_url)
+    _dismiss_console_flip(page)
+    _play_one_race(page, next_race=2)
+    _play_one_race(page, next_race=3)
+
+    page.locator("#swap-reminder-modal.active").wait_for(timeout=5000)
+    page.click("#swap-reminder-ok-btn")
+    page.locator("#swap-reminder-modal.active").wait_for(state="hidden", timeout=5000)
+
+    page.reload()
+    page.locator("#second-console-banner").wait_for(timeout=5000)
+    assert page.locator("#swap-reminder-modal.active").count() == 0
+    # Controls are usable, not covered by a re-opened modal.
+    assert page.locator("#spin-btn").is_enabled()
+
+
+def test_stale_manual_override_recovers_instead_of_dead_ending(page, base_url):
+    """Two devices on one cup: this page still shows the FIRST console's wheel
+    after another device recorded race 2. A manual override picks an off-half
+    course, the server correctly 400s — and the page must reload onto the right
+    console rather than sit there failing forever."""
+    _start_mixed_session(page, base_url)
+    _dismiss_console_flip(page)
+    _play_one_race(page, next_race=2)
+
+    stale_courses = page.evaluate("COURSES")
+    stale_edition = page.evaluate("RACE_EDITION")
+    cup_id = page.url.rstrip("/").split("/")[-1]
+
+    # Simulate the other device finishing race 2 (this page never learns of it).
+    page.request.post(
+        f"{base_url}/cup-session/{cup_id}/next-race",
+        data=json.dumps({"map": stale_courses[1]}),
+        headers={"Content-Type": "application/json"},
+    )
+
+    page.on("dialog", lambda d: d.accept())
+    # Manual override off this page's stale (first-console) list.
+    page.select_option("#manual-override", "0")
+    page.locator("#wheel-label.visible").wait_for(timeout=15000)
+    page.locator("#next-race-btn, #complete-btn").first.click()
+    page.locator("#next-race-confirm-btn").click()
+
+    # The page recovers onto race 3 with the OTHER console's wheel.
+    page.locator("text=Race 3 of 4").wait_for(timeout=15000)
+    assert page.evaluate("RACE_EDITION") != stale_edition

@@ -844,7 +844,18 @@
                     body: JSON.stringify({ map: currentMap }),
                 }).then(function(r) { return r.json(); })
                   .then(function(data) {
-                    if (data.error) { alert(data.error); return; }
+                    if (data.error) {
+                        // Recovery for a page left open across a mixed cup's
+                        // console swap. The spin handler catches that case via
+                        // the edition echo, but Manual override picks straight
+                        // out of this page's (now stale) COURSES — the server
+                        // correctly rejects the off-half course, and without a
+                        // reload the page would sit here failing forever.
+                        // Reloading re-renders the correct console's wheel.
+                        alert(data.error);
+                        window.location.reload();
+                        return;
+                    }
                     // Add to played maps
                     PLAYED_MAPS.push(currentMap);
                     if (data.complete) {
@@ -906,18 +917,28 @@
         })();
 
         // --- Mixed cups: swap reminder (entering the second half) ---
-        // Plain auto-opened modal, dismissed with OK. The persistent banner
-        // above keeps the message around after it's dismissed.
+        // Auto-opened once, dismissed with OK. Server-side it's gated purely on
+        // "2 races played", which is true for every load of the race-3 page —
+        // so without this sessionStorage one-shot (mirroring the flip modal's)
+        // a refresh would re-block the controls. Nothing is lost by
+        // suppressing it: the persistent #second-console-banner carries the
+        // same message for the rest of the cup.
         (function () {
             var modal = document.getElementById("swap-reminder-modal");
             if (!modal) return;
-            openModal("swap-reminder-modal");
+            var storageKey = "km-swap-reminder-" + CUP_ID;
             var okBtn = document.getElementById("swap-reminder-ok-btn");
             if (okBtn) {
                 okBtn.addEventListener("click", function () {
                     closeModal("swap-reminder-modal");
+                    try { sessionStorage.setItem(storageKey, "1"); } catch (e) {}
                 });
             }
+            var alreadyShown = false;
+            try { alreadyShown = sessionStorage.getItem(storageKey) === "1"; }
+            catch (e) { alreadyShown = false; }
+            if (alreadyShown) return;
+            openModal("swap-reminder-modal");
         })();
     </script>
 {% endblock %}

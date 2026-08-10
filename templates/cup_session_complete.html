@@ -18,6 +18,12 @@
     }
     .race-item select { flex: 1; min-width: 0; }
     .mixed-score-note { font-size: 0.85rem; margin-bottom: var(--space-2); }
+    .photo-half-warning {
+        font-size: 0.85rem; margin-bottom: var(--space-2);
+        padding: var(--space-2) var(--space-3);
+        border: 1px solid var(--color-border); border-radius: var(--radius-sm);
+        background: var(--color-surface-2); color: var(--color-text);
+    }
 
     .score-row {
         display: flex; align-items: center; gap: var(--space-2);
@@ -119,6 +125,17 @@
 
     <div id="photo-score">
         <div class="section-heading">{% if photo_extraction_enabled %}Score from photo{% else %}Attach photo{% endif %}</div>
+        {% if is_mixed %}
+        {# The photographed screen is the SECOND console's only — its numbers are
+           half totals. Auto-fill is disabled server-side for mixed cups; this
+           says why, right where the photo is taken. #}
+        <p class="photo-half-warning">
+            ⚠️ This photo shows the <strong>{{ second_console_label }}</strong> half only — the
+            {{ first_console_label }} screen started over at zero. Scores are <strong>not</strong>
+            filled in automatically for a mixed cup: add both halves together and enter each
+            player's combined total.
+        </p>
+        {% endif %}
         <div class="field-row">
             {# Buttons ship disabled; photo_score.js enables + wires them. If the
                script fails to load, the picker can't open — so a photo can never

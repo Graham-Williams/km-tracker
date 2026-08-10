@@ -9,6 +9,13 @@
  * the form on its own; the human always reviews first. Manual entry works
  * regardless of what happens here.
  *
+ * Auto-fill is suppressed entirely when the response carries
+ * `partial_half: true` — a MIXED (Wii + Switch) cup, where the photographed
+ * screen holds only the second console's half of the scoring. Filling half
+ * totals into a cup-total field would record silently-wrong numbers that look
+ * completely plausible, so those responses only feed the reference mapping
+ * panel and an explanatory status line.
+ *
  * Silent-drop guards (the photo attach is async, so a submit could otherwise
  * race it or follow a failed decode without anyone noticing):
  *   - The photo buttons ship disabled and are enabled + wired here — if this
@@ -353,10 +360,28 @@ window.initPhotoScore = function (opts) {
                 return;
             }
             var body = res.body || {};
-            var filled = fillScores(body.scores || {});
+            // partial_half: the photo covers only PART of the cup's scoring
+            // (a mixed cup — the second console restarted at zero), so its
+            // numbers are half totals. NEVER auto-fill those: they look
+            // plausible next to a cup total and would be recorded silently
+            // wrong. The server also sends scores: {} for this case; the guard
+            // here is the second lock, not the only one.
+            var partialHalf = !!body.partial_half;
+            var filled = partialHalf ? 0 : fillScores(body.scores || {});
             // Build the mix-and-match panel AFTER fillScores so pre-selection
             // can read the auto-filled score inputs.
             renderMapping(body.raw_rows || []);
+            if (partialHalf) {
+                setStatus(
+                    "Read " + (body.raw_rows || []).length + " row" +
+                    ((body.raw_rows || []).length === 1 ? "" : "s") +
+                    " from the photo — nothing was filled in. This screen shows " +
+                    "one console's half only; add both halves together and enter " +
+                    "each player's combined total."
+                );
+                notesEl.textContent = "";
+                return;
+            }
             setStatus(
                 "Filled " + filled + " score" + (filled === 1 ? "" : "s") +
                 " from the photo — review before submitting."
