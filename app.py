@@ -2097,9 +2097,6 @@ def cup_session_complete(cup_id):
         players=players,
         races=races,
         race_choices=race_choices,
-        edition_label=edition_order_label(
-            cup["game_edition"], row_value(cup, "first_edition")
-        ),
         cup_edition_label=edition_order_label(
             cup["game_edition"], row_value(cup, "first_edition")
         ),
