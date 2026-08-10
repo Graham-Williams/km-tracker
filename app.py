@@ -1407,6 +1407,14 @@ def create_score():
             "SELECT line FROM players WHERE id = ?", (player_id,)
         ).fetchone()
         player_line = player["line"] if player else 0
+        # Lineless cups (Switch and MIXED) never carry a handicap. This route
+        # used to stamp players.line in unconditionally, which was a live write
+        # path around the "mixed cups are lineless" rule: POST /scores on a
+        # mixed cup persisted line=5 / line_score=score+5. The completion paths
+        # (cup_session_submit, update_cup) route through zero_lines_if_lineless
+        # for exactly this reason; the raw score routes must agree.
+        if not cup_uses_lines(conn, cup_id):
+            player_line = 0
         try:
             line_score_val = checked_line_score(score, player_line)
         except InvalidInput as e:
@@ -1452,7 +1460,7 @@ def edit_score(score_id):
 def update_score(score_id):
     conn = get_connection()
     existing = conn.execute(
-        "SELECT id, player_id FROM scores WHERE id = ?", (score_id,)
+        "SELECT id, cup_id, player_id FROM scores WHERE id = ?", (score_id,)
     ).fetchone()
     if existing is None:
         conn.close()
@@ -1478,6 +1486,10 @@ def update_score(score_id):
             "SELECT line FROM players WHERE id = ?", (existing["player_id"],)
         ).fetchone()
         player_line = player["line"] if player else 0
+        # Same lineless gate as create_score: editing a score on a Switch or
+        # MIXED cup must not re-stamp players.line onto the row.
+        if not cup_uses_lines(conn, existing["cup_id"]):
+            player_line = 0
         try:
             line_score_val = checked_line_score(score_int, player_line)
         except InvalidInput as e:

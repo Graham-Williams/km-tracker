@@ -12,6 +12,7 @@ import json
 import os
 
 import pytest
+from playwright.sync_api import expect
 
 # 1x1 red PNG — any decodable image works; the client re-encodes to JPEG.
 TINY_PNG = base64.b64decode(
@@ -123,6 +124,9 @@ def test_mixed_cup_full_flow(page, base_url):
 
     # --- Completion page: per-race console labels, combined-total note ---
     assert "complete" in page.url
+    # wait_for_url can resolve before the new document has finished parsing, so
+    # anchor on a locator (auto-retrying) before reading page.content().
+    expect(page.locator("#cup-form")).to_be_visible(timeout=15000)
     body = page.content()
     assert "Race 1 (" in body and "Race 3 (" in body
     assert "combined total" in body
@@ -134,7 +138,7 @@ def test_mixed_cup_full_flow(page, base_url):
     page.wait_for_url("**/cups")
 
     # History shows the console-order badge.
-    assert "→" in page.locator(".badge-info").first.text_content()
+    expect(page.locator(".badge-info").first).to_contain_text("→", timeout=15000)
 
     assert errors == [], f"JS errors during a mixed cup: {errors}"
 
@@ -147,11 +151,12 @@ def test_console_flip_does_not_replay_on_refresh(page, base_url):
     before = page.locator(".page-subtitle").first.text_content()
 
     page.reload()
-    page.wait_for_load_state("networkidle")
-
-    # Modal is still rendered (no races yet) but must not auto-open again.
-    assert page.locator("#console-flip-modal.active").count() == 0
-    assert page.locator(".page-subtitle").first.text_content() == before
+    # The modal is still RENDERED (no races yet) but must not auto-open. Anchor
+    # on it being present before asserting it isn't active, so the check can't
+    # land on a half-parsed document.
+    expect(page.locator("#console-flip-modal")).to_have_count(1, timeout=15000)
+    expect(page.locator("#console-flip-modal.active")).to_have_count(0)
+    expect(page.locator(".page-subtitle").first).to_have_text(before)
 
 
 def test_pure_cup_has_no_mixed_chrome(page, base_url):
@@ -326,10 +331,10 @@ def test_swap_reminder_does_not_reopen_on_refresh(page, base_url):
     page.locator("#swap-reminder-modal.active").wait_for(state="hidden", timeout=5000)
 
     page.reload()
-    page.locator("#second-console-banner").wait_for(timeout=5000)
-    assert page.locator("#swap-reminder-modal.active").count() == 0
+    expect(page.locator("#second-console-banner")).to_be_visible(timeout=15000)
+    expect(page.locator("#swap-reminder-modal.active")).to_have_count(0)
     # Controls are usable, not covered by a re-opened modal.
-    assert page.locator("#spin-btn").is_enabled()
+    expect(page.locator("#spin-btn")).to_be_enabled()
 
 
 def test_stale_manual_override_recovers_instead_of_dead_ending(page, base_url):
@@ -359,8 +364,10 @@ def test_stale_manual_override_recovers_instead_of_dead_ending(page, base_url):
     page.locator("#next-race-btn, #complete-btn").first.click()
     page.locator("#next-race-confirm-btn").click()
 
-    # The page recovers onto race 3 with the OTHER console's wheel.
-    page.locator("text=Race 3 of 4").wait_for(timeout=15000)
+    # The page recovers onto race 3 with the OTHER console's wheel. "Race 3 of
+    # 4" only exists on the post-reload document (this page said "Race 2"), so
+    # it's a real navigation anchor.
+    expect(page.locator("text=Race 3 of 4")).to_be_visible(timeout=15000)
     assert page.evaluate("RACE_EDITION") != stale_edition
 
 
@@ -393,6 +400,13 @@ def test_next_race_non_json_response_recovers(page, base_url):
     page.locator("#next-race-confirm-btn").click()
 
     # The page reloads and re-syncs rather than hanging on a dead confirm modal.
-    page.locator("#spin-btn").wait_for(state="visible", timeout=15000)
-    assert page.locator("#next-race-modal.active").count() == 0
-    assert page.locator("#spin-btn").is_enabled()
+    #
+    # These MUST be auto-retrying expect() assertions, not bare asserts. The
+    # reload is triggered by the page's own .catch(), so there is nothing to
+    # wait_for beforehand — and #spin-btn exists (disabled, because the spin
+    # click disabled it) on the PRE-reload document too, so waiting for it to
+    # be "visible" returns instantly against the old page and the assertions
+    # race the navigation. to_be_enabled() retries until the fresh page lands,
+    # which is also the exact state the fix produces.
+    expect(page.locator("#spin-btn")).to_be_enabled(timeout=15000)
+    expect(page.locator("#next-race-modal.active")).to_have_count(0)

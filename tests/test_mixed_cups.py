@@ -664,6 +664,112 @@ def test_mk8dx_cup_still_lineless_control(client):
 
 
 # =============================================================================
+# The raw score routes must respect the lineless rule too
+#
+# POST /scores and POST /scores/<id>/edit stamped players.line in
+# unconditionally, so a mixed (or pure Switch) cup could still end up with a
+# handicap on a score row — a live write path around the feature's headline
+# "mixed cups are lineless" rule, bypassing zero_lines_if_lineless (which only
+# the completion paths call). Pre-existing on main for Switch cups; closed here
+# because a documented invariant with a known open write path isn't one.
+#
+# NOTE: these routes ALSO lack a completed-cup guard. That's issue #63 and is
+# deliberately NOT addressed here — only the lineless stamping.
+# =============================================================================
+
+
+def _line_player(client, name="Alice", line=5):
+    create_player(client, name, has_line=True)
+    conn = get_connection()
+    conn.execute("UPDATE players SET line = ? WHERE name = ?", (line, name))
+    conn.commit()
+    pid = conn.execute("SELECT id FROM players WHERE name = ?", (name,)).fetchone()["id"]
+    conn.close()
+    return pid
+
+
+def _score_row(cup_id=1):
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT score, line, line_score FROM scores WHERE cup_id = ?", (cup_id,)
+    ).fetchone()
+    conn.close()
+    return row
+
+
+@pytest.mark.parametrize("edition", [MIXED_EDITION, "mk8dx"])
+def test_create_score_route_stays_lineless(client, monkeypatch, edition):
+    _fix_flip(monkeypatch, "wii")
+    pid = _line_player(client)
+    _create_session(client, [str(pid)], edition=edition)
+
+    client.post(
+        "/scores",
+        data={"cup_id": "1", "player_id": str(pid), "score": "11"},
+        follow_redirects=True,
+    )
+    row = _score_row()
+    assert row is not None, "the score should still be created"
+    assert row["score"] == 11
+    assert row["line"] == 0          # was 5 — players.line stamped in
+    assert row["line_score"] == 11   # was 16
+
+
+@pytest.mark.parametrize("edition", [MIXED_EDITION, "mk8dx"])
+def test_update_score_route_stays_lineless(client, monkeypatch, edition):
+    _fix_flip(monkeypatch, "wii")
+    pid = _line_player(client)
+    _create_session(client, [str(pid)], edition=edition)
+    _submit_scores(client, cup_id=1, player_ids=[str(pid)], scores=["40"])
+
+    conn = get_connection()
+    score_id = conn.execute(
+        "SELECT id FROM scores WHERE cup_id = 1"
+    ).fetchone()["id"]
+    conn.close()
+
+    client.post(
+        f"/scores/{score_id}/edit", data={"score": "50"}, follow_redirects=True
+    )
+    row = _score_row()
+    assert row["score"] == 50
+    assert row["line"] == 0          # was 5 — re-stamped on every edit
+    assert row["line_score"] == 50   # was 55
+
+
+def test_create_score_route_still_stamps_the_line_on_a_wii_cup(client):
+    # Control: the gate must not over-reach and disable lines for Wii.
+    pid = _line_player(client)
+    _create_session(client, [str(pid)], edition="wii")
+
+    client.post(
+        "/scores",
+        data={"cup_id": "1", "player_id": str(pid), "score": "11"},
+        follow_redirects=True,
+    )
+    row = _score_row()
+    assert row["line"] == 5
+    assert row["line_score"] == 16
+
+
+def test_update_score_route_still_stamps_the_line_on_a_wii_cup(client):
+    pid = _line_player(client)
+    _create_session(client, [str(pid)], edition="wii")
+    _submit_scores(client, cup_id=1, player_ids=[str(pid)], scores=["40"])
+
+    conn = get_connection()
+    score_id = conn.execute("SELECT id FROM scores WHERE cup_id = 1").fetchone()["id"]
+    conn.close()
+
+    client.post(
+        f"/scores/{score_id}/edit", data={"score": "50"}, follow_redirects=True
+    )
+    row = _score_row()
+    assert row["line"] == 5
+    assert row["line_score"] == 55
+
+
+# =============================================================================
 # Existing guards still hold on a mixed cup
 # =============================================================================
 
