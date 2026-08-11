@@ -3,8 +3,10 @@ other) through a real browser.
 
 Covers the pieces that only exist client-side: the console coin-flip modal, the
 wheel swapping to the other console's track list at race 3, the one-shot swap
-photo reminder, and — most importantly — that a `partial_half` extraction
-response never auto-fills the score inputs.
+photo reminder, and the two-photo score capture — one photo per console, each
+filling ONLY its own half, with the cup total calculated (and readonly) from
+both. That last part is the one that matters: a console's screen shows that
+console's points, so those numbers may never reach the cup-total field.
 """
 
 import base64
@@ -122,18 +124,24 @@ def test_mixed_cup_full_flow(page, base_url):
 
     _play_one_race(page)
 
-    # --- Completion page: per-race console labels, combined-total note ---
+    # --- Completion page: per-race console labels, per-block score entry ---
     assert "complete" in page.url
     # wait_for_url can resolve before the new document has finished parsing, so
     # anchor on a locator (auto-retrying) before reading page.content().
     expect(page.locator("#cup-form")).to_be_visible(timeout=15000)
     body = page.content()
     assert "Race 1 (" in body and "Race 3 (" in body
-    assert "combined total" in body
 
-    score_inputs = page.locator('input[name="scores[]"]')
-    score_inputs.nth(0).fill("100")
-    score_inputs.nth(1).fill("80")
+    # Each console's half is entered separately; the total is calculated.
+    block1 = page.locator('input[name="block1_scores[]"]')
+    block2 = page.locator('input[name="block2_scores[]"]')
+    totals = page.locator('input[name="scores[]"]')
+    block1.nth(0).fill("55")
+    block2.nth(0).fill("45")
+    block1.nth(1).fill("40")
+    block2.nth(1).fill("40")
+    expect(totals.nth(0)).to_have_value("100")
+    expect(totals.nth(1)).to_have_value("80")
     page.click('button[type="submit"]')
     page.wait_for_url("**/cups")
 
@@ -181,12 +189,13 @@ def test_pure_cup_has_no_mixed_chrome(page, base_url):
 
 
 @requires_in_process_server
-def test_mixed_cup_photo_never_autofills_scores(page, base_url, monkeypatch):
-    """The regression that matters most: on a mixed cup the completion photo
-    shows only the SECOND console's half, so its numbers are half totals.
-    A `partial_half` response must leave every score input EMPTY — filling
-    plausible-looking half totals would permanently record ~half the true
-    points with no signal."""
+def test_mixed_cup_block_photo_fills_only_its_own_half(page, base_url, monkeypatch):
+    """A mixed cup gets ONE PHOTO PER CONSOLE, each filling only its own half.
+
+    This is the regression that matters most, restated for the two-photo world:
+    a console's screen shows that console's points, so those numbers may only
+    ever land in that console's field. The cup TOTAL is calculated from both
+    halves and is readonly — nothing can write a half total into it."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", "e2e-fake-key")
 
     _create_player(page, base_url, "Alice")
@@ -199,10 +208,24 @@ def test_mixed_cup_photo_never_autofills_scores(page, base_url, monkeypatch):
 
     page.goto(f"{base_url}/cup-session/{cup_id}/complete")
 
-    # The warning must be present in the photo panel BEFORE any photo is taken.
-    assert page.locator("#photo-score .photo-half-warning").is_visible()
+    # Two panels, one per console — and no single whole-cup panel any more.
+    assert page.locator("#photo-score").count() == 0
+    assert page.locator("#photo-block-1").count() == 1
+    assert page.locator("#photo-block-2").count() == 1
+    # The form carries no photo payload: each photo POSTs on its own request.
+    assert page.locator('input[name="photo_data"]').count() == 0
 
-    # Exactly what the server sends for a mixed cup: rows, but no scores.
+    player_ids = page.eval_on_selector_all(
+        ".score-row", "rows => rows.map(r => r.dataset.playerId)"
+    )
+    page.route(
+        "**/cups/*/photo/*",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"ok": True, "block": 2, "edition": "mk8dx", "label": "Switch"}),
+        ),
+    )
     page.route(
         "**/extract-scores",
         lambda route: route.fulfill(
@@ -210,10 +233,11 @@ def test_mixed_cup_photo_never_autofills_scores(page, base_url, monkeypatch):
             content_type="application/json",
             body=json.dumps(
                 {
-                    "scores": {},
+                    "scores": {player_ids[0]: 42, player_ids[1]: 38},
                     "ambiguous": [],
                     "unmatched_players": [],
-                    "partial_half": True,
+                    "partial_half": False,
+                    "block": 2,
                     "raw_rows": [
                         {"position": 1, "character": "Yoshi", "points": 42, "is_highlighted": True},
                         {"position": 2, "character": "Mario", "points": 38, "is_highlighted": True},
@@ -224,37 +248,145 @@ def test_mixed_cup_photo_never_autofills_scores(page, base_url, monkeypatch):
     )
 
     page.set_input_files(
-        "#photo-pick",
+        "#photo-pick-2",
         {"name": "standings.png", "mimeType": "image/png", "buffer": TINY_PNG},
     )
-    page.locator(".photo-attach-status.is-success").wait_for(state="visible")
-    page.locator(".photo-mapping").wait_for(state="visible")
+    page.locator("#photo-block-2 .photo-attach-status.is-success").wait_for(state="visible")
+    page.locator("#photo-block-2 .photo-mapping").wait_for(state="visible")
 
-    # NOTHING auto-filled.
-    scores = page.locator(".score-input")
-    for i in range(scores.count()):
-        assert scores.nth(i).input_value() == ""
+    # The SECOND block's inputs are filled; the first block's are untouched.
+    block2 = page.locator('input[name="block2_scores[]"]')
+    block1 = page.locator('input[name="block1_scores[]"]')
+    expect(block2.nth(0)).to_have_value("42")
+    expect(block2.nth(1)).to_have_value("38")
+    assert block1.nth(0).input_value() == ""
+    assert block1.nth(1).input_value() == ""
 
-    # And the status says why, instead of "Filled N scores".
-    status = page.locator(".photo-status").text_content()
-    assert "Filled" not in status
-    assert "combined total" in status
+    # The total stays BLANK while a half is missing — a half total must never
+    # be able to masquerade as a cup total.
+    totals = page.locator('input[name="scores[]"]')
+    assert totals.nth(0).input_value() == ""
+    assert totals.nth(0).get_attribute("readonly") is not None
 
-    # The panel is a READ-ONLY reference: it shows what was read off the photo
-    # but offers NO control that could write a half total into a score input.
-    # (The interactive version's own title tells the user to map players to
-    # rows — a titled three-tap path to persisting half totals as cup scores.)
-    assert page.locator(".photo-map-select").count() == 0
-    readonly = page.locator(".photo-map-readonly")
-    assert readonly.count() == 2
-    assert "42 pts" in readonly.nth(0).text_content()
-    title = page.locator(".photo-mapping-title").text_content()
-    assert "Map each player" not in title
-    assert "this console only" in title
+    # Typing the other half completes the arithmetic and re-runs placements.
+    block1.nth(0).fill("46")
+    block1.nth(1).fill("30")
+    expect(totals.nth(0)).to_have_value("88")
+    expect(totals.nth(1)).to_have_value("68")
+    expect(page.locator(".score-place").first).to_contain_text("st")
 
-    # Nothing on the page can fill a score: still empty after the panel renders.
-    for i in range(scores.count()):
-        assert scores.nth(i).input_value() == ""
+    # The mapping panel writes into THIS block only.
+    selects = page.locator("#photo-block-2 .photo-map-select")
+    assert selects.count() == 2
+    selects.nth(0).select_option(label="— leave blank —")
+    expect(block2.nth(0)).to_have_value("")
+    expect(block1.nth(0)).to_have_value("46")   # the other half is untouched
+    expect(totals.nth(0)).to_have_value("")     # and the total goes blank again
+
+
+@requires_in_process_server
+def test_swap_photo_uploads_from_the_race_page(page, base_url, monkeypatch):
+    """The first console's results screen is captured DURING the cup — at the
+    last race of the first block, before "Next Race" — and the swap reminder
+    carries the same control while staying skippable."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "e2e-fake-key")
+    _start_mixed_session(page, base_url)
+    _dismiss_console_flip(page)
+
+    # Race 1 page: nothing to photograph yet.
+    assert page.locator("#photo-block-1").count() == 0
+
+    _play_one_race(page, next_race=2)
+
+    # Race 2 = last race of the first block: the capture control appears.
+    panel = page.locator("#photo-block-1")
+    expect(panel).to_have_count(1)
+    page.set_input_files(
+        "#photo-pick-1",
+        {"name": "standings.png", "mimeType": "image/png", "buffer": TINY_PNG},
+    )
+    page.locator("#photo-block-1 .photo-attach-status.is-success").wait_for(state="visible")
+    assert "saved" in page.locator("#photo-block-1 .photo-attach-status").text_content()
+
+    # It really is persisted, tagged to block 1.
+    cup_id = page.url.rstrip("/").split("/")[-1]
+    assert page.request.get(f"{base_url}/cups/{cup_id}/photo/1").status == 200
+    assert page.request.get(f"{base_url}/cups/{cup_id}/photo/2").status == 404
+
+    # Reloading shows the saved state instead of an empty control.
+    page.reload()
+    expect(page.locator("#photo-block-1 .photo-attach-status")).to_be_visible()
+    assert "Replace photo" in page.locator(
+        '#photo-block-1 [data-photo-input="photo-pick-1"]'
+    ).text_content()
+
+    # The swap reminder (race 3) offers the same control and is skippable.
+    _play_one_race(page, next_race=3)
+    page.locator("#swap-reminder-modal.active").wait_for(timeout=5000)
+    assert page.locator(
+        '#swap-reminder-modal [data-photo-input="photo-take-1"]'
+    ).count() == 1
+    page.click("#swap-reminder-ok-btn")
+    page.locator("#swap-reminder-modal.active").wait_for(state="hidden", timeout=5000)
+    # Skipping changes nothing about the cup — the race controls are usable.
+    expect(page.locator("#spin-btn")).to_be_enabled()
+
+
+@requires_in_process_server
+def test_read_scores_from_the_saved_swap_photo(page, base_url, monkeypatch):
+    """A photo taken at the swap is read for scores later, on the completion
+    page, with no image round-tripping through the browser."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "e2e-fake-key")
+    _start_mixed_session(page, base_url)
+    _dismiss_console_flip(page)
+    _play_one_race(page, next_race=2)
+
+    page.set_input_files(
+        "#photo-pick-1",
+        {"name": "standings.png", "mimeType": "image/png", "buffer": TINY_PNG},
+    )
+    page.locator("#photo-block-1 .photo-attach-status.is-success").wait_for(state="visible")
+
+    cup_id = page.url.rstrip("/").split("/")[-1]
+    page.goto(f"{base_url}/cup-session/{cup_id}/complete")
+
+    # The saved photo is previewed and offers a "read scores" action.
+    expect(page.locator("#photo-block-1 .photo-preview")).to_be_visible()
+    read_btn = page.locator("#photo-block-1 .photo-read-btn")
+    expect(read_btn).to_be_visible()
+
+    player_ids = page.eval_on_selector_all(
+        ".score-row", "rows => rows.map(r => r.dataset.playerId)"
+    )
+    bodies = []
+
+    def _capture(route):
+        bodies.append(route.request.post_data_json)
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "scores": {player_ids[0]: 46},
+                    "ambiguous": [],
+                    "unmatched_players": ["Bob"],
+                    "partial_half": False,
+                    "block": 1,
+                    "raw_rows": [
+                        {"position": 1, "character": "Funky Kong", "points": 46, "is_highlighted": True},
+                    ],
+                }
+            ),
+        )
+
+    page.route("**/extract-scores", _capture)
+    read_btn.click()
+    expect(page.locator('input[name="block1_scores[]"]').nth(0)).to_have_value("46")
+
+    # No image in the request — the server re-reads the photo it already holds.
+    assert bodies and "image" not in bodies[0]
+    assert bodies[0]["block"] == 1
+
 
 
 @requires_in_process_server
