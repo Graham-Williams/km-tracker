@@ -105,6 +105,20 @@ def _photo_rows(cup_id=1):
     return rows
 
 
+def _all_photo_rows():
+    """Every photo row in the DB, oldest first — for asserting that a prune
+    scoped to one (cup, block) left everything else alone."""
+    conn = get_connection()
+    rows = [
+        dict(r)
+        for r in conn.execute(
+            "SELECT id, cup_id, block FROM cup_photos ORDER BY id"
+        )
+    ]
+    conn.close()
+    return rows
+
+
 def _cup_status(cup_id=1):
     conn = get_connection()
     row = conn.execute("SELECT status FROM cups WHERE id = ?", (cup_id,)).fetchone()
@@ -482,20 +496,96 @@ def test_upload_labels_the_block_with_its_own_console(client, monkeypatch, first
 
 
 def test_replacing_a_block_photo_keeps_the_other_block_intact(client, monkeypatch):
-    """Append-only: replacing is another INSERT and the newest row per block
-    wins. The other block is untouched, and the legacy blockless route keeps
-    returning the newest photo of ANY block."""
+    """Replacing is another INSERT and the newest row per block wins. The other
+    block is untouched, and the legacy blockless route keeps returning the
+    newest photo of ANY block."""
     _start_mixed(client, monkeypatch)
     _upload(client, 1, 2, image=OTHER_B64)
     _upload(client, 1, 1, image=PHOTO_B64)
     _upload(client, 1, 1, image=OTHER_B64)  # replace block 1
 
-    assert len(_photo_rows()) == 3  # nothing deleted
+    # One row per block: the replaced block-1 photo is pruned, block 2 stays.
+    assert [r["block"] for r in _photo_rows()] == [2, 1]
     assert client.get("/cups/1/photo/1").data == OTHER_BYTES
     assert client.get("/cups/1/photo/2").data == OTHER_BYTES
     # The blockless route is deliberately "newest of any block" — /cups' single
     # thumbnail and the existing tests rely on it.
     assert client.get("/cups/1/photo").status_code == 200
+
+
+def test_retakes_do_not_accumulate(client, monkeypatch):
+    """RETENTION: one photo per (cup, block) — the newest.
+
+    "Replace photo" is an ordinary action (blurry shot, wrong screen) and
+    nothing ever serves an older row, so without a prune every retake would sit
+    in the DB forever — and backup.sh re-uploads the WHOLE database file to
+    Drive on every change, so each dead ~700 KB photo would be re-shipped for
+    the rest of time."""
+    _start_mixed(client, monkeypatch)
+    for _ in range(5):
+        assert _upload(client, 1, 1, image=PHOTO_B64).status_code == 200
+    assert _upload(client, 1, 1, image=OTHER_B64).status_code == 200
+
+    rows = _photo_rows()
+    assert len(rows) == 1
+    assert bytes(rows[0]["image"]) == OTHER_BYTES  # the newest upload survives
+    assert client.get("/cups/1/photo/1").data == OTHER_BYTES
+
+
+def test_pruning_one_block_leaves_the_other_block_and_other_cups_alone(
+    client, monkeypatch
+):
+    _start_mixed(client, monkeypatch)
+    _upload(client, 1, 2, image=PHOTO_B64)
+    # A second mixed cup, with its own photos. Inserted directly: only one cup
+    # may be in progress at a time and cups.date is UNIQUE to the second, so a
+    # same-second second session can't be created through the UI.
+    _complete(client, scores=["", ""], b1=["10", "10"], b2=["10", "10"])
+    conn = get_connection()
+    conn.execute(
+        "INSERT INTO cups (date, status, game_edition, first_edition) "
+        "VALUES ('2026-01-02 20:00:00', 'in_progress', ?, 'wii')",
+        (MIXED_EDITION,),
+    )
+    conn.commit()
+    conn.close()
+    _upload(client, 2, 1, image=PHOTO_B64)
+    _upload(client, 2, 2, image=PHOTO_B64)
+
+    for _ in range(3):
+        _upload(client, 1, 1, image=OTHER_B64)
+
+    assert [(r["cup_id"], r["block"]) for r in _all_photo_rows()] == [
+        (1, 2),
+        (2, 1),
+        (2, 2),
+        (1, 1),
+    ]
+    assert client.get("/cups/1/photo/2").data == PHOTO_BYTES
+    assert client.get("/cups/2/photo/1").data == PHOTO_BYTES
+    assert client.get("/cups/2/photo/2").data == PHOTO_BYTES
+
+
+def test_pruning_never_touches_a_legacy_blockless_photo(client, monkeypatch):
+    """Pre-existing rows carry block NULL — the whole-cup photo. `block = ?` is
+    a non-NULL comparison so they can't match the prune, and /cups/<id>/photo
+    keeps working for cups photographed before this feature existed."""
+    _start_mixed(client, monkeypatch)
+    conn = get_connection()
+    conn.execute(
+        "INSERT INTO cup_photos (cup_id, image, mime_type, created_at, block) "
+        "VALUES (1, ?, 'image/jpeg', '2026-01-01 00:00:00', NULL)",
+        (PHOTO_BYTES,),
+    )
+    conn.commit()
+    conn.close()
+
+    for _ in range(3):
+        _upload(client, 1, 1, image=OTHER_B64)
+
+    rows = _photo_rows()
+    assert [r["block"] for r in rows] == [None, 1]
+    assert bytes(rows[0]["image"]) == PHOTO_BYTES
 
 
 def test_block_photo_route_serves_only_that_block(client, monkeypatch):

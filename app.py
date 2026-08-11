@@ -2723,10 +2723,11 @@ def save_cup_photo(conn, cup_id, photo, block=None):
 
     `block` tags a MIXED cup's per-console screen (1 = first console, 2 =
     second); the default NULL means "the cup's photo", which is what every pure
-    cup and every pre-existing row is. cup_photos is append-only and has no
-    UNIQUE constraint — readers take the newest row (per block), so replacing a
-    photo is just another INSERT and a mis-tagged upload is fixed by uploading
-    again rather than by deleting anything.
+    cup and every pre-existing row is. cup_photos has no UNIQUE constraint —
+    readers take the newest row (per block), so replacing a photo is just
+    another INSERT and a mis-tagged upload is fixed by uploading again rather
+    than by deleting anything. (The per-block upload route additionally prunes
+    the superseded rows for that block; see upload_cup_block_photo.)
     """
     image, mime_type = photo
     created_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
@@ -2802,6 +2803,23 @@ def upload_cup_block_photo(cup_id, block):
         # Either no such (live) cup, or a pure cup — which keeps the single
         # whole-cup photo flow on its own form. One door per cup shape.
         return jsonify({"error": "No mixed cup to attach this photo to"}), 404
+    # RETENTION: exactly ONE photo per (cup, block) — the newest. "Replace
+    # photo" is an ordinary action (a blurry shot, the wrong screen), so without
+    # this every retake would live in the DB forever; and scripts/backup.sh
+    # snapshots and uploads the WHOLE database file on every change, so each
+    # dead ~700 KB photo would be re-uploaded to Drive for the rest of time.
+    # Nothing serves an older row — every reader takes the newest per block —
+    # so the superseded ones are pure weight.
+    #
+    # Same transaction as the INSERT: a photo is replaced or it isn't, and a
+    # crash can never land between "pruned" and "stored". `block = ?` is a
+    # non-NULL comparison, so a legacy blockless (NULL) row can't match it, and
+    # the cup_id/block pair keeps other blocks and other cups untouched.
+    conn.execute(
+        "DELETE FROM cup_photos WHERE cup_id = ? AND block = ? AND id < "
+        "(SELECT MAX(id) FROM cup_photos WHERE cup_id = ? AND block = ?)",
+        (cup_id, block, cup_id, block),
+    )
     conn.commit()
     conn.close()
     edition = block_edition(cup, block)
