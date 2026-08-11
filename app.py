@@ -836,26 +836,45 @@ def cups():
             f"ORDER BY p.name",
             cup_ids,
         ).fetchall()
-        photo_cup_ids = {
-            r["cup_id"]
-            for r in conn.execute(
-                f"SELECT DISTINCT cup_id FROM cup_photos WHERE cup_id IN ({placeholders})",
-                cup_ids,
-            ).fetchall()
-        }
+        photo_rows = conn.execute(
+            f"SELECT DISTINCT cup_id, block FROM cup_photos WHERE cup_id IN ({placeholders})",
+            cup_ids,
+        ).fetchall()
+        photo_cup_ids = {r["cup_id"] for r in photo_rows}
+        # A mixed cup can carry one photo PER CONSOLE BLOCK, so history shows a
+        # thumbnail per block, each labelled with the real console. Blockless
+        # (NULL) rows stay on the single whole-cup thumbnail.
+        photo_blocks = {}
+        for r in photo_rows:
+            if r["block"] in PHOTO_BLOCKS:
+                photo_blocks.setdefault(r["cup_id"], set()).add(r["block"])
     else:
         lc_rows = []
         photo_cup_ids = set()
+        photo_blocks = {}
     line_changes = {}
     for lc in lc_rows:
         line_changes.setdefault(lc["cup_id"], []).append(lc)
     conn.close()
+    # [(block, console label)] per cup, in played order — only for cups that
+    # actually have per-block photos.
+    block_photo_labels = {
+        cup_id: [
+            (b, edition_label(block_edition(cup, b)))
+            for b in PHOTO_BLOCKS
+            if b in blocks
+        ]
+        for cup in rows
+        for cup_id, blocks in [(cup["id"], photo_blocks.get(cup["id"], set()))]
+        if blocks
+    }
     return render_template(
         "cups.html",
         cups=rows,
         results=results,
         line_changes=line_changes,
         photo_cup_ids=photo_cup_ids,
+        block_photo_labels=block_photo_labels,
     )
 
 
@@ -966,6 +985,14 @@ def edit_cup(cup_id):
         ).fetchone()
         is not None
     )
+    # Mixed cups keep one photo per console block; show each, labelled with the
+    # real console in played order.
+    block_photos = photo_blocks_for_cup(conn, cup_id)
+    block_photo_labels = [
+        (b, edition_label(block_edition(cup, b)))
+        for b in PHOTO_BLOCKS
+        if b in block_photos
+    ]
     # Single source of truth for the line UI (the template used to re-derive it
     # from a `game_edition == 'wii'` string test in two places, HTML and JS).
     lines_on = cup_uses_lines(conn, cup_id)
@@ -982,6 +1009,7 @@ def edit_cup(cup_id):
         lines_by_id=lines_by_id,
         lines_on=lines_on,
         has_photo=has_photo,
+        block_photo_labels=block_photo_labels,
     )
 
 
@@ -1969,12 +1997,17 @@ def _get_cup_session(cup_id):
         (cup_id,),
     ).fetchall()
 
+    # Which console blocks already have a results photo (mixed cups only) —
+    # drives the "Saved ✓ — replace" state on the swap capture control.
+    block_photos = photo_blocks_for_cup(conn, cup_id)
+
     conn.close()
     return {
         "cup": cup,
         "players": players,
         "races": races,
         "available_players": available_players,
+        "block_photos": block_photos,
     }
 
 
@@ -2027,6 +2060,15 @@ def cup_session_race(cup_id):
         show_swap_reminder=mixed and len(races) == RACES_PER_BLOCK,
         next_console_label=edition_label(swap_edition),
         races_per_block=RACES_PER_BLOCK,
+        # Capture the FIRST console's results screen while it's still on screen.
+        # Offered on the last race of block 1 (before "Next Race" is pressed —
+        # the results are up right then) and still on the race-3 page, where the
+        # swap reminder fires. It is always optional: skipping it just means
+        # that half gets typed in at completion.
+        show_block_photo_button=mixed
+        and current_race in (RACES_PER_BLOCK, RACES_PER_BLOCK + 1),
+        finishing_console_label=edition_label(race_edition(cup, RACES_PER_BLOCK)),
+        block1_photo_saved=bool(session["block_photos"].get(1)),
     )
 
 

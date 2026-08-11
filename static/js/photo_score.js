@@ -640,7 +640,12 @@ window.initBlockPhoto = function (opts) {
     var mapWarnEl = root.querySelector(".photo-map-warning");
     var mapUnassignedEl = root.querySelector(".photo-map-unassigned");
     var readBtn = root.querySelector(".photo-read-btn");
-    var pickBtn = root.querySelector('button[data-photo-input="photo-pick-' + block + '"]');
+    // Every "Upload photo" control for this block, wherever it lives (the race
+    // page repeats it inside the swap-reminder modal) — they all relabel to
+    // "Replace photo" once a photo is saved.
+    var pickBtns = document.querySelectorAll(
+        '[data-photo-input="photo-pick-' + block + '"]'
+    );
     var form = root.closest("form");
     var submitBtn = form ? form.querySelector('button[type="submit"]') : null;
 
@@ -938,7 +943,7 @@ window.initBlockPhoto = function (opts) {
             }
             // Server-confirmed, so the label can say so honestly.
             setAttachState("success", (res.body.label || opts.label) + " photo saved ✓");
-            if (pickBtn) pickBtn.textContent = "Replace photo";
+            pickBtns.forEach(function (btn) { btn.textContent = "Replace photo"; });
             if (readBtn) { readBtn.hidden = false; readBtn.disabled = false; }
             if (opts.extractUrl) extract({ image: base64, mime_type: "image/jpeg" }, seq);
         }).catch(function () {
@@ -970,8 +975,14 @@ window.initBlockPhoto = function (opts) {
     }
 
     // Wire the visible buttons to the hidden file inputs. They ship disabled,
-    // so a dead script means the picker never opens.
-    root.querySelectorAll("button[data-photo-input]").forEach(function (btn) {
+    // so a dead script means the picker never opens. Queried document-wide (by
+    // THIS block's input ids, so panels can't cross-wire) because the race page
+    // repeats the same control inside the swap-reminder modal, outside the
+    // panel — both must drive the same pick.
+    document.querySelectorAll(
+        '[data-photo-input="photo-take-' + block + '"],' +
+        '[data-photo-input="photo-pick-' + block + '"]'
+    ).forEach(function (btn) {
         var input = document.getElementById(btn.getAttribute("data-photo-input"));
         if (!input) return;
         btn.disabled = false;
