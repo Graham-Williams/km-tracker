@@ -19,6 +19,14 @@
     .completed-races .race-num { color: var(--color-faint); min-width: 4rem; display: inline-block; }
     .veto-status { font-size: 0.85rem; color: var(--color-muted); margin-bottom: var(--space-1); }
 
+    /* The swap modal's two capture buttons measure 125 + 8 + 139 = 272px inside
+       272px of modal content — flush to the sub-pixel. It doesn't overflow
+       today, but any font-metric shift (different OS/font stack, a browser
+       minimum font size, a longer label) would push a button outside the modal.
+       Let it wrap instead. The .photo-block rule doesn't cover this row because
+       the modal sits outside that container. */
+    .modal .field-row { flex-wrap: wrap; }
+
     /* Mixed cups: per-race console badges + the swap banner */
     .console-order { color: var(--color-faint); font-size: 0.85em; }
     .console-badge {

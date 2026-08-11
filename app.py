@@ -1017,7 +1017,9 @@ def edit_cup(cup_id):
 def update_cup(cup_id):
     conn = get_connection()
     cup = conn.execute(
-        "SELECT id FROM cups WHERE id = ? AND deleted_at IS NULL", (cup_id,)
+        "SELECT id, game_edition, first_edition FROM cups "
+        "WHERE id = ? AND deleted_at IS NULL",
+        (cup_id,),
     ).fetchone()
     if cup is None:
         conn.close()
@@ -1068,6 +1070,11 @@ def update_cup(cup_id):
     # would blank a mixed cup's halves even on a notes-only edit. Keep each
     # row's breakdown when it still sums to the total being written.
     preserve_block_scores(conn, cup_id, scores_data)
+    # Defence in depth, mirroring cup_session_submit: preserve_block_scores only
+    # ever re-attaches a pair it read back from this cup, and blocks are only
+    # written for mixed cups — but pair the two calls the same way here so a
+    # non-mixed cup can never carry a breakdown, whatever a future edit does.
+    clear_blocks_if_not_mixed(cup, scores_data)
 
     try:
         conn.execute(

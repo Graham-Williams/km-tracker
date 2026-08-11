@@ -78,7 +78,7 @@
     /* The spin buttons reserve ~13px of a 70px box for arrows nobody uses on a
        phone (typing and the arrow keys are unaffected) — that reservation is
        what clipped "Switch" to "Switc". */
-    .score-row--mixed input[type="number"] { -moz-appearance: textfield; }
+    .score-row--mixed input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
     .score-row--mixed input[type="number"]::-webkit-outer-spin-button,
     .score-row--mixed input[type="number"]::-webkit-inner-spin-button {
         -webkit-appearance: none; appearance: none; margin: 0;
@@ -188,12 +188,12 @@
                width (see .score-row--mixed in the styles above). #}
             <span class="score-break" aria-hidden="true"></span>
             <input type="number" name="block1_scores[]" class="block-score-input" data-block="1"
-                   min="0" step="1" placeholder="{{ block_labels[1] }}"
+                   min="0" max="9999" step="1" placeholder="{{ block_labels[1] }}"
                    aria-label="{{ player.name }} — {{ block_labels[1] }} score (races 1–2)"
                    {% if existing and existing.block1_score is not none %}value="{{ existing.block1_score }}"{% endif %}>
             <span class="block-op" aria-hidden="true">+</span>
             <input type="number" name="block2_scores[]" class="block-score-input" data-block="2"
-                   min="0" step="1" placeholder="{{ block_labels[2] }}"
+                   min="0" max="9999" step="1" placeholder="{{ block_labels[2] }}"
                    aria-label="{{ player.name }} — {{ block_labels[2] }} score (races 3–4)"
                    {% if existing and existing.block2_score is not none %}value="{{ existing.block2_score }}"{% endif %}>
             <span class="block-op" aria-hidden="true">=</span>
