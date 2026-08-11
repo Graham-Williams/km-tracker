@@ -149,15 +149,31 @@ command -v docker >/dev/null 2>&1 || die "docker not found on PATH — the snaps
 # the backup user must now be in the `docker` group. Reporting a socket
 # permission error as "container is not running" would send an operator hunting
 # the wrong thing entirely.
+#
+# The daemon-unreachable case has SEVERAL wordings, and matching only one of them
+# is how a plain "dockerd isn't up yet" gets mis-reported as "your container name
+# is wrong". Docker emits at least:
+#   - socket exists, daemon stopped (ECONNREFUSED):
+#       "Cannot connect to the Docker daemon at unix://... Is the docker daemon running?"
+#   - socket path absent (ENOENT — e.g. an early-boot tick before docker.socket):
+#       "failed to connect to the docker API at unix://...; check if the path is
+#        correct and if the daemon is running: ..."
+#   - a remote/TLS DOCKER_HOST that won't dial:
+#       "error during connect: Get \"https://...\": dial tcp ..."
+# The genuinely-missing-container case is matched POSITIVELY instead ("No such
+# object" / "No such container"), so the fallback no longer has to assert a
+# diagnosis it can't actually support — it lists the candidates instead.
 DOCKER_INSPECT_OUT=""
 if ! DOCKER_INSPECT_OUT="$(docker inspect -f '{{.State.Running}}' "${BACKUP_CONTAINER}" 2>&1)"; then
   case "${DOCKER_INSPECT_OUT}" in
     *"permission denied"*|*"Permission denied"*)
       die "cannot access the Docker socket as user '$(id -un)' — the backup user must be in the 'docker' group (sudo usermod -aG docker $(id -un), then re-login / restart the unit; see DEPLOY.md → 'Automated backups'). docker said: ${DOCKER_INSPECT_OUT}" ;;
-    *"Cannot connect to the Docker daemon"*|*"Is the docker daemon running"*)
-      die "cannot connect to the Docker daemon (is it running?) — cannot snapshot. docker said: ${DOCKER_INSPECT_OUT}" ;;
-    *)
+    *"Cannot connect to the Docker daemon"*|*"Is the docker daemon running"*|*"failed to connect to the docker API"*|*"error during connect"*)
+      die "cannot connect to the Docker daemon (is it running, and is DOCKER_HOST/the socket path right?) — cannot snapshot. docker said: ${DOCKER_INSPECT_OUT}" ;;
+    *"No such object"*|*"No such container"*)
       die "app container '${BACKUP_CONTAINER}' not found — cannot snapshot (set BACKUP_CONTAINER in .env.backup if the name differs). docker said: ${DOCKER_INSPECT_OUT}" ;;
+    *)
+      die "could not inspect app container '${BACKUP_CONTAINER}' — cannot snapshot. Check, in this order: the Docker daemon is up and reachable, this user can use it, and BACKUP_CONTAINER matches the running container name (docker ps). docker said: ${DOCKER_INSPECT_OUT}" ;;
   esac
 fi
 [[ "${DOCKER_INSPECT_OUT}" == "true" ]] \

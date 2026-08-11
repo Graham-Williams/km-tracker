@@ -13,6 +13,16 @@ Description=KM Tracker SQLite backup (local snapshot + Drive push)
 # the local snapshot still runs and the Drive half just reports an error.
 Wants=network-online.target
 After=network-online.target
+# The snapshot runs via `docker exec`, so the Docker daemon must be up first.
+# Without this, an early-boot timer tick can fire before docker.socket exists and
+# the run fails with "failed to connect to the docker API" (it self-heals on the
+# next 5-minute tick, but it's an avoidable failed unit).
+# ORDERING ONLY — deliberately no Requires=/Wants=docker.service: on a box where
+# docker.service isn't installed or is named differently, a hard dependency would
+# stop this unit from running at all, whereas ordering-only is a no-op there and
+# the script still fails loudly with its own explicit docker diagnostics.
+# docker.service is itself ordered After=docker.socket, so this covers both.
+After=docker.service
 
 [Service]
 Type=oneshot
