@@ -40,9 +40,15 @@ enable Docker on boot:
 ```bash
 curl -fsSL https://get.docker.com | sudo sh
 sudo systemctl enable docker
-# Optional: run docker without sudo (log out/in afterward)
+# REQUIRED (not optional) if you want the automated backups: the backup user runs
+# its snapshot via `docker exec`, so it must reach the Docker socket without sudo.
+# Log out/in afterward for the new group to take effect.
 sudo usermod -aG docker "$USER"
 ```
+
+> Membership of the `docker` group is effectively root on this host (anyone in it
+> can start a privileged container). That tradeoff is accepted here — it's a
+> single-admin box and the backup needs it — and is tracked in issue #76.
 
 ## Step 2 — Disable sleep/suspend (headless box)
 
@@ -482,11 +488,21 @@ double-seeding).
 ## Automated backups
 
 The database lives at `./data/km_tracker.db` on the host. Backups are automated by
-`scripts/backup.sh`, driven by a systemd timer. The script runs on the **host**
-(not in the container) and:
+`scripts/backup.sh`, driven by a systemd timer. The script is orchestrated on the
+**host** but runs the actual snapshot **inside the app container**, and:
 
 - Takes a **consistent** snapshot using SQLite's online backup API via `python3`
   (stdlib only — no `sqlite3` CLI, no pip deps), safe to run while gunicorn writes.
+  The snapshot is run via `docker exec` **inside the app container** (default
+  container `km-tracker-app-1`, override with `BACKUP_CONTAINER`; DB path inside
+  the container is `/data/km_tracker.db`, override with `CONTAINER_DB_PATH`), then
+  the finished file is `docker cp`-ed out to a host temp file.
+  **Why inside the container:** the live DB is WAL-mode and its `-wal`/`-shm`
+  sidecars are owned by the container user (UID 10001). SQLite's online backup API
+  must write those sidecars to take its read lock, so running it host-side (as the
+  unprivileged backup user) fails with `sqlite3.OperationalError: attempt to write
+  a readonly database`. Running as UID 10001 (inside the container) is the fix.
+  The backup user must be able to run `docker` (in the `docker` group).
 - Keeps **frequent local snapshots** in `~/km-backups/snapshots/` (default;
   `LOCAL_BACKUP_DIR`), deduplicated by sha256 (an unchanged DB doesn't create a
   new file), pruned to the newest `LOCAL_RETENTION` (default 100). The snapshot
@@ -502,6 +518,15 @@ The database lives at `./data/km_tracker.db` on the host. Backups are automated 
   ring buffer can rotate out within hours when pushes are frequent, so the daily
   tier ensures a logical corruption that goes unnoticed for a day or two still has
   a clean copy to restore from.
+- **Refuses a catastrophically empty snapshot.** `entrypoint.sh` runs `init_db()`
+  on every container start, so if `/data` is ever remounted empty the app happily
+  recreates a schema-only DB — valid, `integrity_check`-clean, right table count,
+  zero rows. Backing that up would rotate every real copy out of the local ring
+  and the Drive tiers. If the new snapshot has **no rows in any table** while the
+  previous kept snapshot **has** data, the script fails loudly instead (rows, not
+  file size, so a `VACUUM` or genuinely deleting old cups can't false-positive).
+  A first-ever run with no previous snapshot is still allowed through, and
+  `ALLOW_EMPTY_SNAPSHOT=1` overrides the guard for the deliberate case.
 - Always keeps local snapshots even if the Drive push can't run. If rclone isn't
   set up yet (not installed, or the remote isn't configured), it logs a warning
   and **exits 0** — the local snapshot is already safe, so the systemd unit won't
@@ -511,6 +536,11 @@ The database lives at `./data/km_tracker.db` on the host. Backups are automated 
 The timer fires every 5 minutes (frequent local snapshots); the script itself
 throttles the off-box push to ~15 minutes. No secrets live in the repo — the
 rclone OAuth token is stored only in `~/.config/rclone/rclone.conf`.
+
+**Going the other way — restoring — is not a plain `cp`.** See
+"[Restore from a snapshot](#restore-from-a-snapshot)" below before you touch
+`data/km_tracker.db`: the stale WAL sidecars have to go, and the file has to be
+re-owned to UID 10001, or the restore silently gives you the old data back.
 
 ### 1. Install rclone
 
@@ -603,6 +633,26 @@ the OAuth token lives in rclone's config.)
 
 ### 4. Install the systemd units
 
+**First, confirm the backup user can drive Docker.** The snapshot runs via
+`docker exec`, so the account in the unit's `User=` **must** be in the `docker`
+group (Step 1) — this is a hard requirement, not a convenience. Run these as that
+user:
+
+```bash
+id -nG | tr ' ' '\n' | grep -qx docker \
+  && echo "docker group: OK" \
+  || echo "MISSING — run: sudo usermod -aG docker $USER   (then log out/in)"
+
+# The real proof — this must print: true
+docker inspect -f '{{.State.Running}}' km-tracker-app-1
+```
+
+If the group was just added, log out and back in (a fresh login shell) before
+retesting; systemd picks the new group up on the next service start.
+
+> Reminder from Step 1: the `docker` group is root-equivalent on this host. That
+> accepted tradeoff is tracked in issue #76.
+
 ```bash
 sudo cp deploy/km-backup.service deploy/km-backup.timer /etc/systemd/system/
 sudo systemctl daemon-reload
@@ -613,6 +663,35 @@ The units assume the repo at `/home/<user>/km-tracker` and run as user `<user>` 
 edit the `User=` line and the `ExecStart` path in `deploy/km-backup.service` to
 match your box before the `cp` above (or edit the installed copy, then
 `daemon-reload`).
+
+The service is ordered `After=docker.service` so an early-boot timer tick doesn't
+fire before the Docker socket exists. It's ordering only, with no `Requires=`, so
+the unit still runs (and fails with its own explicit diagnostics) on a box that
+doesn't have `docker.service`.
+
+#### Upgrading an ALREADY-INSTALLED unit
+
+`/etc/systemd/system/km-backup.service` is a **copy**. Nothing in the normal
+deploy path touches it — `git pull && docker compose up -d --build` only updates
+the app — so a change to `deploy/km-backup.service` in the repo has **no effect
+on a box that was set up earlier** until you re-apply it by hand. Do this
+whenever a pull changes that file (e.g. the `After=docker.service` line above):
+
+```bash
+cd /home/<user>/km-tracker
+
+# Either: re-copy the template and re-apply this box's real User=/ExecStart paths
+sudo cp deploy/km-backup.service /etc/systemd/system/
+sudo sed -i "s|<user>|$USER|g" /etc/systemd/system/km-backup.service
+
+# Or: leave the installed copy alone and just add the one new line under [Unit]
+#   sudo systemctl edit --full km-backup.service
+
+sudo systemctl daemon-reload
+
+# Confirm it took — After= should now list docker.service:
+systemctl show km-backup.service -p After
+```
 
 ### 5. Verify
 
@@ -631,12 +710,150 @@ ls -1 ~/km-backups/snapshots/
 rclone lsf gdrive:km-tracker-backups
 ```
 
-To restore, just copy a snapshot back over `data/km_tracker.db` while the app is
-stopped (it's a plain SQLite file).
+### Restore from a snapshot
+
+> **A restore is NOT just `cp snapshot data/km_tracker.db`.** That looks like it
+> works and silently gives you the **old** data back:
+>
+> - The live DB is **WAL-mode**, so `data/` normally also holds
+>   `km_tracker.db-wal` and `km_tracker.db-shm`. If you replace only the main DB
+>   file, the next open finds the **stale `-wal` sitting next to the new DB and
+>   replays it** — SQLite has no way to know the two don't belong together (the
+>   restored file's header still matches), so it raises **no error at all** and the
+>   app comes back serving the **pre-restore** rows. The first checkpoint after
+>   that then writes those stale WAL pages *permanently into* the restored file:
+>   page-level corruption, two different database images merged into one. The
+>   sidecars must be deleted in the same breath as the swap.
+> - Ownership has to be right too: the app writes the DB as the container user
+>   (**UID 10001**), and a DB file it can't write fails every write with
+>   `attempt to write a readonly database` — the exact bug class the backup script
+>   itself had to work around. `data/` is owned by 10001, which is why the copy
+>   needs `sudo` in the first place — a plain `cp` as your login user can't write
+>   into `data/` at all. A
+>   `sudo cp` **over an existing** `data/km_tracker.db` writes through the
+>   existing inode and *keeps* its `10001:10001` ownership — but if the file
+>   isn't there (fresh deploy, or you cleared `data/` while restoring) the new
+>   one lands owned by **root**. The `chown 10001:10001` below covers that case
+>   and is a harmless no-op in the other, so always run it rather than trying to
+>   work out which case you're in.
+>
+> Follow the whole sequence below, including the verification step — the failure
+> mode is silent, so "the app came back up" proves nothing.
+
+The usual "**never restart while a cup is in progress**" rule applies (see
+CLAUDE.md → deploy-safety); a restore is far more disruptive than a restart.
+
+```bash
+cd /home/<user>/km-tracker
+
+# 1. Pick the snapshot to restore — a local one:
+ls -1 ~/km-backups/snapshots/
+#    ...or pull one down from Drive (recent ring, or the daily/ long-tail tier):
+rclone lsf gdrive:km-tracker-backups
+rclone lsf gdrive:km-tracker-backups/daily
+mkdir -p ~/km-backups/restore
+rclone copy gdrive:km-tracker-backups/km_tracker_<TS>.db ~/km-backups/restore/
+#    Then pin it to a variable so every step below uses the same file:
+SNAP=~/km-backups/snapshots/km_tracker_<TS>.db     # or ~/km-backups/restore/...
+
+# 2. Note what that snapshot CONTAINS — step 9 compares against this.
+#    (Reading a snapshot host-side is fine, it's your own file; immutable=1 means
+#    the read can't create -wal/-shm sidecars next to it.)
+python3 -c "import sqlite3,pathlib,sys;u=pathlib.Path(sys.argv[1]).expanduser().resolve().as_uri()+'?immutable=1';c=sqlite3.connect(u,uri=True);print(c.execute('SELECT COUNT(*), MAX(id), MAX(date) FROM cups').fetchone())" "$SNAP"
+
+# 3. Capture the CURRENT state first, so a bad restore is reversible. Run the
+#    backup script while the app is still up: its in-container online backup
+#    folds the WAL in, whereas copying data/km_tracker.db by hand would miss
+#    whatever is still sitting in the -wal.
+#    If this step FAILS, that's expected in exactly the emergencies that bring
+#    you here — an empty DB trips the empty-snapshot guard, a corrupt one fails
+#    verification, a down or crash-looping container fails the "is it running"
+#    precondition. It is only a safety net: note the failure and go on to step 4.
+scripts/backup.sh && ls -1t ~/km-backups/snapshots/ | head -n1
+
+# 4. Park the automated backups for the duration. Between step 8 (app back up)
+#    and step 9 (verify) a 5-minute tick could snapshot — and push off-box — a
+#    restore that silently failed. Retention bounds the damage, but there's no
+#    reason to race it.
+sudo systemctl stop km-backup.timer
+
+# 5. Stop the app. Nothing may hold the DB open while it is swapped.
+docker compose stop app
+
+# 6. DELETE THE WAL SIDECARS. This is the step whose absence silently
+#    resurrects the old data: an orphaned -wal is replayed over whatever DB
+#    file it finds. (sudo: data/ is owned by UID 10001.)
+sudo rm -f data/km_tracker.db-wal data/km_tracker.db-shm
+
+# 7. Put the snapshot in place and make sure it ends up owned by the container
+#    user. `sudo cp` over the EXISTING file keeps its 10001 ownership; if the
+#    file wasn't there, the copy lands as root and the app fails with "attempt
+#    to write a readonly database" on its first write. The chown covers that
+#    case and is a no-op in the other — always run it.
+sudo cp "$SNAP" data/km_tracker.db
+sudo chown 10001:10001 data/km_tracker.db
+sudo chmod 644 data/km_tracker.db
+
+# 8. Start the app.
+docker compose up -d app
+docker compose ps
+```
+
+**9. Verify the restore actually took.** Ask the *running app's* DB the same
+question you asked the snapshot in step 2 — this is the only way to tell a real
+restore from a silent WAL replay:
+
+```bash
+docker exec km-tracker-app-1 python3 -c \
+  "import sqlite3; c=sqlite3.connect('/data/km_tracker.db'); print(c.execute('SELECT COUNT(*), MAX(id), MAX(date) FROM cups').fetchone())"
+```
+
+The three values **must match step 2's**. Pick a figure you know differs between
+the snapshot and the DB you replaced (cup count / newest cup date is the obvious
+one); if they'd be identical either way the check proves nothing — compare
+something that changed. Then load the site and confirm the expected cups are
+there.
+
+If you instead see the **pre-restore** numbers, the stale `-wal` was replayed:
+`docker compose stop app` immediately (every minute it runs risks a checkpoint
+baking those stale pages permanently into the file) and redo from step 6 — this
+time deleting the sidecars. **Leave `km-backup.timer` stopped** until the verify
+passes, so the bad state never gets snapshotted or pushed off-box.
+
+Once — and only once — the verify matches:
+
+```bash
+# 10. Restore confirmed. Un-park the automated backups.
+sudo systemctl start km-backup.timer
+systemctl list-timers | grep km-backup
+```
+
+The next backup run picks the restored DB up on its own. Two notes:
+
+- If you also cleared out `~/km-backups/snapshots/` while restoring, that's
+  fine — the script notices its state no longer matches any file on disk and
+  writes a fresh snapshot instead of deduplicating against nothing.
+- If you deliberately restored an **empty** DB, the script will refuse to back it
+  up ("EVERY table is empty while the previous snapshot has data" — the guard
+  against a remounted-empty `/data`). Run it once with `ALLOW_EMPTY_SNAPSHOT=1`,
+  or set that in `.env.backup`, to confirm you meant it.
 
 ### Manual one-off backup (without the timer)
 
 ```bash
-# Hot backup that's safe while the app is running:
-sqlite3 ./data/km_tracker.db ".backup ./data/km_tracker.$(date +%F).db"
+# Hot backup that's safe while the app is running. Run it INSIDE the container
+# (as UID 10001) — a host-side backup of the WAL-mode DB fails with "attempt to
+# write a readonly database" because it can't write the container-owned
+# -wal/-shm sidecars. This is exactly what scripts/backup.sh does.
+# NB: snapshot into the container's /tmp, NOT /data — /data is the live
+# bind-mounted data dir, and a failed `docker cp` would strand a full-size copy
+# of the DB right next to the real one. scripts/backup.sh uses /tmp for exactly
+# this reason; keep this recipe in step with it.
+docker exec km-tracker-app-1 python3 -c \
+  "import sqlite3; s=sqlite3.connect('/data/km_tracker.db'); d=sqlite3.connect('/tmp/km_tracker.manual.db'); s.backup(d); d.close(); s.close()"
+docker cp km-tracker-app-1:/tmp/km_tracker.manual.db ./km_tracker.$(date +%F).db
+docker exec km-tracker-app-1 rm -f /tmp/km_tracker.manual.db
 ```
+
+Or just run the automated script directly: `scripts/backup.sh` (it does the
+in-container snapshot, dedupe, and Drive push).

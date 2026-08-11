@@ -1,15 +1,28 @@
 # Automated KM Tracker DB backup (self-hosted "personalserver" box).
 #
 # Oneshot service driven by km-backup.timer. Paths assume the repo is checked
-# out at /home/<user>/km-tracker. Runs on the HOST as the unprivileged "<user>"
-# user (NOT in the container). Edit User= and the ExecStart path below to match
-# your box before installing. See DEPLOY.md → "Automated backups".
+# out at /home/<user>/km-tracker. Orchestrated on the HOST as the unprivileged
+# "<user>" user, but the DB snapshot runs INSIDE the app container via
+# `docker exec` (the WAL-mode DB must be backed up as UID 10001 — see DEPLOY.md),
+# so User= must be able to run docker (in the `docker` group). Edit User= and the
+# ExecStart path below to match your box before installing.
+# See DEPLOY.md → "Automated backups".
 [Unit]
 Description=KM Tracker SQLite backup (local snapshot + Drive push)
 # Don't bother running if there's no network at all (the Drive push needs it);
 # the local snapshot still runs and the Drive half just reports an error.
 Wants=network-online.target
 After=network-online.target
+# The snapshot runs via `docker exec`, so the Docker daemon must be up first.
+# Without this, an early-boot timer tick can fire before docker.socket exists and
+# the run fails with "failed to connect to the docker API" (it self-heals on the
+# next 5-minute tick, but it's an avoidable failed unit).
+# ORDERING ONLY — deliberately no Requires=/Wants=docker.service: on a box where
+# docker.service isn't installed or is named differently, a hard dependency would
+# stop this unit from running at all, whereas ordering-only is a no-op there and
+# the script still fails loudly with its own explicit docker diagnostics.
+# docker.service is itself ordered After=docker.socket, so this covers both.
+After=docker.service
 
 [Service]
 Type=oneshot

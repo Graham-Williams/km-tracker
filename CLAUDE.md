@@ -60,9 +60,37 @@ reaches the app over the internal network and no host port should be published.)
 
 ### Backups
 
-Automated by `scripts/backup.sh` on the **host** (not in the container), driven by
-the `deploy/km-backup.{service,timer}` systemd units:
+Automated by `scripts/backup.sh` (orchestrated on the **host**, but the snapshot
+itself runs **inside the app container**), driven by the
+`deploy/km-backup.{service,timer}` systemd units:
 
+- **The snapshot runs INSIDE the container (UID 10001), not host-side.** The live
+  DB is WAL-mode and its `-wal`/`-shm` sidecars are container-owned; SQLite's
+  online backup API must write them to take its read lock, so a host-side backup
+  fails `sqlite3.OperationalError: attempt to write a readonly database`. The
+  script runs the `.backup()` via `docker exec` in `BACKUP_CONTAINER` (default
+  `km-tracker-app-1`) against `CONTAINER_DB_PATH` (default `/data/km_tracker.db`),
+  then `docker cp`s the finished snapshot out to the host. The backup user must be
+  able to run `docker` (in the `docker` group). *(This was the root cause of a long silent backup
+  outage. The host-side online-backup did NOT fail deterministically — it
+  **flapped**, which is why it went unnoticed. A **rolling** 30-day journal query
+  (`journalctl --since "30 days ago"`) run on 2026-08-10 counted 7,834 timer
+  starts: 7,799 `attempt to write a readonly database` failures and just 35
+  successes. Treat those as a snapshot of a moving window, not exact totals —
+  re-running the same query minutes later shifts them, and a fixed
+  2026-07-11→2026-08-10 window reads 7,835 starts / 7,823 failures / 12
+  successes. The shape is the point: near-total failure either way. And the
+  successes overstate the good news — only **3** of the 35 wrote a new snapshot
+  file (`saved local snapshot`); the other 32 got past the backup step but
+  produced a DB identical to the previous one and deduped it away (`no change`).
+  Correspondingly only three snapshots reached Drive *in that window*
+  (`20260729T193843Z`, `20260810T073719Z`, `20260810T233609Z`) — the first
+  landing 23 days after the last pre-outage push (`20260706T221310Z`, one of 8
+  pushed on 2026-07-06 before the outage began), then 12 days apart. It succeeds
+  only when SQLite doesn't need to create or write the container-owned `-shm` —
+  i.e. when the WAL is empty or a reusable read-mark already exists — so an idle
+  app can make it look healthy. Fixed by this container-side approach,
+  2026-08-10; nothing landed on 2026-07-28.)*
 - **Local snapshots:** consistent SQLite online-backup snapshots into
   `~/km-backups/snapshots/` (default `LOCAL_BACKUP_DIR`; **outside** the
   container-owned `data/` bind-mount so the host backup process can write it —
@@ -71,13 +99,36 @@ the `deploy/km-backup.{service,timer}` systemd units:
 - **Off-box copies:** pushed to Google Drive via `rclone` on a throttled cadence
   (only when the DB changed and ≥ `DRIVE_PUSH_INTERVAL_MIN` minutes — default 15 —
   since the last push), pruned to the newest `DRIVE_RETENTION` (default 50).
-- The local half always runs even if the Drive push can't (rclone unconfigured →
-  reports the error, exits non-zero, but local snapshots are unaffected).
+- The local half always runs even if the Drive push can't (rclone not installed,
+  `RCLONE_DEST` unset, or the remote missing from the rclone config → warns and
+  **exits 0**, so the unit isn't marked failed every 5 minutes during setup; only
+  a *configured* remote that actually errors exits non-zero, and even then the
+  local snapshot is kept).
+- **Empty-DB guard:** `entrypoint.sh` runs `init_db()` on EVERY container start, so
+  a `/data` remounted empty makes the app recreate a schema-only DB — valid,
+  `integrity_check`-clean, full table count, **zero rows**. The script refuses a
+  snapshot with no rows in any user table when the previous kept snapshot had data
+  (rows, not file size, so a `VACUUM` or deleting old cups can't false-positive);
+  a first-ever run with no previous snapshot is still allowed, and
+  `ALLOW_EMPTY_SNAPSHOT=1` overrides it deliberately.
 - Config: gitignored `.env.backup` (template: `.env.backup.example`). **No secrets in
   the repo** — the rclone OAuth token lives only in `~/.config/rclone/rclone.conf`.
+- **Restoring is NOT `cp snapshot data/km_tracker.db`.** The live DB is WAL-mode, so
+  a stale `km_tracker.db-wal` sits next to it; copy only the main file and SQLite
+  **replays that orphaned WAL over the restored image** — no error, the app serves
+  the PRE-restore data, and the next checkpoint bakes the stale pages permanently
+  into the file (two DB images merged = corruption). Ownership matters too: the
+  restored file must end up owned by UID 10001 or the app fails every write with
+  `attempt to write a readonly database` (a `sudo cp` **over the existing** file
+  keeps its 10001 ownership; copying into an emptied/fresh `data/` lands as root —
+  so always `chown`). Correct sequence: park the backup timer → stop the container
+  → `rm -f data/km_tracker.db-{wal,shm}` → copy the snapshot → `chown 10001:10001`
+  → start → **verify** (compare a known count in the snapshot against what the
+  running container reads; the failure mode is silent) → restart the timer.
 
-Full setup/runbook (rclone headless auth, systemd install, restore) is in `DEPLOY.md`
-→ "Automated backups".
+Full setup/runbook (rclone headless auth, systemd install, and the full verified
+restore procedure) is in `DEPLOY.md` → "Automated backups" / "Restore from a
+snapshot".
 
 ### Staging environment
 
