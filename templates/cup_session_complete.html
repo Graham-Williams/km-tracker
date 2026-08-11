@@ -492,12 +492,38 @@
     });
 
     // The mixed form carries no photo payload, so photo_score.js's submit guard
-    // never mounts here. Keep the one check that still applies: an all-empty
-    // submit is rejected server-side by a redirect that wipes the form.
+    // never mounts here. This guard mirrors the two server-side rejections that
+    // would otherwise bounce the form — and a bounce REDIRECTS, so every number
+    // typed on the page is lost. The server stays authoritative; this only
+    // saves the user from retyping.
     (function () {
         var form = document.getElementById("cup-form");
         var warning = document.getElementById("submit-warning");
+        // Same sentence the server raises, injected from BLOCK_HALF_MISSING_MSG
+        // so the two wordings can't drift.
+        var HALF_ROW_MSG = {{ block_half_missing_msg|tojson }};
+        function reject(e, msg) {
+            e.preventDefault();
+            warning.textContent = msg;
+            warning.classList.add("is-error");
+            warning.hidden = false;
+        }
         form.addEventListener("submit", function (e) {
+            // (1) A row with exactly ONE half filled: the server rejects it, and
+            // the total input stays blank so the all-empty check below can't see
+            // it. Without this a single mistyped half discards the whole form.
+            var rows = form.querySelectorAll(".score-row");
+            for (var r = 0; r < rows.length; r++) {
+                var halves = rows[r].querySelectorAll(".block-score-input");
+                var filled = 0;
+                for (var h = 0; h < halves.length; h++) {
+                    if (halves[h].value.trim() !== "") filled++;
+                }
+                if (filled > 0 && filled < halves.length) {
+                    return reject(e, HALF_ROW_MSG);
+                }
+            }
+            // (2) Nothing scored at all — also a server-side reject + redirect.
             var inputs = form.querySelectorAll(".score-input");
             for (var i = 0; i < inputs.length; i++) {
                 if (!inputs[i].disabled && inputs[i].value.trim() !== "") {
@@ -505,11 +531,7 @@
                     return;
                 }
             }
-            e.preventDefault();
-            warning.textContent =
-                "Enter each player's two console scores (or at least one player's) before submitting.";
-            warning.classList.add("is-error");
-            warning.hidden = false;
+            reject(e, "Enter each player's two console scores (or at least one player's) before submitting.");
         });
     })();
     {% endif %}

@@ -542,3 +542,52 @@ def test_next_race_non_json_response_recovers(page, base_url):
     # which is also the exact state the fix produces.
     expect(page.locator("#spin-btn")).to_be_enabled(timeout=15000)
     expect(page.locator("#next-race-modal.active")).to_have_count(0)
+
+
+def test_a_half_filled_row_is_caught_before_the_form_is_lost(page, base_url):
+    """A mistyped half must not cost the user every number on the page.
+
+    The server rejects a row with exactly ONE console score filled — correctly,
+    since it can't invent the other half — but that rejection is a flash +
+    REDIRECT back to a form whose cup is still in_progress, so `existing_scores`
+    is empty and every value typed is gone. Mirror the rule client-side: block
+    the submit, say what to fix, keep the numbers.
+    """
+    _create_player(page, base_url, "Alice")
+    _create_player(page, base_url, "Bob")
+    page.goto(f"{base_url}/cup-session/new")
+    page.select_option('select[name="game_edition"]', "mixed")
+    page.click('button[type="submit"]')
+    page.wait_for_url("**/cup-session/*")
+    cup_id = page.url.rstrip("/").split("/")[-1]
+    page.goto(f"{base_url}/cup-session/{cup_id}/complete")
+    expect(page.locator("#cup-form")).to_be_visible(timeout=15000)
+
+    block1 = page.locator('input[name="block1_scores[]"]')
+    block2 = page.locator('input[name="block2_scores[]"]')
+    totals = page.locator('input[name="scores[]"]')
+
+    # Alice's halves are complete (so her total is filled and the old
+    # "is anything scored at all?" guard would happily let this through);
+    # Bob's second half is missing.
+    block1.nth(0).fill("46")
+    block2.nth(0).fill("42")
+    block1.nth(1).fill("30")
+    expect(totals.nth(0)).to_have_value("88")
+    assert totals.nth(1).input_value() == ""
+
+    page.click('button[type="submit"]')
+
+    warning = page.locator("#submit-warning")
+    expect(warning).to_be_visible()
+    assert "0" in warning.text_content()
+    # Still on the completion page, with every typed number intact.
+    assert "/complete" in page.url
+    expect(block1.nth(0)).to_have_value("46")
+    expect(block2.nth(0)).to_have_value("42")
+    expect(block1.nth(1)).to_have_value("30")
+
+    # Filling the missing half clears the objection and submits for real.
+    block2.nth(1).fill("40")
+    page.click('button[type="submit"]')
+    page.wait_for_url("**/cups", timeout=15000)

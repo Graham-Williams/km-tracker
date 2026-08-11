@@ -1224,6 +1224,22 @@ def parse_scores_from_form(form):
     return scores_data
 
 
+# Rejection message for a half-filled block row. ONE constant because the
+# client-side submit guard in cup_session_complete.html shows the same sentence
+# before the round trip — two copies would drift, and the wording is the whole
+# value of the message.
+#
+# It says "use 0", not "leave both blank and enter the total": the both-blank
+# fallback exists server-side (non-JS / crafted POSTs) but is unreachable from
+# the UI, where the total input is readonly on a mixed cup. The realistic case
+# is a player who joined mid-cup and scored nothing on the first console, and
+# for them 0 is both correct and enterable.
+BLOCK_HALF_MISSING_MSG = (
+    "Enter both console scores for every player — use 0 if they scored nothing "
+    "on that console."
+)
+
+
 def parse_block_scores_from_form(form, scores_data):
     """Fold a MIXED cup's per-console block scores into `scores_data`.
 
@@ -1281,9 +1297,7 @@ def parse_block_scores_from_form(form, scores_data):
         if b1_raw == "" and b2_raw == "":
             continue
         if b1_raw == "" or b2_raw == "":
-            raise InvalidInput(
-                "Enter both block scores, or leave both blank and enter the total."
-            )
+            raise InvalidInput(BLOCK_HALF_MISSING_MSG)
         try:
             player_id = parse_int_field(pid)
             block1 = parse_int_field(b1_raw)
@@ -2324,6 +2338,9 @@ def cup_session_complete(cup_id):
         block_labels={b: edition_label(block_edition(cup, b)) for b in PHOTO_BLOCKS},
         block_photos={b: b in block_photos for b in PHOTO_BLOCKS},
         photo_blocks=PHOTO_BLOCKS,
+        # The client-side submit guard mirrors the server's half-row rejection;
+        # it shows the SERVER's sentence so the two can never drift.
+        block_half_missing_msg=BLOCK_HALF_MISSING_MSG,
         lines_on=lines_on,
         existing_scores=existing_scores,
     )

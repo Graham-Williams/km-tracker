@@ -207,9 +207,42 @@ def test_one_block_only_is_rejected_and_writes_nothing(client, monkeypatch):
     _start_mixed(client, monkeypatch)
     response = _complete(client, scores=["88", "70"], b1=["46", "30"], b2=["42", ""])
     assert response.status_code == 200
-    assert "Enter both block scores" in response.get_data(as_text=True)
+    assert appmod.BLOCK_HALF_MISSING_MSG in response.get_data(as_text=True)
     assert _cup_status() == "in_progress"
     assert _score_rows() == []
+
+
+def test_the_rejection_message_asks_for_something_the_ui_can_actually_do(
+    client, monkeypatch
+):
+    """The message used to say "leave both blank and enter the total" — but on a
+    mixed cup the total input is readonly, so that instruction is impossible in
+    the browser. It must instead point at the enterable fix: type 0."""
+    assert "0" in appmod.BLOCK_HALF_MISSING_MSG
+    assert "total" not in appmod.BLOCK_HALF_MISSING_MSG.lower()
+    # And the advice works: a player who scored nothing on the first console.
+    _start_mixed(client, monkeypatch)
+    _complete(client, scores=["", ""], b1=["0", "30"], b2=["25", "40"])
+    assert _cup_status() == "completed"
+    rows = _score_rows()
+    assert [(r["block1_score"], r["block2_score"], r["score"]) for r in rows] == [
+        (0, 25, 25),
+        (30, 40, 70),
+    ]
+
+
+def test_the_client_guard_shows_the_servers_own_wording(client, monkeypatch):
+    """The submit guard in the page mirrors this server rejection so a mistyped
+    half doesn't cost the user every number on the form. It renders the SERVER's
+    sentence (injected via BLOCK_HALF_MISSING_MSG) — if someone re-types the
+    message in the template, the two drift and this fails."""
+    _start_mixed(client, monkeypatch)
+    page = client.get("/cup-session/1/complete").get_data(as_text=True)
+    # tojson escapes the em dash as a — sequence; compare on the JSON form.
+    import json as _json
+
+    assert _json.dumps(appmod.BLOCK_HALF_MISSING_MSG) in page
+    assert "block-score-input" in page
 
 
 def test_blocks_with_no_total_and_no_blocks_anywhere_is_still_rejected(client, monkeypatch):
