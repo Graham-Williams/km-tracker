@@ -448,6 +448,34 @@ def test_mixed_completion_page_shows_the_block_breakdown(client, monkeypatch):
     assert 'class="line-input"' not in page
 
 
+def test_mixed_row_is_marked_up_to_stack_at_phone_width(client, monkeypatch):
+    """Scores are entered on a phone at game night. Squeezed onto one line, a
+    mixed row's boxes collapsed to ~34px of usable space and a typed two-digit
+    score rendered INVISIBLE while the page scrolled sideways. The row now
+    stacks: the name owns line 1 and "A + B = Total" gets line 2. The hooks the
+    CSS hangs off (a `--mixed` modifier + a zero-height flex line-break) are
+    load-bearing, hence pinned here."""
+    _start_mixed(client, monkeypatch)
+    page = client.get("/cup-session/1/complete").get_data(as_text=True)
+    assert 'class="score-row score-row--mixed"' in page
+    assert 'class="score-break"' in page
+    assert ".score-row--mixed { flex-wrap: wrap;" in page  # the styles themselves
+    # step="1" pairs with the client-side whole-number check: the server takes
+    # integers only, so a half-typed "2.5" must never total up as if it were 2.
+    assert page.count('step="1"') == 2 * 2  # two halves x two players
+
+
+def test_pure_cup_row_keeps_its_single_line_markup(client):
+    """Control: none of the stacking machinery leaks onto a pure cup's row."""
+    _start_pure(client, "wii")
+    page = client.get("/cup-session/1/complete").get_data(as_text=True)
+    rows_section = page.split('id="score-rows"')[1].split('<div id="photo-score"')[0]
+    assert 'class="score-row"' in rows_section
+    assert "score-row--mixed" not in rows_section
+    assert "score-break" not in rows_section
+    assert 'step="1"' not in rows_section
+
+
 def test_mixed_completion_form_carries_no_photo_payload(client, monkeypatch):
     """Each photo POSTs on its own request. If the form ever regrew a photo
     field, two base64 photos could push the body past MAX_CONTENT_LENGTH and
@@ -460,6 +488,71 @@ def test_mixed_completion_form_carries_no_photo_payload(client, monkeypatch):
     assert 'id="photo-block-1"' in page
     assert 'id="photo-block-2"' in page
     assert "initPhotoScore(" not in page
+
+
+def test_mixed_completion_ignores_a_smuggled_blockless_photo(client, monkeypatch):
+    """A crafted POST can still put photo_data on the mixed completion form
+    (the page renders no such field). Storing it would leave a block=NULL row
+    on a mixed cup: invisible behind the per-block thumbnails AND unprunable —
+    the per-block prune compares `block = ?`, which never matches NULL — so it
+    would ride every backup forever. Drop it instead."""
+    _start_mixed(client, monkeypatch)
+    _upload(client, 1, 1)
+    response = _complete(
+        client,
+        scores=["", ""],
+        b1=["40", "30"],
+        b2=["30", "20"],
+        photo_data=PHOTO_B64,
+        photo_mime="image/jpeg",
+    )
+    assert response.status_code == 200
+    # The block photo is kept; the smuggled blockless one was never written.
+    assert [r["block"] for r in _photo_rows()] == [1]
+    # And the submit itself still succeeded normally.
+    assert _cup_status() == "completed"
+    assert [(r["score"], r["block1_score"], r["block2_score"]) for r in _score_rows()] == [
+        (70, 40, 30),
+        (50, 30, 20),
+    ]
+
+
+def test_mixed_completion_ignores_even_a_malformed_smuggled_photo(client, monkeypatch):
+    """A pure cup rejects the whole submit on a bad photo payload (never drop a
+    photo silently). A mixed cup has no photo field at all, so there is nothing
+    to lose — a garbage payload must not be able to bounce a valid cup."""
+    _start_mixed(client, monkeypatch)
+    response = _complete(
+        client,
+        scores=["", ""],
+        b1=["40", "30"],
+        b2=["30", "20"],
+        photo_data="not-base64!!",
+        photo_mime="image/jpeg",
+    )
+    assert response.status_code == 200
+    assert _cup_status() == "completed"
+    assert _photo_rows() == []
+
+
+def test_pure_cup_still_stores_a_form_photo(client):
+    """Control for the two above: the pure completion form's photo field is the
+    real path and still works."""
+    _start_pure(client, "wii")
+    client.post(
+        "/cup-session/1/complete",
+        data={
+            "notes": "",
+            "tz_offset": "",
+            "player_ids[]": ["1", "2"],
+            "scores[]": ["60", "40"],
+            "lines[]": ["0", "0"],
+            "photo_data": PHOTO_B64,
+            "photo_mime": "image/jpeg",
+        },
+        follow_redirects=True,
+    )
+    assert [r["block"] for r in _photo_rows()] == [None]
 
 
 def test_mixed_completion_page_replays_saved_blocks(client, monkeypatch):
@@ -1037,35 +1130,110 @@ def test_extraction_never_submits_or_writes_a_score(client, monkeypatch):
 
 
 # =============================================================================
-# Editing surfaces clear the breakdown rather than let it contradict the total
+# Editing surfaces: keep the breakdown when it still matches, never when it
+# would contradict the total
 # =============================================================================
 
 
-def test_editing_a_cup_nulls_the_block_breakdown(client, monkeypatch):
-    """/cups/<id>/edit only knows the total, so keeping the old halves would
-    leave block1 + block2 != score."""
-    _start_mixed(client, monkeypatch)
-    _complete(client, scores=["", ""], b1=["46", "30"], b2=["42", "40"])
-    client.post(
-        "/cups/1/edit",
+def _edit_cup(client, scores, notes="", cup_id=1, player_ids=("1", "2")):
+    """POST the real /cups/<id>/edit form, which renders NO block inputs and
+    always resubmits the totals it displayed."""
+    return client.post(
+        f"/cups/{cup_id}/edit",
         data={
             "date": "2026-03-15T20:00",
-            "notes": "",
+            "notes": notes,
             "tz_offset": "",
-            "player_ids[]": ["1", "2"],
-            "scores[]": ["90", "70"],
-            "lines[]": ["0", "0"],
+            "player_ids[]": list(player_ids),
+            "scores[]": list(scores),
+            "lines[]": ["0"] * len(player_ids),
         },
         follow_redirects=True,
     )
+
+
+def test_editing_a_cup_nulls_only_the_rows_whose_total_changed(client, monkeypatch):
+    """/cups/<id>/edit only knows totals. A row whose total MOVED loses its
+    halves (a breakdown that contradicts the number beside it is worse than
+    none) — but its neighbours, resubmitted unchanged, keep theirs."""
+    _start_mixed(client, monkeypatch)
+    _complete(client, scores=["", ""], b1=["46", "30"], b2=["42", "40"])
+    # Player 1: 46 + 42 = 88 -> retyped as 90. Player 2: 30 + 40 = 70, untouched.
+    _edit_cup(client, scores=["90", "70"])
     rows = _score_rows()
     assert [(r["score"], r["block1_score"], r["block2_score"]) for r in rows] == [
         (90, None, None),
-        (70, None, None),
+        (70, 30, 40),
+    ]
+
+
+def test_a_notes_only_cup_edit_keeps_the_whole_breakdown(client, monkeypatch):
+    """The reported data loss: editing ONLY the notes resubmits every total
+    unchanged, and used to blank all six halves — leaving the completion page
+    showing empty blocks above a readonly total, i.e. unrecoverable without
+    retyping both consoles."""
+    _start_mixed(client, monkeypatch, player_ids=("1", "2", "3"))
+    _complete(
+        client,
+        player_ids=("1", "2", "3"),
+        scores=["", "", ""],
+        b1=["10", "11", "12"],
+        b2=["20", "21", "22"],
+    )
+    before = _score_rows()
+    _edit_cup(
+        client,
+        scores=[str(r["score"]) for r in before],
+        notes="Blue shell at the line",
+        player_ids=("1", "2", "3"),
+    )
+    assert [(r["score"], r["block1_score"], r["block2_score"]) for r in _score_rows()] == [
+        (30, 10, 20),
+        (32, 11, 21),
+        (34, 12, 22),
+    ]
+
+
+def test_a_preserved_breakdown_always_still_sums_to_the_stored_total(client, monkeypatch):
+    """The invariant, not the mechanism: whenever both halves survive an edit,
+    block1 + block2 == score."""
+    _start_mixed(client, monkeypatch)
+    _complete(client, scores=["", ""], b1=["46", "30"], b2=["42", "40"])
+    _edit_cup(client, scores=["88", "71"])
+    for row in _score_rows():
+        if row["block1_score"] is not None or row["block2_score"] is not None:
+            assert row["block1_score"] + row["block2_score"] == row["score"]
+    # 88 was unchanged so it kept its halves; 71 moved by one and lost them.
+    assert [(r["score"], r["block1_score"], r["block2_score"]) for r in _score_rows()] == [
+        (88, 46, 42),
+        (71, None, None),
+    ]
+
+
+def test_a_pure_cup_edit_never_grows_a_breakdown(client):
+    """Control: preservation reads the row's OWN stored halves, which a pure
+    cup never has — so a pure cup's edit is untouched by it."""
+    from helpers import create_player
+
+    create_player(client, "Alice")
+    client.post(
+        "/cups",
+        data={
+            "date": "2026-03-15T20:00",
+            "player_ids[]": ["1"],
+            "scores[]": ["50"],
+            "lines[]": ["0"],
+        },
+        follow_redirects=True,
+    )
+    _edit_cup(client, scores=["50"], notes="same score", player_ids=("1",))
+    assert [(r["score"], r["block1_score"], r["block2_score"]) for r in _score_rows()] == [
+        (50, None, None)
     ]
 
 
 def test_editing_a_single_score_nulls_the_block_breakdown(client, monkeypatch):
+    """That form knows only its own total — and only its OWN row's halves go."""
     _start_mixed(client, monkeypatch)
     _complete(client, scores=["", ""], b1=["46", "30"], b2=["42", "40"])
     conn = get_connection()
@@ -1079,6 +1247,11 @@ def test_editing_a_single_score_nulls_the_block_breakdown(client, monkeypatch):
         95,
         None,
         None,
+    )
+    assert (rows[1]["score"], rows[1]["block1_score"], rows[1]["block2_score"]) == (
+        70,
+        30,
+        40,
     )
 
 

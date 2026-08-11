@@ -1064,6 +1064,11 @@ def update_cup(cup_id):
             flash(error)
             return redirect(url_for("edit_cup", cup_id=cup_id))
 
+    # This form only knows totals (it renders no block inputs), so a rewrite
+    # would blank a mixed cup's halves even on a notes-only edit. Keep each
+    # row's breakdown when it still sums to the total being written.
+    preserve_block_scores(conn, cup_id, scores_data)
+
     try:
         conn.execute(
             "UPDATE cups SET date = ?, notes = ? WHERE id = ?",
@@ -1337,14 +1342,63 @@ def clear_blocks_if_not_mixed(cup, scores_data):
         s["block2"] = None
 
 
+def preserve_block_scores(conn, cup_id, scores_data):
+    """Carry a row's EXISTING block breakdown through a rewrite that didn't
+    change its total.
+
+    save_scores DELETEs + re-INSERTs, so a write path that knows nothing about
+    blocks (`/cups/<id>/edit`, which renders no block inputs and always
+    resubmits the unchanged totals) NULLed every half — a notes-only edit
+    silently destroyed a mixed cup's whole breakdown, and the completion page
+    then showed blank halves above a readonly total, i.e. unrecoverable without
+    retyping.
+
+    The rule that matters is the INVARIANT, not "any rewrite wipes blocks":
+    stored `score` must equal `block1 + block2` whenever both are non-NULL. So
+    a half pair is carried over ONLY when it still sums to the total being
+    written; a genuinely changed total finds no matching pair and its halves
+    stay NULL (same as before), and every other row is untouched. Rows the
+    caller already resolved (the mixed completion path, which sets block1/
+    block2 from the submitted halves) are left exactly as they are.
+    """
+    if not scores_data:
+        return
+    existing = {
+        r["player_id"]: r
+        for r in conn.execute(
+            "SELECT player_id, block1_score, block2_score FROM scores WHERE cup_id = ?",
+            (cup_id,),
+        ).fetchall()
+    }
+    if not existing:
+        return
+    for s in scores_data:
+        if s.get("block1") is not None or s.get("block2") is not None:
+            continue
+        prev = existing.get(s["player_id"])
+        if prev is None:
+            continue
+        b1, b2 = prev["block1_score"], prev["block2_score"]
+        if b1 is None or b2 is None:
+            continue
+        if b1 + b2 != s["score"]:
+            # The total moved (or the stored pair never matched it) — a
+            # breakdown that contradicts the number beside it is worse than no
+            # breakdown, so let it go NULL.
+            continue
+        s["block1"] = b1
+        s["block2"] = b2
+
+
 def save_scores(conn, cup_id, scores_data):
     """Insert or replace scores for a cup.
 
     DELETE + re-INSERT is deliberate for the block columns: any write path that
     doesn't know about blocks (manual cup create, /cups/<id>/edit) simply omits
     them and the rewritten row gets NULLs — so a stale half can never survive a
-    rewrite and contradict the total. That's why the breakdown lives on `scores`
-    and not in a side table.
+    rewrite and contradict the total. `/cups/<id>/edit` first calls
+    preserve_block_scores, which re-attaches a breakdown ONLY when it still sums
+    to the total being written (see there).
     """
     conn.execute("DELETE FROM scores WHERE cup_id = ?", (cup_id,))
     for s in scores_data:
@@ -2467,12 +2521,22 @@ def cup_session_submit(cup_id):
     # A malformed photo rejects the whole submit (flash + redirect) so the
     # attached photo is never silently dropped. Saving the photo does NOT
     # depend on extraction — fully manual scores with a photo work the same.
-    try:
-        photo = parse_photo_from_form(request.form)
-    except InvalidInput as e:
-        conn.close()
-        flash(str(e))
-        return redirect(url_for("cup_session_complete", cup_id=cup_id))
+    #
+    # A MIXED cup's form carries no photo payload at all (each console block
+    # POSTs its own photo to /cups/<id>/photo/<block>), so anything arriving in
+    # photo_data here is a crafted request. Ignore it rather than store it: a
+    # blockless row on a mixed cup is invisible behind the per-block thumbnails
+    # AND unprunable (the per-block prune compares `block = ?`, which never
+    # matches NULL), so it would ride every backup forever.
+    if is_mixed_cup(cup):
+        photo = None
+    else:
+        try:
+            photo = parse_photo_from_form(request.form)
+        except InvalidInput as e:
+            conn.close()
+            flash(str(e))
+            return redirect(url_for("cup_session_complete", cup_id=cup_id))
 
     try:
         # Complete atomically (issue #39). The status transition is guarded by

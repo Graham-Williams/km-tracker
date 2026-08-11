@@ -1004,7 +1004,7 @@ window.initBlockPhoto = function (opts) {
         });
     });
 
-    // "Read scores from this photo": no image in the body — the server reads
+    // "Read scores" (this block's stored photo): no image in the body — the server reads
     // the photo already stored for this block (typically taken at the swap).
     if (readBtn && opts.extractUrl) {
         readBtn.disabled = false;

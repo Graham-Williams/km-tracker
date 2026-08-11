@@ -36,8 +36,53 @@
         min-width: 3rem; text-align: right;
     }
     .score-input, .line-score-input { width: 5rem; }
-    /* Mixed cups: "Block A (Wii) + Block B (Switch) = Total" per player. */
+    /* Mixed cups: "Block A (Wii) + Block B (Switch) = Total" per player.
+       A mixed row carries THREE number boxes plus the name, the placement and
+       the tiebreaker — and the content column is capped at --content-width
+       (520px), so there is no viewport where all of that fits on one line with
+       a readable name. (Squeezed onto one line at phone width each box
+       collapsed to ~34px of usable space and a typed two-digit score rendered
+       INVISIBLE, while the row still pushed the page into horizontal scroll.)
+       So a mixed row always wraps onto two lines — name + placement, then
+       "A + B = Total" — and the three boxes keep a floor width instead of
+       shrinking below their own content. Deliberately NOT behind a width media
+       query: the constraint is the fixed content column, not the viewport, so
+       it holds at 390px and at 1400px alike.
+       Everything here is scoped to .score-row--mixed; a PURE cup's row is
+       untouched (one 5rem input, one line, exactly as before). */
     .block-score-input { width: 4.5rem; }
+    /* Tighter column gap than a pure row: it buys the ~20px that keeps the
+       whole "A + B = Total" equation plus the TB checkbox on ONE line at
+       390px, and it reads better — the operators bind to their boxes. */
+    .score-row--mixed { flex-wrap: wrap; row-gap: var(--space-2); column-gap: var(--space-1); }
+    /* Zero-height full-width flex item = a forced line break after the name. */
+    .score-row--mixed .score-break { flex: 0 0 100%; height: 0; }
+    /* Wrap a long name rather than clipping it; it owns the whole first line. */
+    .score-row--mixed .score-name { min-width: 0; overflow-wrap: break-word; }
+    .score-row--mixed .score-place { min-width: 0; white-space: nowrap; }
+    .score-row--mixed .block-score-input,
+    .score-row--mixed .score-input {
+        /* Hold their designed width, shrink only as far as a still-legible box
+           (never below its own content, which is what made typed scores
+           invisible), never grow — growing to fill the line pushed the TB
+           checkbox onto a third row. Keep the 1rem font: under 16px iOS Safari
+           auto-zooms the page on focus. */
+        flex: 0 1 4.5rem; width: auto; min-width: 3.5rem;
+    }
+    .score-row--mixed .block-op,
+    .score-row--mixed .tb-wrapper { flex: 0 0 auto; }
+    /* The console names are the longest text in the row; at the narrow end a
+       1rem placeholder clips to "Swit"/"Tota". Only the HINT shrinks — the
+       typed value stays 1rem. */
+    .score-row--mixed input::placeholder { font-size: 0.8rem; }
+    /* The spin buttons reserve ~13px of a 70px box for arrows nobody uses on a
+       phone (typing and the arrow keys are unaffected) — that reservation is
+       what clipped "Switch" to "Switc". */
+    .score-row--mixed input[type="number"] { -moz-appearance: textfield; }
+    .score-row--mixed input[type="number"]::-webkit-outer-spin-button,
+    .score-row--mixed input[type="number"]::-webkit-inner-spin-button {
+        -webkit-appearance: none; appearance: none; margin: 0;
+    }
     .score-input[readonly] { background: var(--color-surface-2); color: var(--color-muted); }
     .block-op { color: var(--color-faint); font-size: 0.9rem; }
     .block-legend {
@@ -47,6 +92,11 @@
         border: 1px solid var(--color-border); border-radius: var(--radius-md);
         padding: var(--space-3); margin-bottom: var(--space-3);
     }
+    /* Three .btns (nowrap, min-width:auto) need more than a mixed panel's row
+       has at ANY width — unwrapped they hung outside the card and dragged the
+       page into horizontal scroll. Wrap instead. Scoped to .photo-block so the
+       pure-cup two-button row is untouched. */
+    .photo-block .field-row { flex-wrap: wrap; }
     .photo-block .section-heading { margin-top: 0; }
     .line-input { width: 4rem; text-align: center; color: var(--color-muted); }
     .tb-wrapper {
@@ -121,7 +171,7 @@
         {% for player in players %}
         {% set existing = existing_scores.get(player.player_id) %}
         {% set show_line = player.has_line and lines_on %}
-        <div class="score-row" data-player-id="{{ player.player_id }}" data-player-line="{{ player.line }}" data-has-line="{{ show_line|int }}">
+        <div class="score-row{% if is_mixed %} score-row--mixed{% endif %}" data-player-id="{{ player.player_id }}" data-player-line="{{ player.line }}" data-has-line="{{ show_line|int }}">
             <span class="score-name">{{ player.name }}</span>
             <span class="score-place"></span>
             <input type="hidden" name="player_ids[]" value="{{ player.player_id }}">
@@ -131,14 +181,19 @@
                never `disabled`, or the browser wouldn't submit it and the
                issue-#45 player/score misalignment guard would reject the form).
                The server recomputes the sum anyway; this input is for the human
-               and for the placement/tiebreaker JS, which reads .score-input. #}
+               and for the placement/tiebreaker JS, which reads .score-input.
+
+               The empty span is a flex line-break: the three number boxes get
+               their own line, so the name never has to compete with them for
+               width (see .score-row--mixed in the styles above). #}
+            <span class="score-break" aria-hidden="true"></span>
             <input type="number" name="block1_scores[]" class="block-score-input" data-block="1"
-                   min="0" placeholder="{{ block_labels[1] }}"
+                   min="0" step="1" placeholder="{{ block_labels[1] }}"
                    aria-label="{{ player.name }} — {{ block_labels[1] }} score (races 1–2)"
                    {% if existing and existing.block1_score is not none %}value="{{ existing.block1_score }}"{% endif %}>
             <span class="block-op" aria-hidden="true">+</span>
             <input type="number" name="block2_scores[]" class="block-score-input" data-block="2"
-                   min="0" placeholder="{{ block_labels[2] }}"
+                   min="0" step="1" placeholder="{{ block_labels[2] }}"
                    aria-label="{{ player.name }} — {{ block_labels[2] }} score (races 3–4)"
                    {% if existing and existing.block2_score is not none %}value="{{ existing.block2_score }}"{% endif %}>
             <span class="block-op" aria-hidden="true">=</span>
@@ -188,7 +243,7 @@
                 <button type="button" class="btn btn-secondary" data-photo-input="photo-take-{{ b }}" disabled>Take photo</button>
                 <button type="button" class="btn btn-secondary" data-photo-input="photo-pick-{{ b }}" disabled>{% if block_photos[b] %}Replace photo{% else %}Upload photo{% endif %}</button>
                 {% if photo_extraction_enabled %}
-                <button type="button" class="btn btn-secondary photo-read-btn" {% if not block_photos[b] %}hidden{% endif %} disabled>Read scores from this photo</button>
+                <button type="button" class="btn btn-secondary photo-read-btn" {% if not block_photos[b] %}hidden{% endif %} disabled>Read scores</button>
                 {% endif %}
             </div>
             <input type="file" id="photo-take-{{ b }}" accept="image/*" capture="environment" hidden>
@@ -467,6 +522,20 @@
     // reject the whole form). It stays blank until BOTH halves are filled: a
     // half-entered row must never look like a finished total, and the server
     // rejects that shape rather than guessing the missing half.
+
+    // A half's value as the whole number the SERVER would accept, or null.
+    // parseInt() is wrong here twice over: it truncates ("1e3" -> 1, "2.5" -> 2)
+    // and so displayed a confident total for input the server then rejects —
+    // and a rejection redirects, discarding every number on the page. Anything
+    // that isn't a plain integer is treated as "not filled in yet".
+    function blockValue(input) {
+        var raw = input.value.trim();
+        if (raw === "") return null;
+        var num = input.valueAsNumber;
+        if (!Number.isInteger(num) || !/^[+-]?\d+$/.test(raw)) return null;
+        return num;
+    }
+
     function syncBlockTotal(row) {
         var totalInput = row.querySelector(".score-input");
         if (!totalInput) return;
@@ -474,9 +543,8 @@
         var sum = 0;
         var complete = blocks.length > 0;
         blocks.forEach(function (input) {
-            var val = input.value.trim();
-            var parsed = val === "" ? NaN : parseInt(val, 10);
-            if (isNaN(parsed)) { complete = false; return; }
+            var parsed = blockValue(input);
+            if (parsed === null) { complete = false; return; }
             sum += parsed;
         });
         totalInput.value = complete ? sum : "";
@@ -516,11 +584,20 @@
             for (var r = 0; r < rows.length; r++) {
                 var halves = rows[r].querySelectorAll(".block-score-input");
                 var filled = 0;
+                var whole = 0;
                 for (var h = 0; h < halves.length; h++) {
                     if (halves[h].value.trim() !== "") filled++;
+                    if (blockValue(halves[h]) !== null) whole++;
                 }
                 if (filled > 0 && filled < halves.length) {
                     return reject(e, HALF_ROW_MSG);
+                }
+                // Typed, but not a whole number the server will take (e.g.
+                // "1e3", "2.5"). Its total is blank, so the all-empty check
+                // below would let the form through to a redirect that throws
+                // the page away.
+                if (filled > 0 && whole < filled) {
+                    return reject(e, "Console scores must be whole numbers.");
                 }
             }
             // (2) Nothing scored at all — also a server-side reject + redirect.
