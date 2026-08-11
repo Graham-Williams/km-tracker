@@ -2237,13 +2237,17 @@ def cup_session_complete(cup_id):
     existing_scores = {}
     if cup["status"] == "completed":
         score_rows = conn.execute(
-            "SELECT player_id, score, line, won_tiebreaker FROM scores WHERE cup_id = ?",
+            "SELECT player_id, score, line, won_tiebreaker, block1_score, block2_score "
+            "FROM scores WHERE cup_id = ?",
             (cup_id,),
         ).fetchall()
         existing_scores = {s["player_id"]: s for s in score_rows}
 
     # Compute before the connection closes.
     lines_on = cup_uses_lines(conn, cup_id)
+    # Which console blocks already have a photo (mixed cups only) — drives the
+    # "Saved ✓ / Replace" state and the preview in each block's panel.
+    block_photos = photo_blocks_for_cup(conn, cup_id)
     conn.close()
 
     # One dropdown per PLAYED race, each offering only its own console's track
@@ -2272,6 +2276,12 @@ def cup_session_complete(cup_id):
         # completion photo is taken — used by the mixed-cup photo warning.
         first_console_label=edition_label(race_edition(cup, 1)),
         second_console_label=edition_label(race_edition(cup, MAX_RACES)),
+        # Per-block console names IN PLAYED ORDER, so the score breakdown and
+        # the two photo panels are labelled with the real console rather than
+        # "half 1"/"half 2".
+        block_labels={b: edition_label(block_edition(cup, b)) for b in PHOTO_BLOCKS},
+        block_photos={b: b in block_photos for b in PHOTO_BLOCKS},
+        photo_blocks=PHOTO_BLOCKS,
         lines_on=lines_on,
         existing_scores=existing_scores,
     )

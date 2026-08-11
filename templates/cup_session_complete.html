@@ -36,6 +36,18 @@
         min-width: 3rem; text-align: right;
     }
     .score-input, .line-score-input { width: 5rem; }
+    /* Mixed cups: "Block A (Wii) + Block B (Switch) = Total" per player. */
+    .block-score-input { width: 4.5rem; }
+    .score-input[readonly] { background: var(--color-surface-2); color: var(--color-muted); }
+    .block-op { color: var(--color-faint); font-size: 0.9rem; }
+    .block-legend {
+        font-size: 0.8rem; color: var(--color-muted); margin-bottom: var(--space-2);
+    }
+    .photo-block {
+        border: 1px solid var(--color-border); border-radius: var(--radius-md);
+        padding: var(--space-3); margin-bottom: var(--space-3);
+    }
+    .photo-block .section-heading { margin-top: 0; }
     .line-input { width: 4rem; text-align: center; color: var(--color-muted); }
     .tb-wrapper {
         display: flex; align-items: center; gap: var(--space-1);
@@ -94,9 +106,12 @@
         <div class="section-heading">Scores</div>
         {% if is_mixed %}
         <p class="muted mixed-score-note">
-            📸 Mixed cup — the second console's scoreboard started from zero. Enter each player's
-            <strong>combined total</strong> across both halves (add the photo you took at the swap to
-            what's on screen now).
+            📸 Mixed cup — each console's scoreboard started from zero, so enter the two halves
+            separately and the total adds itself up.
+        </p>
+        <p class="block-legend">
+            <strong>{{ block_labels[1] }}</strong> (races 1–2) + <strong>{{ block_labels[2] }}</strong>
+            (races 3–4) = total. Either half can be typed by hand — a photo is never required.
         </p>
         {% endif %}
         <div id="score-rows">
@@ -110,7 +125,29 @@
             <span class="score-name">{{ player.name }}</span>
             <span class="score-place"></span>
             <input type="hidden" name="player_ids[]" value="{{ player.player_id }}">
+            {% if is_mixed %}
+            {# Two consoles, two scoreboards that each started at zero: the halves
+               are entered separately and the TOTAL is calculated (readonly —
+               never `disabled`, or the browser wouldn't submit it and the
+               issue-#45 player/score misalignment guard would reject the form).
+               The server recomputes the sum anyway; this input is for the human
+               and for the placement/tiebreaker JS, which reads .score-input. #}
+            <input type="number" name="block1_scores[]" class="block-score-input" data-block="1"
+                   min="0" placeholder="{{ block_labels[1] }}"
+                   aria-label="{{ player.name }} — {{ block_labels[1] }} score (races 1–2)"
+                   {% if existing and existing.block1_score is not none %}value="{{ existing.block1_score }}"{% endif %}>
+            <span class="block-op" aria-hidden="true">+</span>
+            <input type="number" name="block2_scores[]" class="block-score-input" data-block="2"
+                   min="0" placeholder="{{ block_labels[2] }}"
+                   aria-label="{{ player.name }} — {{ block_labels[2] }} score (races 3–4)"
+                   {% if existing and existing.block2_score is not none %}value="{{ existing.block2_score }}"{% endif %}>
+            <span class="block-op" aria-hidden="true">=</span>
+            <input type="number" name="scores[]" placeholder="Total" min="0" class="score-input" readonly
+                   aria-label="{{ player.name }} — total score"
+                   {% if existing %}value="{{ existing.score }}"{% endif %}>
+            {% else %}
             <input type="number" name="scores[]" placeholder="{% if show_line %}Raw{% else %}Pts{% endif %}" min="0" class="score-input" {% if existing %}value="{{ existing.score }}"{% endif %}>
+            {% endif %}
             {% if show_line %}
             <input type="number" name="lines[]" value="{% if existing %}{{ existing.line }}{% else %}{{ player.line }}{% endif %}" class="line-input">
             <input type="number" name="line_scores[]" placeholder="Line" class="line-score-input">
@@ -123,19 +160,57 @@
         </div>
     </div>
 
+    {% if is_mixed %}
+    {# A mixed cup has TWO results screens, one per console, each starting from
+       zero — so it gets one photo panel per console block. Each panel writes
+       ONLY into its own block's inputs, and every photo is extracted against
+       ITS OWN console's edition (never 'mixed', never the other half's), which
+       is what keeps a player's other-console main from matching a CPU here.
+       Each photo POSTs on its own to /cups/<id>/photo/<block>, so this form
+       carries no photo payload at all — no 1 MB body, no attach/submit race. #}
+    <div id="photo-blocks">
+        <div class="section-heading">{% if photo_extraction_enabled %}Scores from photos{% else %}Attach photos{% endif %}</div>
+        <p class="photo-half-warning">
+            ⚠️ Two consoles, two scoreboards: the <strong>{{ first_console_label }}</strong> screen
+            started over at zero when you switched to <strong>{{ second_console_label }}</strong>.
+            Add a photo for either half, both, or neither — anything without a photo is just
+            typed in. Nothing is ever submitted for you.
+        </p>
+        {% for b in photo_blocks %}
+        <div class="photo-block" id="photo-block-{{ b }}" data-block="{{ b }}">
+            <div class="section-heading">
+                {{ block_labels[b] }} — {% if b == 1 %}races 1–2{% else %}races 3–4{% endif %}
+            </div>
+            <div class="field-row">
+                {# Buttons ship disabled; photo_score.js enables + wires them. If the
+                   script fails to load, the picker can't open — so a photo can never
+                   be picked without the guards in place. #}
+                <button type="button" class="btn btn-secondary" data-photo-input="photo-take-{{ b }}" disabled>Take photo</button>
+                <button type="button" class="btn btn-secondary" data-photo-input="photo-pick-{{ b }}" disabled>{% if block_photos[b] %}Replace photo{% else %}Upload photo{% endif %}</button>
+                {% if photo_extraction_enabled %}
+                <button type="button" class="btn btn-secondary photo-read-btn" {% if not block_photos[b] %}hidden{% endif %} disabled>Read scores from this photo</button>
+                {% endif %}
+            </div>
+            <input type="file" id="photo-take-{{ b }}" accept="image/*" capture="environment" hidden>
+            <input type="file" id="photo-pick-{{ b }}" accept="image/*" hidden>
+            <img class="photo-preview" alt="{{ block_labels[b] }} standings photo"
+                 {% if block_photos[b] %}src="{{ url_for('cup_block_photo', cup_id=cup.id, block=b) }}"{% endif %}
+                 style="max-width:160px; border-radius: var(--radius-sm); margin-top: var(--space-2);{% if not block_photos[b] %} display:none;{% endif %}">
+            <p class="photo-attach-status {% if block_photos[b] %}is-success{% endif %}" {% if not block_photos[b] %}hidden{% endif %}>{% if block_photos[b] %}{{ block_labels[b] }} photo saved ✓{% endif %}</p>
+            <p class="muted"><span class="photo-extract-spinner" hidden aria-hidden="true"></span><span class="photo-status"></span></p>
+            <p class="muted photo-notes"></p>
+            <div class="photo-mapping" hidden>
+                <div class="photo-mapping-title">Map each player to a row from the {{ block_labels[b] }} photo:</div>
+                <div class="photo-mapping-rows"></div>
+                <p class="photo-map-warning" hidden></p>
+                <p class="photo-map-unassigned" hidden></p>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
     <div id="photo-score">
         <div class="section-heading">{% if photo_extraction_enabled %}Score from photo{% else %}Attach photo{% endif %}</div>
-        {% if is_mixed %}
-        {# The photographed screen is the SECOND console's only — its numbers are
-           half totals. Auto-fill is disabled server-side for mixed cups; this
-           says why, right where the photo is taken. #}
-        <p class="photo-half-warning">
-            ⚠️ This photo shows the <strong>{{ second_console_label }}</strong> half only — the
-            {{ first_console_label }} screen started over at zero. Scores are <strong>not</strong>
-            filled in automatically for a mixed cup: add both halves together and enter each
-            player's combined total.
-        </p>
-        {% endif %}
         <div class="field-row">
             {# Buttons ship disabled; photo_score.js enables + wires them. If the
                script fails to load, the picker can't open — so a photo can never
@@ -158,7 +233,9 @@
             <p class="photo-map-unassigned" hidden></p>
         </div>
     </div>
+    {% endif %}
 
+    {% if is_mixed %}<p class="photo-attach-status" id="submit-warning" hidden></p>{% endif %}
     <div class="field-row">
         <button type="submit" class="btn btn-primary">Submit Cup</button>
         {% if cup.status == 'in_progress' %}
@@ -189,12 +266,27 @@
     now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
     document.getElementById("cup-date").value = now.toISOString().slice(0, 16);
 
+    {% if is_mixed %}
+    // Mixed cup: one independent panel per console block. Each uploads its own
+    // photo (its own request — this form carries no photo payload) and fills
+    // ONLY its own block's inputs.
+    {% for b in photo_blocks %}
+    initBlockPhoto({
+        block: {{ b }},
+        cupId: {{ cup.id }},
+        label: {{ block_labels[b]|tojson }},
+        uploadUrl: "{{ url_for('upload_cup_block_photo', cup_id=cup.id, block=b) }}",
+        extractUrl: {% if photo_extraction_enabled %}"{{ url_for('extract_scores') }}"{% else %}null{% endif %}
+    });
+    {% endfor %}
+    {% else %}
     initPhotoScore({
         extractUrl: {% if photo_extraction_enabled %}"{{ url_for('extract_scores') }}"{% else %}null{% endif %},
         getPayload: function () {
             return { cup_id: {{ cup.id }} };
         }
     });
+    {% endif %}
 
     function getLineValue(row) {
         var lineInput = row.querySelector(".line-input");
@@ -367,6 +459,60 @@
         }
         row.querySelector("input[type=checkbox]").addEventListener("change", updatePlacements);
     });
+
+    {% if is_mixed %}
+    // --- Mixed cups: the total is CALCULATED from the two console blocks ---
+    // The total input is readonly (never disabled — a disabled field isn't
+    // submitted, and the server's player/score alignment guard would then
+    // reject the whole form). It stays blank until BOTH halves are filled: a
+    // half-entered row must never look like a finished total, and the server
+    // rejects that shape rather than guessing the missing half.
+    function syncBlockTotal(row) {
+        var totalInput = row.querySelector(".score-input");
+        if (!totalInput) return;
+        var blocks = row.querySelectorAll(".block-score-input");
+        var sum = 0;
+        var complete = blocks.length > 0;
+        blocks.forEach(function (input) {
+            var val = input.value.trim();
+            var parsed = val === "" ? NaN : parseInt(val, 10);
+            if (isNaN(parsed)) { complete = false; return; }
+            sum += parsed;
+        });
+        totalInput.value = complete ? sum : "";
+        // Dispatch a real input event so placements + tiebreakers recompute
+        // exactly as if the total had been typed.
+        totalInput.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+
+    document.querySelectorAll(".score-row").forEach(function (row) {
+        row.querySelectorAll(".block-score-input").forEach(function (input) {
+            input.addEventListener("input", function () { syncBlockTotal(row); });
+        });
+    });
+
+    // The mixed form carries no photo payload, so photo_score.js's submit guard
+    // never mounts here. Keep the one check that still applies: an all-empty
+    // submit is rejected server-side by a redirect that wipes the form.
+    (function () {
+        var form = document.getElementById("cup-form");
+        var warning = document.getElementById("submit-warning");
+        form.addEventListener("submit", function (e) {
+            var inputs = form.querySelectorAll(".score-input");
+            for (var i = 0; i < inputs.length; i++) {
+                if (!inputs[i].disabled && inputs[i].value.trim() !== "") {
+                    warning.hidden = true;
+                    return;
+                }
+            }
+            e.preventDefault();
+            warning.textContent =
+                "Enter each player's two console scores (or at least one player's) before submitting.";
+            warning.classList.add("is-error");
+            warning.hidden = false;
+        });
+    })();
+    {% endif %}
 
     updatePlacements();
 </script>
