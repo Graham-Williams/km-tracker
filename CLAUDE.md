@@ -90,11 +90,28 @@ itself runs **inside the app container**), driven by the
   since the last push), pruned to the newest `DRIVE_RETENTION` (default 50).
 - The local half always runs even if the Drive push can't (rclone unconfigured →
   reports the error, exits non-zero, but local snapshots are unaffected).
+- **Empty-DB guard:** `entrypoint.sh` runs `init_db()` on EVERY container start, so
+  a `/data` remounted empty makes the app recreate a schema-only DB — valid,
+  `integrity_check`-clean, full table count, **zero rows**. The script refuses a
+  snapshot with no rows in any user table when the previous kept snapshot had data
+  (rows, not file size, so a `VACUUM` or deleting old cups can't false-positive);
+  a first-ever run with no previous snapshot is still allowed, and
+  `ALLOW_EMPTY_SNAPSHOT=1` overrides it deliberately.
 - Config: gitignored `.env.backup` (template: `.env.backup.example`). **No secrets in
   the repo** — the rclone OAuth token lives only in `~/.config/rclone/rclone.conf`.
+- **Restoring is NOT `cp snapshot data/km_tracker.db`.** The live DB is WAL-mode, so
+  a stale `km_tracker.db-wal` sits next to it; copy only the main file and SQLite
+  **replays that orphaned WAL over the restored image** — no error, the app serves
+  the PRE-restore data, and the next checkpoint bakes the stale pages permanently
+  into the file (two DB images merged = corruption). And a host-user `cp` leaves the
+  file owned by the wrong UID → `attempt to write a readonly database`. Correct
+  sequence: stop the container → `rm -f data/km_tracker.db-{wal,shm}` → copy the
+  snapshot → `chown 10001:10001` → start → **verify** (compare a known count in the
+  snapshot against what the running container reads; the failure mode is silent).
 
-Full setup/runbook (rclone headless auth, systemd install, restore) is in `DEPLOY.md`
-→ "Automated backups".
+Full setup/runbook (rclone headless auth, systemd install, and the full verified
+restore procedure) is in `DEPLOY.md` → "Automated backups" / "Restore from a
+snapshot".
 
 ### Staging environment
 

@@ -512,6 +512,15 @@ The database lives at `./data/km_tracker.db` on the host. Backups are automated 
   ring buffer can rotate out within hours when pushes are frequent, so the daily
   tier ensures a logical corruption that goes unnoticed for a day or two still has
   a clean copy to restore from.
+- **Refuses a catastrophically empty snapshot.** `entrypoint.sh` runs `init_db()`
+  on every container start, so if `/data` is ever remounted empty the app happily
+  recreates a schema-only DB — valid, `integrity_check`-clean, right table count,
+  zero rows. Backing that up would rotate every real copy out of the local ring
+  and the Drive tiers. If the new snapshot has **no rows in any table** while the
+  previous kept snapshot **has** data, the script fails loudly instead (rows, not
+  file size, so a `VACUUM` or genuinely deleting old cups can't false-positive).
+  A first-ever run with no previous snapshot is still allowed through, and
+  `ALLOW_EMPTY_SNAPSHOT=1` overrides the guard for the deliberate case.
 - Always keeps local snapshots even if the Drive push can't run. If rclone isn't
   set up yet (not installed, or the remote isn't configured), it logs a warning
   and **exits 0** — the local snapshot is already safe, so the systemd unit won't
@@ -521,6 +530,11 @@ The database lives at `./data/km_tracker.db` on the host. Backups are automated 
 The timer fires every 5 minutes (frequent local snapshots); the script itself
 throttles the off-box push to ~15 minutes. No secrets live in the repo — the
 rclone OAuth token is stored only in `~/.config/rclone/rclone.conf`.
+
+**Going the other way — restoring — is not a plain `cp`.** See
+"[Restore from a snapshot](#restore-from-a-snapshot)" below before you touch
+`data/km_tracker.db`: the stale WAL sidecars have to go, and the file has to be
+re-owned to UID 10001, or the restore silently gives you the old data back.
 
 ### 1. Install rclone
 
@@ -641,8 +655,104 @@ ls -1 ~/km-backups/snapshots/
 rclone lsf gdrive:km-tracker-backups
 ```
 
-To restore, just copy a snapshot back over `data/km_tracker.db` while the app is
-stopped (it's a plain SQLite file).
+### Restore from a snapshot
+
+> **A restore is NOT just `cp snapshot data/km_tracker.db`.** That looks like it
+> works and silently gives you the **old** data back:
+>
+> - The live DB is **WAL-mode**, so `data/` normally also holds
+>   `km_tracker.db-wal` and `km_tracker.db-shm`. If you replace only the main DB
+>   file, the next open finds the **stale `-wal` sitting next to the new DB and
+>   replays it** — SQLite has no way to know the two don't belong together (the
+>   restored file's header still matches), so it raises **no error at all** and the
+>   app comes back serving the **pre-restore** rows. The first checkpoint after
+>   that then writes those stale WAL pages *permanently into* the restored file:
+>   page-level corruption, two different database images merged into one. The
+>   sidecars must be deleted in the same breath as the swap.
+> - `cp` as your login user also leaves the file **owned by you**, not by the
+>   container user (**UID 10001**) — so the app then fails every write with
+>   `attempt to write a readonly database`, the exact bug class the backup script
+>   itself had to work around.
+>
+> Follow the whole sequence below, including the verification step — the failure
+> mode is silent, so "the app came back up" proves nothing.
+
+The usual "**never restart while a cup is in progress**" rule applies (see
+CLAUDE.md → deploy-safety); a restore is far more disruptive than a restart.
+
+```bash
+cd /home/<user>/km-tracker
+
+# 1. Pick the snapshot to restore — a local one:
+ls -1 ~/km-backups/snapshots/
+#    ...or pull one down from Drive (recent ring, or the daily/ long-tail tier):
+rclone lsf gdrive:km-tracker-backups
+rclone lsf gdrive:km-tracker-backups/daily
+mkdir -p ~/km-backups/restore
+rclone copy gdrive:km-tracker-backups/km_tracker_<TS>.db ~/km-backups/restore/
+#    Then pin it to a variable so every step below uses the same file:
+SNAP=~/km-backups/snapshots/km_tracker_<TS>.db     # or ~/km-backups/restore/...
+
+# 2. Note what that snapshot CONTAINS — step 7 compares against this.
+#    (Reading a snapshot host-side is fine, it's your own file; immutable=1 means
+#    the read can't create -wal/-shm sidecars next to it.)
+python3 -c "import sqlite3,pathlib,sys;u=pathlib.Path(sys.argv[1]).expanduser().resolve().as_uri()+'?immutable=1';c=sqlite3.connect(u,uri=True);print(c.execute('SELECT COUNT(*), MAX(id), MAX(date) FROM cups').fetchone())" "$SNAP"
+
+# 3. Capture the CURRENT state first, so a bad restore is reversible. Run the
+#    backup script while the app is still up: its in-container online backup
+#    folds the WAL in, whereas copying data/km_tracker.db by hand would miss
+#    whatever is still sitting in the -wal.
+scripts/backup.sh && ls -1t ~/km-backups/snapshots/ | head -n1
+
+# 4. Stop the app. Nothing may hold the DB open while it is swapped.
+docker compose stop app
+
+# 5. DELETE THE WAL SIDECARS. This is the step whose absence silently
+#    resurrects the old data: an orphaned -wal is replayed over whatever DB
+#    file it finds. (sudo: data/ is owned by UID 10001.)
+sudo rm -f data/km_tracker.db-wal data/km_tracker.db-shm
+
+# 6. Put the snapshot in place and hand it back to the container user — a file
+#    owned by your login user makes the app fail with "attempt to write a
+#    readonly database" on its first write.
+sudo cp "$SNAP" data/km_tracker.db
+sudo chown 10001:10001 data/km_tracker.db
+sudo chmod 644 data/km_tracker.db
+
+# 7. Start the app.
+docker compose up -d app
+docker compose ps
+```
+
+**8. Verify the restore actually took.** Ask the *running app's* DB the same
+question you asked the snapshot in step 2 — this is the only way to tell a real
+restore from a silent WAL replay:
+
+```bash
+docker exec km-tracker-app-1 python3 -c \
+  "import sqlite3; c=sqlite3.connect('/data/km_tracker.db'); print(c.execute('SELECT COUNT(*), MAX(id), MAX(date) FROM cups').fetchone())"
+```
+
+The three values **must match step 2's**. Pick a figure you know differs between
+the snapshot and the DB you replaced (cup count / newest cup date is the obvious
+one); if they'd be identical either way the check proves nothing — compare
+something that changed. Then load the site and confirm the expected cups are
+there.
+
+If you instead see the **pre-restore** numbers, the stale `-wal` was replayed:
+`docker compose stop app` immediately (every minute it runs risks a checkpoint
+baking those stale pages permanently into the file) and redo from step 5 — this
+time deleting the sidecars.
+
+The next backup run picks the restored DB up on its own. Two notes:
+
+- If you also cleared out `~/km-backups/snapshots/` while restoring, that's
+  fine — the script notices its state no longer matches any file on disk and
+  writes a fresh snapshot instead of deduplicating against nothing.
+- If you deliberately restored an **empty** DB, the script will refuse to back it
+  up ("EVERY table is empty while the previous snapshot has data" — the guard
+  against a remounted-empty `/data`). Run it once with `ALLOW_EMPTY_SNAPSHOT=1`,
+  or set that in `.env.backup`, to confirm you meant it.
 
 ### Manual one-off backup (without the timer)
 
