@@ -7,6 +7,7 @@ is patched where extraction.py imports it). Contract: bad input is a clean
 """
 
 import base64
+import time
 
 import anthropic
 import pytest
@@ -447,6 +448,90 @@ def test_bad_cup_id_400(client, api_key):
 def test_neither_cup_nor_players_400(client, api_key):
     response = _post(client)
     assert response.status_code == 400
+
+
+# --- Per-IP throttle on the PAID call ---
+
+
+def _count_calls(client, monkeypatch, n, cup_id=None):
+    """Fire n extractions against a real cup, returning the status codes."""
+    calls = []
+
+    def counting(image_b64, media_type, edition=None):
+        calls.append(1)
+        return Standings(rows=[StandingsRow(position=1, character="Yoshi", points=60)])
+
+    monkeypatch.setattr(app_module, "extract_standings", counting)
+    statuses = [_post(client, cup_id=cup_id).status_code for _ in range(n)]
+    return statuses, len(calls)
+
+
+def test_extraction_allows_a_normal_cups_worth_of_reads(client, api_key, monkeypatch):
+    """A mixed cup is two photos plus retries; the throttle must never get in
+    the way of that. Anything under the limit sails through."""
+    _setup_players(client, [("Alice", "Yoshi", None)])
+    cup_id = _start_session(client, [1])
+    statuses, calls = _count_calls(
+        client, monkeypatch, app_module.EXTRACT_RATE_LIMIT_MAX, cup_id=cup_id
+    )
+    assert statuses == [200] * app_module.EXTRACT_RATE_LIMIT_MAX
+    assert calls == app_module.EXTRACT_RATE_LIMIT_MAX
+
+
+def test_extraction_is_throttled_per_ip(client, api_key, monkeypatch):
+    """Each call is billed to Graham's Anthropic key, the stored-photo path
+    needs no upload to trigger one, and everyone with the shared house password
+    can reach it — so a loop must hit a wall rather than a credit-card bill."""
+    _setup_players(client, [("Alice", "Yoshi", None)])
+    cup_id = _start_session(client, [1])
+    over = app_module.EXTRACT_RATE_LIMIT_MAX + 5
+    statuses, calls = _count_calls(client, monkeypatch, over, cup_id=cup_id)
+
+    assert statuses[: app_module.EXTRACT_RATE_LIMIT_MAX] == [200] * app_module.EXTRACT_RATE_LIMIT_MAX
+    assert set(statuses[app_module.EXTRACT_RATE_LIMIT_MAX :]) == {429}
+    # The point of the exercise: the refused ones never reached the API.
+    assert calls == app_module.EXTRACT_RATE_LIMIT_MAX
+
+
+def test_a_throttled_extraction_says_what_to_do(client, api_key, monkeypatch):
+    """photo_score.js renders body.error verbatim, so the 429 has to be JSON
+    with a useful sentence rather than an HTML error page."""
+    _setup_players(client, [("Alice", "Yoshi", None)])
+    cup_id = _start_session(client, [1])
+    _count_calls(
+        client, monkeypatch, app_module.EXTRACT_RATE_LIMIT_MAX, cup_id=cup_id
+    )
+    response = _post(client, cup_id=cup_id)
+    assert response.status_code == 429
+    assert response.is_json
+    assert "wait" in response.get_json()["error"].lower()
+
+
+def test_the_throttle_window_expires(client, api_key, monkeypatch):
+    """The bucket is a sliding window, not a permanent lockout."""
+    _setup_players(client, [("Alice", "Yoshi", None)])
+    cup_id = _start_session(client, [1])
+    _count_calls(
+        client, monkeypatch, app_module.EXTRACT_RATE_LIMIT_MAX, cup_id=cup_id
+    )
+    assert _post(client, cup_id=cup_id).status_code == 429
+
+    # Age every recorded call out of the window.
+    stale = time.time() - app_module.EXTRACT_RATE_LIMIT_WINDOW - 1
+    for ip in app_module._extract_calls:
+        app_module._extract_calls[ip] = [stale] * app_module.EXTRACT_RATE_LIMIT_MAX
+    assert _post(client, cup_id=cup_id).status_code == 200
+
+
+def test_a_rejected_request_does_not_spend_quota(client, api_key, monkeypatch):
+    """Only calls that are about to reach Anthropic are counted — a malformed
+    request costs nothing, so it must not eat a real user's budget."""
+    _setup_players(client, [("Alice", "Yoshi", None)])
+    cup_id = _start_session(client, [1])
+    for _ in range(app_module.EXTRACT_RATE_LIMIT_MAX * 2):
+        assert _post(client, cup_id=99999).status_code == 404
+    statuses, _calls = _count_calls(client, monkeypatch, 1, cup_id=cup_id)
+    assert statuses == [200]
 
 
 # --- Upstream API failure -> 502 ---

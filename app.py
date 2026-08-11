@@ -3169,6 +3169,54 @@ def _players_for_extraction(data, block=None):
     return edition, [dict(p) for p in players], False, None
 
 
+# --- /extract-scores throttle ----------------------------------------------
+# Every extraction is a PAID Anthropic call on Graham's API key, and the app
+# sits behind one shared house password that friends have. It used to take an
+# uploaded image to trigger one, which was at least a natural brake; the
+# stored-photo path removed even that — a 22-byte {"cup_id":1,"block":1} makes
+# the server ship ~1 MB to Anthropic, and the caller chose that photo's size.
+# Unthrottled, 50 requests cost 50 calls in a quarter of a second.
+#
+# Same lock+dict shape as the login limiter above (and the same caveats): the
+# state is per-process, so with N gunicorn workers the effective ceiling is N
+# times this. Acceptable — it turns an unbounded loop into a small constant,
+# which is the whole point; shared state isn't worth a Redis for one household.
+EXTRACT_RATE_LIMIT_MAX = 10
+EXTRACT_RATE_LIMIT_WINDOW = 5 * 60  # seconds
+# Memory backstop, mirroring RATE_LIMIT_MAX_TRACKED_IPS.
+EXTRACT_RATE_LIMIT_MAX_TRACKED_IPS = 10000
+_extract_call_lock = threading.Lock()
+_extract_calls = {}  # client_ip -> list[timestamps of paid calls in the window]
+
+
+def _extract_rate_limited(ip):
+    """Count one paid extraction for `ip`; True if it should be refused.
+
+    Sized for real use, not for the attacker: a mixed cup takes TWO photos and
+    a couple of retries, so a whole game night of cups stays well inside 10 per
+    5 minutes. Only calls that are actually about to reach Anthropic are
+    counted — a malformed request costs nothing, so it shouldn't spend quota.
+    """
+    now = time.time()
+    with _extract_call_lock:
+        kept = [
+            t
+            for t in _extract_calls.get(ip, ())
+            if now - t < EXTRACT_RATE_LIMIT_WINDOW
+        ]
+        if len(kept) >= EXTRACT_RATE_LIMIT_MAX:
+            _extract_calls[ip] = kept
+            return True
+        if (
+            len(_extract_calls) >= EXTRACT_RATE_LIMIT_MAX_TRACKED_IPS
+            and ip not in _extract_calls
+        ):
+            return True
+        kept.append(now)
+        _extract_calls[ip] = kept
+        return False
+
+
 @app.route("/extract-scores", methods=["POST"])
 def extract_scores():
     """Extract {position, character, points} rows from a standings photo and
@@ -3219,6 +3267,19 @@ def extract_scores():
     edition, players, partial_half, error = _players_for_extraction(data, block)
     if error:
         return error
+
+    # Last gate before the paid call. The client surfaces `error` verbatim, so
+    # say what to do about it.
+    if _extract_rate_limited(_client_ip()):
+        return (
+            jsonify(
+                {
+                    "error": "Too many photo reads in the last few minutes — "
+                    "wait a bit and try again."
+                }
+            ),
+            429,
+        )
 
     try:
         standings = extract_standings(image_b64, mime_type, edition=edition)
