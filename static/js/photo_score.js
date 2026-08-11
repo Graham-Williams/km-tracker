@@ -9,13 +9,19 @@
  * the form on its own; the human always reviews first. Manual entry works
  * regardless of what happens here.
  *
- * Auto-fill is suppressed entirely when the response carries
- * `partial_half: true` — a MIXED (Wii + Switch) cup, where the photographed
- * screen holds only the second console's half of the scoring. Filling half
- * totals into a cup-total field would record silently-wrong numbers that look
- * completely plausible, so those responses render the mapping panel as a
- * READ-ONLY reference list (no dropdowns, no write path to the score inputs)
- * plus an explanatory status line.
+ * This is the PURE-cup entry point. A mixed (Wii + Switch) cup has two results
+ * screens, one per console, and uses `initBlockPhoto` at the bottom of this
+ * file instead — one panel per console block, each filling only its own half.
+ *
+ * Auto-fill is still suppressed entirely when a response carries
+ * `partial_half: true` — a BLOCKLESS mixed-cup request, where the photographed
+ * screen holds only one console's half of the scoring but the field it would
+ * fill is the cup TOTAL. Filling half totals there would record silently-wrong
+ * numbers that look completely plausible, so those responses render the mapping
+ * panel as a READ-ONLY reference list (no dropdowns, no write path to the score
+ * inputs) plus an explanatory status line. No UI reaches that path today (the
+ * mixed page is per-block), but the server still answers it and the guard is
+ * kept as the second lock.
  *
  * Silent-drop guards (the photo attach is async, so a submit could otherwise
  * race it or follow a failed decode without anyone noticing):
