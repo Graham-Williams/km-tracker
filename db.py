@@ -77,8 +77,26 @@ def run_migrations(conn):
         conn.execute("ALTER TABLE players ADD COLUMN default_character_wii TEXT")
     if "default_character_switch" not in player_columns:
         conn.execute("ALTER TABLE players ADD COLUMN default_character_switch TEXT")
-    # The cup_photos table itself comes from schema.sql (CREATE TABLE IF NOT
-    # EXISTS), which init_db always runs before this — no migration step needed.
+
+    # Add cup_photos.block for DBs created before per-block (mixed-cup) photos.
+    # NULL means "the cup's photo" — which is exactly what every existing row
+    # is, and what every pure cup keeps writing — so no backfill is needed.
+    # The table itself comes from schema.sql (CREATE TABLE IF NOT EXISTS), which
+    # init_db always runs before this; only the new column needs a step.
+    photo_columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(cup_photos)")
+    }
+    if "block" not in photo_columns:
+        conn.execute("ALTER TABLE cup_photos ADD COLUMN block INTEGER")
+
+    # Add scores.block1_score / block2_score for DBs created before mixed-cup
+    # per-block score capture. Nullable, no backfill: an existing row has no
+    # block breakdown and `score` already holds the (correct) cup total.
+    score_columns = {row["name"] for row in conn.execute("PRAGMA table_info(scores)")}
+    if "block1_score" not in score_columns:
+        conn.execute("ALTER TABLE scores ADD COLUMN block1_score INTEGER")
+    if "block2_score" not in score_columns:
+        conn.execute("ALTER TABLE scores ADD COLUMN block2_score INTEGER")
 
 
 def init_db(db_path=None):
