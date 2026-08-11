@@ -3,12 +3,13 @@ node_modules/
 .pnp
 .pnp.js
 
-# Environment variables
-.env
-.env.local
-.env.*.local
-# Backup config for the self-hosted box (real values; .env.backup.example is committed)
-.env.backup
+# Environment variables — ignore EVERY .env* variant (.env.staging,
+# .env.production, .env.backup, ...) and re-allow only the committed templates.
+# A deny-by-default rule is the point: a new env file must be opted IN, never
+# accidentally committed because nobody remembered to extend this list.
+.env*
+!.env.example
+!.env.backup.example
 
 # Build output
 dist/
@@ -36,6 +37,16 @@ data/
 *.db-shm
 # Backup runtime state (checksums, last-push timestamp) on the host
 .backup-state/
+
+# Photographs. Developing the photo-scoring feature means real pictures of
+# Graham's living room sitting in the working tree as fixtures (two per mixed
+# cup), and this repo is PUBLIC — a stray `git add .` must not be able to
+# publish one. No JPEG/HEIC has ever been tracked; the committed icons are
+# .png/.ico, so this is deny-by-default with nothing to grandfather in.
+*.jpg
+*.jpeg
+*.heic
+*.heif
 
 # OS
 .DS_Store
