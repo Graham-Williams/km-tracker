@@ -73,10 +73,14 @@ itself runs **inside the app container**), driven by the
   then `docker cp`s the finished snapshot out to the host. The backup user must be
   able to run `docker` (in the `docker` group). *(This was the root cause of a long silent backup
   outage. The host-side online-backup did NOT fail deterministically — it
-  **flapped**, which is why it went unnoticed: measured over the 30 days to
-  2026-08-10 the timer logged ~7800 `attempt to write a readonly database`
-  failures against ~18 successes, and only three snapshots reached Drive, with
-  gaps of 23 and 12 days. It succeeds only when SQLite doesn't need to create or
+  **flapped**, which is why it went unnoticed: over the 30 days to 2026-08-10 the
+  timer started 7,834 times — 7,799 `attempt to write a readonly database`
+  failures and just 35 successes. Even that 35 overstates it: only **3** of those
+  runs wrote a new snapshot file (`saved local snapshot`); the other 32 got past
+  the backup step but produced a DB identical to the previous one and deduped it
+  away (`no change`). Correspondingly only three snapshots ever reached Drive,
+  with gaps of 23 days (`20260706T221310Z` → `20260729T023154Z`) and 12 days
+  (→ `20260810T073719Z`). It succeeds only when SQLite doesn't need to create or
   write the container-owned `-shm` — i.e. when the WAL is empty or a reusable
   read-mark already exists — so an idle app can make it look healthy. Fixed by
   this container-side approach, 2026-08-10; nothing landed on 2026-07-28.)*
@@ -103,11 +107,14 @@ itself runs **inside the app container**), driven by the
   a stale `km_tracker.db-wal` sits next to it; copy only the main file and SQLite
   **replays that orphaned WAL over the restored image** — no error, the app serves
   the PRE-restore data, and the next checkpoint bakes the stale pages permanently
-  into the file (two DB images merged = corruption). And a host-user `cp` leaves the
-  file owned by the wrong UID → `attempt to write a readonly database`. Correct
-  sequence: stop the container → `rm -f data/km_tracker.db-{wal,shm}` → copy the
-  snapshot → `chown 10001:10001` → start → **verify** (compare a known count in the
-  snapshot against what the running container reads; the failure mode is silent).
+  into the file (two DB images merged = corruption). Ownership matters too: the
+  restored file must end up owned by UID 10001 or the app fails every write with
+  `attempt to write a readonly database` (a `sudo cp` **over the existing** file
+  keeps its 10001 ownership; copying into an emptied/fresh `data/` lands as root —
+  so always `chown`). Correct sequence: park the backup timer → stop the container
+  → `rm -f data/km_tracker.db-{wal,shm}` → copy the snapshot → `chown 10001:10001`
+  → start → **verify** (compare a known count in the snapshot against what the
+  running container reads; the failure mode is silent) → restart the timer.
 
 Full setup/runbook (rclone headless auth, systemd install, and the full verified
 restore procedure) is in `DEPLOY.md` → "Automated backups" / "Restore from a

@@ -40,9 +40,15 @@ enable Docker on boot:
 ```bash
 curl -fsSL https://get.docker.com | sudo sh
 sudo systemctl enable docker
-# Optional: run docker without sudo (log out/in afterward)
+# REQUIRED (not optional) if you want the automated backups: the backup user runs
+# its snapshot via `docker exec`, so it must reach the Docker socket without sudo.
+# Log out/in afterward for the new group to take effect.
 sudo usermod -aG docker "$USER"
 ```
+
+> Membership of the `docker` group is effectively root on this host (anyone in it
+> can start a privileged container). That tradeoff is accepted here — it's a
+> single-admin box and the backup needs it — and is tracked in issue #76.
 
 ## Step 2 — Disable sleep/suspend (headless box)
 
@@ -627,6 +633,26 @@ the OAuth token lives in rclone's config.)
 
 ### 4. Install the systemd units
 
+**First, confirm the backup user can drive Docker.** The snapshot runs via
+`docker exec`, so the account in the unit's `User=` **must** be in the `docker`
+group (Step 1) — this is a hard requirement, not a convenience. Run these as that
+user:
+
+```bash
+id -nG | tr ' ' '\n' | grep -qx docker \
+  && echo "docker group: OK" \
+  || echo "MISSING — run: sudo usermod -aG docker $USER   (then log out/in)"
+
+# The real proof — this must print: true
+docker inspect -f '{{.State.Running}}' km-tracker-app-1
+```
+
+If the group was just added, log out and back in (a fresh login shell) before
+retesting; systemd picks the new group up on the next service start.
+
+> Reminder from Step 1: the `docker` group is root-equivalent on this host. That
+> accepted tradeoff is tracked in issue #76.
+
 ```bash
 sudo cp deploy/km-backup.service deploy/km-backup.timer /etc/systemd/system/
 sudo systemctl daemon-reload
@@ -637,6 +663,11 @@ The units assume the repo at `/home/<user>/km-tracker` and run as user `<user>` 
 edit the `User=` line and the `ExecStart` path in `deploy/km-backup.service` to
 match your box before the `cp` above (or edit the installed copy, then
 `daemon-reload`).
+
+The service is ordered `After=docker.service` so an early-boot timer tick doesn't
+fire before the Docker socket exists. It's ordering only, with no `Requires=`, so
+the unit still runs (and fails with its own explicit diagnostics) on a box that
+doesn't have `docker.service`.
 
 ### 5. Verify
 
@@ -669,10 +700,18 @@ rclone lsf gdrive:km-tracker-backups
 >   that then writes those stale WAL pages *permanently into* the restored file:
 >   page-level corruption, two different database images merged into one. The
 >   sidecars must be deleted in the same breath as the swap.
-> - `cp` as your login user also leaves the file **owned by you**, not by the
->   container user (**UID 10001**) — so the app then fails every write with
->   `attempt to write a readonly database`, the exact bug class the backup script
->   itself had to work around.
+> - Ownership has to be right too: the app writes the DB as the container user
+>   (**UID 10001**), and a DB file it can't write fails every write with
+>   `attempt to write a readonly database` — the exact bug class the backup script
+>   itself had to work around. `data/` is owned by 10001, which is why the copy
+>   needs `sudo` in the first place — a plain `cp` as your login user can't write
+>   into `data/` at all. A
+>   `sudo cp` **over an existing** `data/km_tracker.db` writes through the
+>   existing inode and *keeps* its `10001:10001` ownership — but if the file
+>   isn't there (fresh deploy, or you cleared `data/` while restoring) the new
+>   one lands owned by **root**. The `chown 10001:10001` below covers that case
+>   and is a harmless no-op in the other, so always run it rather than trying to
+>   work out which case you're in.
 >
 > Follow the whole sequence below, including the verification step — the failure
 > mode is silent, so "the app came back up" proves nothing.
@@ -693,7 +732,7 @@ rclone copy gdrive:km-tracker-backups/km_tracker_<TS>.db ~/km-backups/restore/
 #    Then pin it to a variable so every step below uses the same file:
 SNAP=~/km-backups/snapshots/km_tracker_<TS>.db     # or ~/km-backups/restore/...
 
-# 2. Note what that snapshot CONTAINS — step 7 compares against this.
+# 2. Note what that snapshot CONTAINS — step 9 compares against this.
 #    (Reading a snapshot host-side is fine, it's your own file; immutable=1 means
 #    the read can't create -wal/-shm sidecars next to it.)
 python3 -c "import sqlite3,pathlib,sys;u=pathlib.Path(sys.argv[1]).expanduser().resolve().as_uri()+'?immutable=1';c=sqlite3.connect(u,uri=True);print(c.execute('SELECT COUNT(*), MAX(id), MAX(date) FROM cups').fetchone())" "$SNAP"
@@ -704,27 +743,35 @@ python3 -c "import sqlite3,pathlib,sys;u=pathlib.Path(sys.argv[1]).expanduser().
 #    whatever is still sitting in the -wal.
 scripts/backup.sh && ls -1t ~/km-backups/snapshots/ | head -n1
 
-# 4. Stop the app. Nothing may hold the DB open while it is swapped.
+# 4. Park the automated backups for the duration. Between step 8 (app back up)
+#    and step 9 (verify) a 5-minute tick could snapshot — and push off-box — a
+#    restore that silently failed. Retention bounds the damage, but there's no
+#    reason to race it.
+sudo systemctl stop km-backup.timer
+
+# 5. Stop the app. Nothing may hold the DB open while it is swapped.
 docker compose stop app
 
-# 5. DELETE THE WAL SIDECARS. This is the step whose absence silently
+# 6. DELETE THE WAL SIDECARS. This is the step whose absence silently
 #    resurrects the old data: an orphaned -wal is replayed over whatever DB
 #    file it finds. (sudo: data/ is owned by UID 10001.)
 sudo rm -f data/km_tracker.db-wal data/km_tracker.db-shm
 
-# 6. Put the snapshot in place and hand it back to the container user — a file
-#    owned by your login user makes the app fail with "attempt to write a
-#    readonly database" on its first write.
+# 7. Put the snapshot in place and make sure it ends up owned by the container
+#    user. `sudo cp` over the EXISTING file keeps its 10001 ownership; if the
+#    file wasn't there, the copy lands as root and the app fails with "attempt
+#    to write a readonly database" on its first write. The chown covers that
+#    case and is a no-op in the other — always run it.
 sudo cp "$SNAP" data/km_tracker.db
 sudo chown 10001:10001 data/km_tracker.db
 sudo chmod 644 data/km_tracker.db
 
-# 7. Start the app.
+# 8. Start the app.
 docker compose up -d app
 docker compose ps
 ```
 
-**8. Verify the restore actually took.** Ask the *running app's* DB the same
+**9. Verify the restore actually took.** Ask the *running app's* DB the same
 question you asked the snapshot in step 2 — this is the only way to tell a real
 restore from a silent WAL replay:
 
@@ -741,8 +788,17 @@ there.
 
 If you instead see the **pre-restore** numbers, the stale `-wal` was replayed:
 `docker compose stop app` immediately (every minute it runs risks a checkpoint
-baking those stale pages permanently into the file) and redo from step 5 — this
-time deleting the sidecars.
+baking those stale pages permanently into the file) and redo from step 6 — this
+time deleting the sidecars. **Leave `km-backup.timer` stopped** until the verify
+passes, so the bad state never gets snapshotted or pushed off-box.
+
+Once — and only once — the verify matches:
+
+```bash
+# 10. Restore confirmed. Un-park the automated backups.
+sudo systemctl start km-backup.timer
+systemctl list-timers | grep km-backup
+```
 
 The next backup run picks the restored DB up on its own. Two notes:
 
