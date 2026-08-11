@@ -651,10 +651,14 @@ stopped (it's a plain SQLite file).
 # (as UID 10001) — a host-side backup of the WAL-mode DB fails with "attempt to
 # write a readonly database" because it can't write the container-owned
 # -wal/-shm sidecars. This is exactly what scripts/backup.sh does.
+# NB: snapshot into the container's /tmp, NOT /data — /data is the live
+# bind-mounted data dir, and a failed `docker cp` would strand a full-size copy
+# of the DB right next to the real one. scripts/backup.sh uses /tmp for exactly
+# this reason; keep this recipe in step with it.
 docker exec km-tracker-app-1 python3 -c \
-  "import sqlite3; s=sqlite3.connect('/data/km_tracker.db'); d=sqlite3.connect('/data/km_tracker.manual.db'); s.backup(d); d.close(); s.close()"
-docker cp km-tracker-app-1:/data/km_tracker.manual.db ./km_tracker.$(date +%F).db
-docker exec km-tracker-app-1 rm -f /data/km_tracker.manual.db
+  "import sqlite3; s=sqlite3.connect('/data/km_tracker.db'); d=sqlite3.connect('/tmp/km_tracker.manual.db'); s.backup(d); d.close(); s.close()"
+docker cp km-tracker-app-1:/tmp/km_tracker.manual.db ./km_tracker.$(date +%F).db
+docker exec km-tracker-app-1 rm -f /tmp/km_tracker.manual.db
 ```
 
 Or just run the automated script directly: `scripts/backup.sh` (it does the

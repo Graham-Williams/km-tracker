@@ -71,9 +71,15 @@ itself runs **inside the app container**), driven by the
   script runs the `.backup()` via `docker exec` in `BACKUP_CONTAINER` (default
   `km-tracker-app-1`) against `CONTAINER_DB_PATH` (default `/data/km_tracker.db`),
   then `docker cp`s the finished snapshot out to the host. The backup user must be
-  able to run `docker` (in the `docker` group). *(This was the root cause of the
-  ~3-week silent backup outage fixed 2026-07-28: the backup previously ran the
-  online-backup host-side and exited 1 every tick with the readonly-DB error.)*
+  able to run `docker` (in the `docker` group). *(This was the root cause of a long silent backup
+  outage. The host-side online-backup did NOT fail deterministically — it
+  **flapped**, which is why it went unnoticed: measured over the 30 days to
+  2026-08-10 the timer logged ~7800 `attempt to write a readonly database`
+  failures against ~18 successes, and only three snapshots reached Drive, with
+  gaps of 23 and 12 days. It succeeds only when SQLite doesn't need to create or
+  write the container-owned `-shm` — i.e. when the WAL is empty or a reusable
+  read-mark already exists — so an idle app can make it look healthy. Fixed by
+  this container-side approach, 2026-08-10; nothing landed on 2026-07-28.)*
 - **Local snapshots:** consistent SQLite online-backup snapshots into
   `~/km-backups/snapshots/` (default `LOCAL_BACKUP_DIR`; **outside** the
   container-owned `data/` bind-mount so the host backup process can write it —

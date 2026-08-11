@@ -145,7 +145,11 @@ TMP_SNAPSHOT="$(mktemp "${LOCAL_BACKUP_DIR}/.snapshot.XXXXXX.db")"
 # hidden dotfile the km_tracker_*.db prune globs never reap. cleanup tolerates
 # CONTAINER_TMP_SNAPSHOT being unset (it's created just after) under `set -u`.
 cleanup() {
-  rm -f "${TMP_SNAPSHOT}"
+  # Glob the suffix too: the verify step below opens the snapshot, and since
+  # .backup() copies the source's journal mode the snapshot is WAL, so SQLite
+  # transiently creates <snap>-wal/-shm. A clean close removes them, but a crash
+  # mid-verify would strand them next to the temp.
+  rm -f "${TMP_SNAPSHOT}" "${TMP_SNAPSHOT}"-*
   [[ -n "${CONTAINER_TMP_SNAPSHOT:-}" ]] \
     && docker exec "${BACKUP_CONTAINER}" rm -f "${CONTAINER_TMP_SNAPSHOT}" >/dev/null 2>&1 || true
 }
@@ -209,15 +213,23 @@ PY
 # (sha256, rclone) work without any container-user permission issues.
 docker cp "${BACKUP_CONTAINER}:${CONTAINER_TMP_SNAPSHOT}" "${TMP_SNAPSHOT}" \
   || die "docker cp of snapshot out of ${BACKUP_CONTAINER} failed"
-# Drop the container temp immediately (also covered by the cleanup trap).
+# Drop the container temp immediately, then clear the var so the EXIT trap
+# doesn't fire a second, redundant `docker exec` on every successful run.
 docker exec "${BACKUP_CONTAINER}" rm -f "${CONTAINER_TMP_SNAPSHOT}" >/dev/null 2>&1 || true
+CONTAINER_TMP_SNAPSHOT=""
 
 # Re-verify the HOST copy — the file we actually keep and push off-box. The
 # in-container integrity_check above validated the pre-`docker cp` file; a
 # truncated or corrupted copy would otherwise ship to Drive undetected, since
-# everything downstream only ever sha256s this file. The snapshot is owned by
-# the host user in a writable dir, so a plain host-side connection is fine here
-# (this is NOT the WAL-sidecar case that forced the snapshot into the container).
+# everything downstream only ever sha256s this file.
+#
+# This DOES open a WAL-mode DB host-side — .backup() copies the source's journal
+# mode, so SQLite creates <snap>-wal/-shm here and removes them on clean close.
+# That's safe, and is not the case this script exists to avoid: the snapshot and
+# its directory are owned by the HOST user, so creating those sidecars succeeds.
+# The failure this script fixes is reading the CONTAINER-owned live DB, whose
+# sidecars the host user cannot create or write. (`main` opened the snapshot
+# host-side in exactly this way too, so this is not new exposure.)
 python3 - "${TMP_SNAPSHOT}" <<'PY' || die "snapshot failed verification after copy out of the container"
 import sqlite3
 import sys
