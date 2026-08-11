@@ -3,11 +3,23 @@
 # backup.sh — Automated off-box backups for the self-hosted KM Tracker deployment.
 #
 # SCOPE: This script is specific to the self-hosted "personalserver" deployment
-# (headless Ubuntu Server box running KM Tracker via Docker Compose). It runs on
-# the HOST — not inside the app container — and snapshots the live SQLite DB that
-# is bind-mounted into the container, then pushes snapshots off-box to Google
-# Drive via rclone on a throttled cadence. It is driven by a systemd timer (see
-# deploy/km-backup.timer). It is NOT used in local dev or CI.
+# (headless Ubuntu Server box running KM Tracker via Docker Compose). It is
+# ORCHESTRATED on the HOST (driven by a systemd timer — see
+# deploy/km-backup.timer), but the snapshot itself runs INSIDE the app container
+# via `docker exec`: the live DB is WAL-mode and its -wal/-shm sidecars are owned
+# by the container user (UID 10001), so SQLite's online backup API cannot take
+# its read lock host-side and fails with "attempt to write a readonly database".
+# The finished snapshot is copied out to the host, kept in a local ring, and
+# pushed off-box to Google Drive via rclone on a throttled cadence. Because it
+# shells out to `docker`, the backup user must be in the `docker` group. This
+# script is NOT used in local dev or CI.
+#
+# RESTORING is NOT a plain `cp` of a snapshot over the live DB: the stale
+# -wal/-shm sidecars must be deleted and the restored file re-owned to UID 10001
+# first, or SQLite silently replays the old WAL over the restored image (you get
+# the PRE-restore data back, with no error, and the next checkpoint bakes the
+# stale pages in). See DEPLOY.md → "Restore from a snapshot" for the verified
+# procedure.
 #
 # Design:
 #   - Frequent, cheap LOCAL snapshots (every timer tick) using SQLite's online
@@ -21,6 +33,11 @@
 #   - A long-tail DRIVE "daily/" tier keeps at most one snapshot per UTC day for
 #     DAILY_RETENTION days, defending against slow logical corruption that would
 #     otherwise rotate out of the flat recent-snapshot ring buffer.
+#   - A snapshot whose every user table is EMPTY is refused when the previous
+#     snapshot had data: entrypoint.sh runs init_db() on every container start,
+#     so a /data remounted empty produces a perfectly valid, integrity-ok,
+#     schema-only DB that would otherwise rotate every good copy out of the ring.
+#     Override with ALLOW_EMPTY_SNAPSHOT=1 for the deliberate case.
 #
 # Secrets: the rclone OAuth token lives ONLY in rclone's own config
 # (~/.config/rclone/rclone.conf). No tokens or secrets are read from, written to,
@@ -108,6 +125,10 @@ LOCAL_RETENTION="${LOCAL_RETENTION:-100}"            # keep newest N local snaps
 DRIVE_RETENTION="${DRIVE_RETENTION:-50}"             # keep newest N recent on Drive
 DAILY_RETENTION="${DAILY_RETENTION:-30}"             # keep newest N in Drive daily/ tier
 DRIVE_PUSH_INTERVAL_MIN="${DRIVE_PUSH_INTERVAL_MIN:-15}"  # min minutes between Drive pushes
+# Set to 1 to accept a snapshot with zero rows in every user table even when the
+# previous snapshot had data (see the empty-DB guard in the verification below).
+# Only for the deliberate case (e.g. you really did just wipe the DB on purpose).
+ALLOW_EMPTY_SNAPSHOT="${ALLOW_EMPTY_SNAPSHOT:-0}"
 
 # Validate retention config BEFORE any prune runs (a bad value would delete data).
 require_positive_int LOCAL_RETENTION "${LOCAL_RETENTION}"
@@ -123,8 +144,24 @@ DRIVE_PUSH_TS_FILE="${STATE_DIR}/last_drive_push.epoch"
 [[ -f "${DB_PATH}" ]] || die "DB not found at DB_PATH=${DB_PATH}"
 command -v docker >/dev/null 2>&1 || die "docker not found on PATH — the snapshot runs inside the app container (see DEPLOY.md)"
 # The container must be running for `docker exec` to reach the DB as UID 10001.
-docker inspect -f '{{.State.Running}}' "${BACKUP_CONTAINER}" 2>/dev/null | grep -qx true \
-  || die "app container '${BACKUP_CONTAINER}' is not running — cannot snapshot (set BACKUP_CONTAINER in .env.backup if the name differs)"
+# Keep stderr: "can't talk to the daemon" and "no such container" are different
+# problems, and the first one is the NEW failure mode this design introduces —
+# the backup user must now be in the `docker` group. Reporting a socket
+# permission error as "container is not running" would send an operator hunting
+# the wrong thing entirely.
+DOCKER_INSPECT_OUT=""
+if ! DOCKER_INSPECT_OUT="$(docker inspect -f '{{.State.Running}}' "${BACKUP_CONTAINER}" 2>&1)"; then
+  case "${DOCKER_INSPECT_OUT}" in
+    *"permission denied"*|*"Permission denied"*)
+      die "cannot access the Docker socket as user '$(id -un)' — the backup user must be in the 'docker' group (sudo usermod -aG docker $(id -un), then re-login / restart the unit; see DEPLOY.md → 'Automated backups'). docker said: ${DOCKER_INSPECT_OUT}" ;;
+    *"Cannot connect to the Docker daemon"*|*"Is the docker daemon running"*)
+      die "cannot connect to the Docker daemon (is it running?) — cannot snapshot. docker said: ${DOCKER_INSPECT_OUT}" ;;
+    *)
+      die "app container '${BACKUP_CONTAINER}' not found — cannot snapshot (set BACKUP_CONTAINER in .env.backup if the name differs). docker said: ${DOCKER_INSPECT_OUT}" ;;
+  esac
+fi
+[[ "${DOCKER_INSPECT_OUT}" == "true" ]] \
+  || die "app container '${BACKUP_CONTAINER}' exists but is not running (State.Running=${DOCKER_INSPECT_OUT}) — cannot snapshot"
 mkdir -p "${LOCAL_BACKUP_DIR}" "${STATE_DIR}"
 
 # --- Make a consistent snapshot --------------------------------------------
@@ -231,24 +268,115 @@ docker exec "${BACKUP_CONTAINER}" rm -f "${CONTAINER_TMP_SNAPSHOT}" >/dev/null 2
 # The failure this script fixes is reading the CONTAINER-owned live DB, whose
 # sidecars the host user cannot create or write. (`main` opened the snapshot
 # host-side in exactly this way too, so this is not new exposure.)
-python3 - "${TMP_SNAPSHOT}" <<'PY' || die "snapshot failed verification after copy out of the container"
+#
+# The verification also guards the realistic EMPTY-DB case (see below): the
+# newest snapshot already on disk is passed in as the "previous" copy to compare
+# against. It is resolved here (not just at dedupe time) so both users see the
+# same file, and it is opened immutable so we never touch it.
+PREV_SNAPSHOT="$(ls -1 "${LOCAL_BACKUP_DIR}"/km_tracker_*.db 2>/dev/null | sort | tail -n1 || true)"
+VERIFY_RC=0
+python3 - "${TMP_SNAPSHOT}" "${PREV_SNAPSHOT}" "${ALLOW_EMPTY_SNAPSHOT}" <<'PY' || VERIFY_RC=$?
+import pathlib
 import sqlite3
 import sys
 
 path = sys.argv[1]
+prev_path = sys.argv[2]          # "" when there is no previous snapshot yet
+allow_empty = sys.argv[3] == "1"
+
+EMPTY_RC = 3                     # distinct rc so the caller can explain this case
+
+
+def warn(msg):
+    sys.stderr.write(f"snapshot verification: {msg}\n")
+
+
+def has_any_row(conn):
+    """True if ANY user table holds at least one row.
+
+    Table names come from the DB's own sqlite_master and must be interpolated —
+    SQLite cannot parameterize an identifier — so each is identifier-quoted with
+    doubled quotes. sqlite_* internal tables (e.g. sqlite_sequence) are excluded:
+    they are bookkeeping, not content. Stops at the first non-empty table, so
+    this stays cheap.
+    """
+    names = [
+        row[0]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\'"
+        )
+    ]
+    for name in names:
+        quoted = '"' + name.replace('"', '""') + '"'
+        if conn.execute(f"SELECT EXISTS(SELECT 1 FROM {quoted})").fetchone()[0]:
+            return True
+    return False
+
+
 conn = sqlite3.connect(path)
 try:
     if conn.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+        warn("integrity_check failed on the copied-out snapshot")
         sys.exit(1)
     # An empty-but-valid DB passes integrity_check, so assert it has content.
     if conn.execute(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table'"
     ).fetchone()[0] == 0:
-        sys.stderr.write("snapshot contains no tables\n")
+        warn("snapshot contains no tables")
         sys.exit(1)
+    snapshot_has_rows = has_any_row(conn)
 finally:
     conn.close()
+
+if snapshot_has_rows:
+    sys.exit(0)
+
+# Zero rows in EVERY user table. Having tables is not a sufficient guard: the
+# container's entrypoint.sh runs init_db() on EVERY start, so if /data is ever
+# remounted empty the app immediately recreates a schema-only DB — valid,
+# integrity-ok, full table count, and completely empty. Snapshotting that would
+# rotate every real copy out of the local ring and the Drive tiers.
+#
+# Only refuse when this is visibly a REGRESSION (the previous snapshot had data).
+# With no previous snapshot at all an empty DB is legitimate — a first-ever run
+# against a brand-new deployment — and refusing would break bootstrapping. The
+# check counts rows rather than bytes so a legitimate VACUUM, or genuinely
+# deleting old cups, can't false-positive.
+if allow_empty:
+    warn("no rows in any table; ALLOW_EMPTY_SNAPSHOT=1 — accepting it")
+    sys.exit(0)
+if not prev_path:
+    warn("no rows in any table, but there is no previous snapshot to compare "
+         "against — accepting it (first run / bootstrap)")
+    sys.exit(0)
+try:
+    # Read the previous snapshot immutable: opening it normally would create
+    # <snapshot>-wal/-shm beside it (snapshots inherit the live DB's WAL journal
+    # mode) and those sidecars are NOT reaped by the km_tracker_*.db prune.
+    # immutable=1 reads the file directly and creates nothing. Path -> URI via
+    # pathlib so any "?" or "#" is percent-encoded, never parsed as a URI param.
+    prev_uri = pathlib.Path(prev_path).resolve(strict=True).as_uri() + "?immutable=1"
+    prev = sqlite3.connect(prev_uri, uri=True)
+    try:
+        prev_has_rows = has_any_row(prev)
+    finally:
+        prev.close()
+except Exception as exc:  # unreadable/corrupt previous snapshot — can't compare
+    warn(f"no rows in any table and the previous snapshot could not be read "
+         f"({exc}) — accepting it")
+    sys.exit(0)
+
+if prev_has_rows:
+    sys.exit(EMPTY_RC)
+warn("no rows in any table, and neither had the previous one — accepting it")
+sys.exit(0)
 PY
+if (( VERIFY_RC == 3 )); then
+  die "refusing this snapshot: EVERY table is empty while the previous snapshot (${PREV_SNAPSHOT##*/}) has data — the live DB looks wiped (a remounted-empty /data makes the container recreate a valid, empty DB on start). Investigate before the good copies rotate out; set ALLOW_EMPTY_SNAPSHOT=1 in .env.backup if the DB really was emptied on purpose"
+elif (( VERIFY_RC != 0 )); then
+  die "snapshot failed verification after copy out of the container"
+fi
 
 # --- Checksum + dedupe ------------------------------------------------------
 SNAP_CKSUM="$(sha256_of "${TMP_SNAPSHOT}")"
@@ -256,14 +384,33 @@ LAST_LOCAL_CKSUM=""
 [[ -f "${LOCAL_CKSUM_FILE}" ]] && LAST_LOCAL_CKSUM="$(cat "${LOCAL_CKSUM_FILE}")"
 
 LATEST_LOCAL_SNAPSHOT=""
-if [[ "${SNAP_CKSUM}" == "${LAST_LOCAL_CKSUM}" ]]; then
-  # DB unchanged since the last local snapshot — don't create a duplicate file.
+if [[ "${SNAP_CKSUM}" == "${LAST_LOCAL_CKSUM}" && -n "${PREV_SNAPSHOT}" && -f "${PREV_SNAPSHOT}" ]]; then
+  # DB unchanged since the last local snapshot AND that snapshot is still on
+  # disk — don't create a duplicate file. It's what we'd push to Drive if needed.
   log "no change since last local snapshot (sha ${SNAP_CKSUM:0:12}); skipping new local file"
-  # The newest existing snapshot is what we'd push to Drive if needed.
-  LATEST_LOCAL_SNAPSHOT="$(ls -1 "${LOCAL_BACKUP_DIR}"/km_tracker_*.db 2>/dev/null | sort | tail -n1 || true)"
+  LATEST_LOCAL_SNAPSHOT="${PREV_SNAPSHOT}"
 else
+  if [[ "${SNAP_CKSUM}" == "${LAST_LOCAL_CKSUM}" ]]; then
+    # The state file says "already snapshotted" but no snapshot file exists (the
+    # dir was cleared to reclaim disk, or tidied up after a restore). Dedupe here
+    # would leave LATEST_LOCAL_SNAPSHOT empty, fail the Drive push, and go on
+    # doing that on every tick until the DB content happened to change — silent
+    # flapping, the exact failure shape this script exists to avoid. Keep the
+    # fresh snapshot instead; writing the checksum below re-syncs the state.
+    log "WARN: state checksum matches but no snapshot file remains in ${LOCAL_BACKUP_DIR} — keeping this snapshot to re-sync state"
+  fi
   TS="$(date -u +%Y%m%dT%H%M%SZ)"
   DEST_SNAPSHOT="${LOCAL_BACKUP_DIR}/km_tracker_${TS}.db"
+  # TS is 1-second resolution, so two runs in the same second (the timer plus a
+  # manual `scripts/backup.sh`) would target the same name and `mv` would
+  # silently destroy the first snapshot. Uniquify instead. The "_N" suffix still
+  # sorts after the bare name ("_" > "."), so newest-first ordering — and the
+  # daily tier's km_tracker_<date>T* match — keep working.
+  COLLISION_N=1
+  while [[ -e "${DEST_SNAPSHOT}" ]]; do
+    DEST_SNAPSHOT="${LOCAL_BACKUP_DIR}/km_tracker_${TS}_${COLLISION_N}.db"
+    COLLISION_N=$(( COLLISION_N + 1 ))
+  done
   mv "${TMP_SNAPSHOT}" "${DEST_SNAPSHOT}"
   printf '%s\n' "${SNAP_CKSUM}" > "${LOCAL_CKSUM_FILE}"
   LATEST_LOCAL_SNAPSHOT="${DEST_SNAPSHOT}"
@@ -333,10 +480,17 @@ drive_push() {
   # Prune the Drive folder to newest DRIVE_RETENTION snapshots. List our snapshot
   # files, sort newest-first (timestamped names sort lexically == chronologically),
   # and deletefile anything past the retention count.
+  #
+  # --files-only is load-bearing: without it `lsf` also lists the daily/ SUBDIR,
+  # which reverse-sorts last and therefore lands in the delete slice on every
+  # single run once the listing exceeds DRIVE_RETENTION. `deletefile` refuses a
+  # directory, so nothing was lost — but it logged rclone ERRORs every push
+  # (making a genuinely failing prune indistinguishable from the noise) and the
+  # phantom entry meant the ring actually kept DRIVE_RETENTION-1 snapshots.
   local remote_files=()
   local rf
   while IFS= read -r rf; do remote_files+=("$rf"); done \
-    < <(rclone lsf "${RCLONE_DEST}" --include 'km_tracker_*.db' 2>/dev/null | sort -r || true)
+    < <(rclone lsf "${RCLONE_DEST}" --files-only --include 'km_tracker_*.db' 2>/dev/null | sort -r || true)
   if (( ${#remote_files[@]} > DRIVE_RETENTION )); then
     for old in "${remote_files[@]:DRIVE_RETENTION}"; do
       rclone deletefile "${RCLONE_DEST}/${old}" && log "pruned Drive snapshot ${old}" || log "WARN: failed to prune Drive snapshot ${old}"
@@ -355,15 +509,17 @@ drive_push() {
   # original km_tracker_<UTC-timestamp>.db name, so today's copy starts with
   # km_tracker_<today>T. If none exists yet, add the current snapshot.
   local existing_today
-  existing_today="$(rclone lsf "${daily_dest}" --include "km_tracker_${today}T*.db" 2>/dev/null | head -n1 || true)"
+  existing_today="$(rclone lsf "${daily_dest}" --files-only --include "km_tracker_${today}T*.db" 2>/dev/null | head -n1 || true)"
   if [[ -z "${existing_today}" ]]; then
     log "adding daily snapshot for ${today} to ${daily_dest}"
     rclone copy "${LATEST_LOCAL_SNAPSHOT}" "${daily_dest}" || { log "ERROR: rclone copy to daily/ failed"; return 1; }
-    # Prune daily/ to the newest DAILY_RETENTION files.
+    # Prune daily/ to the newest DAILY_RETENTION files. (--files-only for the
+    # same reason as above; daily/ holds no subdirs today, but a stray one would
+    # otherwise wedge itself permanently into the delete slice here too.)
     local daily_files=()
     local dfile
     while IFS= read -r dfile; do daily_files+=("$dfile"); done \
-      < <(rclone lsf "${daily_dest}" --include 'km_tracker_*.db' 2>/dev/null | sort -r || true)
+      < <(rclone lsf "${daily_dest}" --files-only --include 'km_tracker_*.db' 2>/dev/null | sort -r || true)
     if (( ${#daily_files[@]} > DAILY_RETENTION )); then
       for old in "${daily_files[@]:DAILY_RETENTION}"; do
         rclone deletefile "${daily_dest}/${old}" && log "pruned daily snapshot ${old}" || log "WARN: failed to prune daily snapshot ${old}"
