@@ -83,12 +83,14 @@ itself runs **inside the app container**), driven by the
   successes overstate the good news — only **3** of the 35 wrote a new snapshot
   file (`saved local snapshot`); the other 32 got past the backup step but
   produced a DB identical to the previous one and deduped it away (`no change`).
-  Correspondingly only three snapshots ever reached Drive,
-  with gaps of 23 days (`20260706T221310Z` → `20260729T193843Z`) and 12 days
-  (→ `20260810T073719Z`). It succeeds only when SQLite doesn't need to create or
-  write the container-owned `-shm` — i.e. when the WAL is empty or a reusable
-  read-mark already exists — so an idle app can make it look healthy. Fixed by
-  this container-side approach, 2026-08-10; nothing landed on 2026-07-28.)*
+  Correspondingly only three snapshots reached Drive *in that window*
+  (`20260729T193843Z`, `20260810T073719Z`, `20260810T233609Z`) — the first
+  landing 23 days after the last pre-outage push (`20260706T221310Z`, one of 8
+  pushed on 2026-07-06 before the outage began), then 12 days apart. It succeeds
+  only when SQLite doesn't need to create or write the container-owned `-shm` —
+  i.e. when the WAL is empty or a reusable read-mark already exists — so an idle
+  app can make it look healthy. Fixed by this container-side approach,
+  2026-08-10; nothing landed on 2026-07-28.)*
 - **Local snapshots:** consistent SQLite online-backup snapshots into
   `~/km-backups/snapshots/` (default `LOCAL_BACKUP_DIR`; **outside** the
   container-owned `data/` bind-mount so the host backup process can write it —
@@ -97,8 +99,11 @@ itself runs **inside the app container**), driven by the
 - **Off-box copies:** pushed to Google Drive via `rclone` on a throttled cadence
   (only when the DB changed and ≥ `DRIVE_PUSH_INTERVAL_MIN` minutes — default 15 —
   since the last push), pruned to the newest `DRIVE_RETENTION` (default 50).
-- The local half always runs even if the Drive push can't (rclone unconfigured →
-  reports the error, exits non-zero, but local snapshots are unaffected).
+- The local half always runs even if the Drive push can't (rclone not installed,
+  `RCLONE_DEST` unset, or the remote missing from the rclone config → warns and
+  **exits 0**, so the unit isn't marked failed every 5 minutes during setup; only
+  a *configured* remote that actually errors exits non-zero, and even then the
+  local snapshot is kept).
 - **Empty-DB guard:** `entrypoint.sh` runs `init_db()` on EVERY container start, so
   a `/data` remounted empty makes the app recreate a schema-only DB — valid,
   `integrity_check`-clean, full table count, **zero rows**. The script refuses a

@@ -44,6 +44,15 @@
 # or echoed by this script.
 #
 set -euo pipefail
+# Pin the locale to C so every sort/glob/comparison below is byte-ordered and
+# deterministic regardless of the caller's environment. This is load-bearing for
+# snapshot filename ordering: systemd's manager environment on the box carries
+# LANG=en_US.UTF-8 and the unit sets no locale of its own, and UTF-8 collation
+# ignores punctuation, which INVERTS the "_N" collision suffix ordering relied on
+# below (measured: C sorts "...Z.db" before "...Z_1.db"; en_US.UTF-8 sorts them
+# the other way round). Everything here is ASCII — timestamps are numeric
+# `date` formats and all messages are English — so nothing else is affected.
+export LC_ALL=C
 
 # --- Helpers ----------------------------------------------------------------
 log() { printf '%s backup.sh: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
@@ -181,9 +190,15 @@ command -v docker >/dev/null 2>&1 || die "docker not found on PATH — the snaps
 # wrong BACKUP_CONTAINER — fell through to the vague fallback. `docker exec` and
 # `docker cp` still say "No such container", so both spellings stay covered.
 # The reported text is the ORIGINAL, un-lowercased message.
-# ORDER MATTERS: docker 29's socket-permission error is "permission denied while
-# trying to connect to the docker API at ...", which also contains "docker API" —
-# so permission-denied must stay ahead of the daemon-unreachable patterns.
+# ORDER IS DELIBERATE: the most specific, most actionable diagnosis goes first.
+# docker 29.6.1's socket-permission error reads "permission denied while trying
+# to connect to the docker API at unix://..." — it does NOT match today's
+# daemon-unreachable patterns (which require the full phrase "failed to connect
+# to the docker api"), so nothing is currently mis-classified either way. But it
+# does mention the docker API, so it sits one loosened pattern away from being
+# swallowed by a broader connectivity arm — and "add yourself to the docker
+# group" is a very different fix from "start the daemon". Keep permission-denied
+# ahead of the connectivity patterns.
 DOCKER_INSPECT_ERR_FILE="$(mktemp "${TMPDIR:-/tmp}/km-backup-inspect.XXXXXX")" \
   || die "could not create a temp file for the docker inspect precondition check"
 DOCKER_INSPECT_OUT=""
