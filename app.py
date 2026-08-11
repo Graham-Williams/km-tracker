@@ -2820,17 +2820,27 @@ def upload_cup_block_photo(cup_id, block):
         "(SELECT MAX(id) FROM cup_photos WHERE cup_id = ? AND block = ?)",
         (cup_id, block, cup_id, block),
     )
+    if cup is None:
+        # The read above missed a row the INSERT then found — the cup became
+        # visible in the gap. The photo is stored, so this must not become a
+        # 500 (block_edition(None, block) raises) AFTER a committed write:
+        # re-read the row for the labelling half of the response.
+        cup = conn.execute(
+            "SELECT id, game_edition, first_edition FROM cups WHERE id = ?",
+            (cup_id,),
+        ).fetchone()
     conn.commit()
     conn.close()
-    edition = block_edition(cup, block)
-    return jsonify(
-        {
-            "ok": True,
-            "block": block,
-            "edition": edition,
-            "label": edition_label(edition),
-        }
-    )
+    body = {"ok": True, "block": block}
+    if cup is not None:
+        # Which console this block was played on, for the "Wii photo saved ✓"
+        # confirmation. Purely cosmetic — if even the re-read missed (the cup
+        # was deleted in the meantime), report the save without a label; the
+        # client falls back to the label already on the panel.
+        edition = block_edition(cup, block)
+        body["edition"] = edition
+        body["label"] = edition_label(edition)
+    return jsonify(body)
 
 
 @app.route("/cups/<int:cup_id>/photo")

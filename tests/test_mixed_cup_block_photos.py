@@ -612,6 +612,57 @@ def test_pruning_never_touches_a_legacy_blockless_photo(client, monkeypatch):
     assert bytes(rows[0]["image"]) == PHOTO_BYTES
 
 
+def test_a_photo_saved_between_the_read_and_the_write_still_answers_200(
+    client, monkeypatch
+):
+    """Narrow TOCTOU: the guard is folded into the INSERT (so it can't be
+    bypassed), but the response labelled the block from the row read BEFORE it.
+    If that read misses while the conditional INSERT hits — the cup became
+    visible in the gap — block_edition(None, block) raised, turning a COMMITTED
+    photo into a 500 the client reports as "couldn't save"."""
+    real_get_connection = appmod.get_connection
+
+    class _HidesTheFirstCupRead:
+        """Passes everything through except the first cup SELECT, which comes
+        back empty — exactly the interleaving described above."""
+
+        def __init__(self, conn):
+            self._conn = conn
+            self._hidden = False
+
+        def execute(self, sql, params=()):
+            if not self._hidden and sql.startswith("SELECT id, game_edition"):
+                self._hidden = True
+                self._conn.execute(sql, params).fetchall()  # keep the side effects
+
+                class _Empty:
+                    def fetchone(self):
+                        return None
+
+                return _Empty()
+            return self._conn.execute(sql, params)
+
+        def __getattr__(self, name):
+            return getattr(self._conn, name)
+
+    _start_mixed(client, monkeypatch, "wii")
+    monkeypatch.setattr(
+        appmod, "get_connection", lambda *a, **kw: _HidesTheFirstCupRead(
+            real_get_connection(*a, **kw)
+        )
+    )
+    response = _upload(client, 1, 1)
+    monkeypatch.undo()
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["ok"] is True
+    assert body["block"] == 1
+    # Re-read, so the console label survives the race.
+    assert body["edition"] == "wii"
+    assert [bytes(r["image"]) for r in _photo_rows()] == [PHOTO_BYTES]
+
+
 def test_block_photo_route_serves_only_that_block(client, monkeypatch):
     _start_mixed(client, monkeypatch)
     _upload(client, 1, 1, image=PHOTO_B64)
