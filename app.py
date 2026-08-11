@@ -1196,13 +1196,129 @@ def parse_scores_from_form(form):
     return scores_data
 
 
+def parse_block_scores_from_form(form, scores_data):
+    """Fold a MIXED cup's per-console block scores into `scores_data`.
+
+    A mixed cup is scored on two consoles whose results screens each start from
+    zero, so the completion form collects the two halves separately and the cup
+    total is their SUM. Reads block1_scores[] / block2_scores[] positionally
+    against player_ids[] (same cap, same parse, same misalignment reject as the
+    issue-#45 guard on scores[]).
+
+    Per row:
+      * both blank  -> leave the row alone; whatever total was typed stands
+                       (back-compat, non-JS, and crafted POSTs all keep working).
+      * both filled -> set block1/block2 AND OVERWRITE the row's total with
+                       their sum. The server is authoritative: a submitted total
+                       that disagrees with the blocks (stale JS, a lying POST)
+                       must never be what gets recorded, or `score ==
+                       block1 + block2` stops being an invariant.
+      * exactly one -> InvalidInput. That shape CANNOT satisfy the invariant and
+                       guessing the missing half is precisely the silently-wrong
+                       number this whole feature exists to prevent.
+
+    Runs over the RAW form arrays, not `scores_data`: parse_scores_from_form
+    SKIPS rows whose scores[] is empty, and a block-only row (both halves typed,
+    total left blank because JS didn't run) produces exactly that — so such a
+    row has no entry yet and is INSERTED here, in form order.
+    """
+    player_ids = form.getlist("player_ids[]")
+    raw_scores = form.getlist("scores[]")
+    raw_b1 = form.getlist("block1_scores[]")
+    raw_b2 = form.getlist("block2_scores[]")
+    if not raw_b1 and not raw_b2:
+        return
+    if len(raw_b1) > MAX_SCORE_ROWS or len(raw_b2) > MAX_SCORE_ROWS:
+        raise InvalidInput("Too many players/scores submitted.")
+    if (
+        len(raw_b1) != len(player_ids)
+        or len(raw_b2) != len(player_ids)
+        or len(raw_scores) != len(player_ids)
+    ):
+        raise InvalidInput("Player and block-score fields are misaligned.")
+
+    tiebreaker_ids = set(form.getlist("tiebreakers[]"))
+    # scores_data is in form order but SKIPS empty-total rows, so walk the form
+    # and advance a cursor in lockstep instead of keying on player_id (which a
+    # duplicate-id submit would make ambiguous; the roster guard rejects those
+    # later, but this must not misattribute in the meantime).
+    cursor = 0
+    for i, pid in enumerate(player_ids):
+        entry = None
+        if raw_scores[i].strip() != "":
+            entry = scores_data[cursor]
+            cursor += 1
+        b1_raw = raw_b1[i].strip()
+        b2_raw = raw_b2[i].strip()
+        if b1_raw == "" and b2_raw == "":
+            continue
+        if b1_raw == "" or b2_raw == "":
+            raise InvalidInput(
+                "Enter both block scores, or leave both blank and enter the total."
+            )
+        try:
+            player_id = parse_int_field(pid)
+            block1 = parse_int_field(b1_raw)
+            block2 = parse_int_field(b2_raw)
+        except ValueError:
+            raise InvalidInput("Player IDs and scores must be valid whole numbers.")
+        total = block1 + block2
+        if not (SQLITE_MIN_INT <= total <= SQLITE_MAX_INT):
+            raise InvalidInput("Block scores add up out of range.")
+        if entry is None:
+            entry = {
+                "player_id": player_id,
+                "score": total,
+                "line": 0,
+                "won_tiebreaker": str(pid) in tiebreaker_ids,
+            }
+            scores_data.insert(cursor, entry)
+            cursor += 1
+        else:
+            entry["score"] = total
+        entry["block1"] = block1
+        entry["block2"] = block2
+        # The stored line_score is score + line; bound it like every other path.
+        checked_line_score(entry["score"], entry["line"])
+
+
+def clear_blocks_if_not_mixed(cup, scores_data):
+    """Authoritative server-side guard behind the block UI (mirrors
+    zero_lines_if_lineless): only a MIXED cup may store a block breakdown. A
+    crafted POST carrying block1_scores[]/block2_scores[] at a Wii or Switch cup
+    must leave scores.block1_score/block2_score NULL, so a pure cup's row is
+    byte-identical to what it was before this feature existed."""
+    if is_mixed_cup(cup):
+        return
+    for s in scores_data:
+        s["block1"] = None
+        s["block2"] = None
+
+
 def save_scores(conn, cup_id, scores_data):
-    """Insert or replace scores for a cup."""
+    """Insert or replace scores for a cup.
+
+    DELETE + re-INSERT is deliberate for the block columns: any write path that
+    doesn't know about blocks (manual cup create, /cups/<id>/edit) simply omits
+    them and the rewritten row gets NULLs — so a stale half can never survive a
+    rewrite and contradict the total. That's why the breakdown lives on `scores`
+    and not in a side table.
+    """
     conn.execute("DELETE FROM scores WHERE cup_id = ?", (cup_id,))
     for s in scores_data:
         conn.execute(
-            "INSERT INTO scores (cup_id, player_id, score, line, line_score, won_tiebreaker) VALUES (?, ?, ?, ?, ?, ?)",
-            (cup_id, s["player_id"], s["score"], s["line"], s["line_score"], s["won_tiebreaker"] or None),
+            "INSERT INTO scores (cup_id, player_id, score, line, line_score, won_tiebreaker, "
+            "block1_score, block2_score) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                cup_id,
+                s["player_id"],
+                s["score"],
+                s["line"],
+                s["line_score"],
+                s["won_tiebreaker"] or None,
+                s.get("block1"),
+                s.get("block2"),
+            ),
         )
 
 
@@ -1495,8 +1611,13 @@ def update_score(score_id):
         except InvalidInput as e:
             flash(str(e))
             return redirect(url_for("edit_score", score_id=score_id))
+        # Editing the TOTAL here drops any mixed-cup block breakdown: this form
+        # only knows the total, so keeping the old halves would leave
+        # block1 + block2 != score — a breakdown that lies about the number
+        # beside it is worse than no breakdown.
         conn.execute(
-            "UPDATE scores SET score = ?, line = ?, line_score = ?, won_tiebreaker = ? WHERE id = ?",
+            "UPDATE scores SET score = ?, line = ?, line_score = ?, won_tiebreaker = ?, "
+            "block1_score = NULL, block2_score = NULL WHERE id = ?",
             (score_int, player_line, line_score_val, won_tiebreaker or None, score_id),
         )
         conn.commit()
@@ -1604,6 +1725,20 @@ def race_edition(cup, race_number):
     return edition_for_race(
         cup["game_edition"], row_value(cup, "first_edition"), race_number
     )
+
+
+def block_edition(cup, block):
+    """Which console BLOCK `block` (1 or 2) of a mixed cup is played on.
+
+    A block is RACES_PER_BLOCK consecutive races, so block N starts at race
+    (N-1)*RACES_PER_BLOCK + 1 — and its console is simply that race's console.
+    Everything block-shaped (photos, per-block scores) is tagged by this
+    ORDINAL rather than by an edition string, so there is exactly ONE source of
+    truth for "which console" (cups.first_edition) and no stored edition that
+    could disagree with the coin flip. On a pure cup this returns the cup's own
+    edition for either block, which is harmless — callers gate on mixed.
+    """
+    return race_edition(cup, (block - 1) * RACES_PER_BLOCK + 1)
 
 
 def courses_for_race(cup, race_number):
@@ -2197,6 +2332,20 @@ def cup_session_submit(cup_id):
         conn.close()
         flash(str(e))
         return redirect(url_for("cup_session_complete", cup_id=cup_id))
+    # Mixed cups: fold the two per-console halves into each row BEFORE anything
+    # validates or stores a total, so the tie checks below run against the real
+    # cup total. Gated on the cup being mixed so a pure cup's submit is
+    # byte-identical to before this feature (clear_blocks_if_not_mixed stays the
+    # authoritative guard either way).
+    if is_mixed_cup(cup):
+        try:
+            parse_block_scores_from_form(request.form, scores_data)
+        except InvalidInput as e:
+            conn.close()
+            flash(str(e))
+            return redirect(url_for("cup_session_complete", cup_id=cup_id))
+    clear_blocks_if_not_mixed(cup, scores_data)
+
     if not scores_data:
         flash("At least one player must have a score.")
         conn.close()
@@ -2500,13 +2649,100 @@ def parse_photo_from_form(form):
     return decode_photo(photo_data, mime_type), mime_type
 
 
-def save_cup_photo(conn, cup_id, photo):
-    """Insert an attached photo for a cup (photo = (bytes, mime_type))."""
+def save_cup_photo(conn, cup_id, photo, block=None):
+    """Insert an attached photo for a cup (photo = (bytes, mime_type)).
+
+    `block` tags a MIXED cup's per-console screen (1 = first console, 2 =
+    second); the default NULL means "the cup's photo", which is what every pure
+    cup and every pre-existing row is. cup_photos is append-only and has no
+    UNIQUE constraint — readers take the newest row (per block), so replacing a
+    photo is just another INSERT and a mis-tagged upload is fixed by uploading
+    again rather than by deleting anything.
+    """
     image, mime_type = photo
     created_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     conn.execute(
-        "INSERT INTO cup_photos (cup_id, image, mime_type, created_at) VALUES (?, ?, ?, ?)",
-        (cup_id, image, mime_type, created_at),
+        "INSERT INTO cup_photos (cup_id, image, mime_type, created_at, block) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (cup_id, image, mime_type, created_at, block),
+    )
+
+
+# A mixed cup has exactly two console blocks; anything else is a bad request.
+PHOTO_BLOCKS = (1, 2)
+
+
+def photo_blocks_for_cup(conn, cup_id):
+    """{block: True} for the blocks of `cup_id` that already have a photo.
+    Blockless (NULL) rows are excluded — they're the whole-cup photo."""
+    return {
+        row["block"]: True
+        for row in conn.execute(
+            "SELECT DISTINCT block FROM cup_photos WHERE cup_id = ? AND block IS NOT NULL",
+            (cup_id,),
+        ).fetchall()
+    }
+
+
+@app.route("/cups/<int:cup_id>/photo/<int:block>", methods=["POST"])
+def upload_cup_block_photo(cup_id, block):
+    """Persist ONE console block's results photo for a mixed cup. JSON in
+    ({image, mime_type}), JSON out.
+
+    Why its own request instead of riding the completion form like the pure-cup
+    photo does: MAX_CONTENT_LENGTH is 1 MB and two downscaled photos are
+    ~0.55-1.1 MB of base64 together, so carrying both on the form would
+    intermittently 413 with a flash-less error page — the exact silent-drop
+    class this feature is built to avoid. Posting each photo on its own also
+    means the swap photo can be taken DURING the cup (race 2, long before the
+    completion form exists), and it removes the async attach/submit race for
+    mixed cups entirely: the mixed completion form carries no photo payload at
+    all, and the client gets a server confirmation per photo.
+    """
+    if block not in PHOTO_BLOCKS:
+        return jsonify({"error": "Unknown photo block"}), 400
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "JSON body required"}), 400
+    try:
+        image = decode_photo(data.get("image"), data.get("mime_type"))
+    except InvalidInput as e:
+        return jsonify({"error": str(e)}), 400
+    mime_type = data.get("mime_type")
+
+    conn = get_connection()
+    cup = conn.execute(
+        "SELECT id, game_edition, first_edition FROM cups "
+        "WHERE id = ? AND deleted_at IS NULL AND game_edition = ? "
+        "AND status IN ('in_progress', 'completed')",
+        (cup_id, MIXED_EDITION),
+    ).fetchone()
+    created_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    # Fold the state guard into the write (create_score's pattern) so the
+    # cup can't be cancelled/deleted between the SELECT above and this INSERT.
+    cursor = conn.execute(
+        "INSERT INTO cup_photos (cup_id, image, mime_type, created_at, block) "
+        "SELECT ?, ?, ?, ?, ? WHERE EXISTS ("
+        "  SELECT 1 FROM cups WHERE id = ? AND deleted_at IS NULL "
+        "  AND game_edition = ? AND status IN ('in_progress', 'completed'))",
+        (cup_id, image, mime_type, created_at, block, cup_id, MIXED_EDITION),
+    )
+    if cursor.rowcount == 0:
+        conn.rollback()
+        conn.close()
+        # Either no such (live) cup, or a pure cup — which keeps the single
+        # whole-cup photo flow on its own form. One door per cup shape.
+        return jsonify({"error": "No mixed cup to attach this photo to"}), 404
+    conn.commit()
+    conn.close()
+    edition = block_edition(cup, block)
+    return jsonify(
+        {
+            "ok": True,
+            "block": block,
+            "edition": edition,
+            "label": edition_label(edition),
+        }
     )
 
 
@@ -2534,8 +2770,50 @@ def cup_photo(cup_id):
     return response.make_conditional(request)
 
 
+@app.route("/cups/<int:cup_id>/photo/<int:block>")
+def cup_block_photo(cup_id, block):
+    """Serve the newest photo for ONE console block of a mixed cup.
+
+    Identical caching semantics to cup_photo, just scoped to a block. The
+    blockless route above deliberately stays "newest photo of ANY block" — the
+    /cups thumbnail and the existing tests depend on it.
+    """
+    if block not in PHOTO_BLOCKS:
+        abort(404)
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT p.image, p.mime_type FROM cup_photos p"
+        " JOIN cups c ON c.id = p.cup_id"
+        " WHERE p.cup_id = ? AND p.block = ? AND c.deleted_at IS NULL"
+        " ORDER BY p.id DESC LIMIT 1",
+        (cup_id, block),
+    ).fetchone()
+    conn.close()
+    if row is None:
+        abort(404)
+    response = Response(row["image"], mimetype=row["mime_type"])
+    response.set_etag(hashlib.sha1(bytes(row["image"])).hexdigest())
+    response.headers["Cache-Control"] = "private, max-age=86400"
+    return response.make_conditional(request)
+
+
 def default_character_field(edition):
-    """Which players column holds the default character for an edition."""
+    """Which players column holds the default character for an edition.
+
+    RAISES outside BASE_EDITIONS (same posture as courses_for('mixed')). This
+    used to return the SWITCH column for anything that wasn't 'wii' — including
+    'mixed' and None — which is the single most dangerous silent default in the
+    photo feature: resolving a mixed cup's characters would read one edition's
+    column against the other edition's screen, and the off-character protection
+    can't help (a Wii main appearing as a CPU on the Switch screen would be
+    handed that CPU's points). Every caller now resolves a BASE edition first,
+    so this is unreachable in production and loud the moment it isn't.
+    """
+    if edition not in BASE_EDITIONS:
+        raise ValueError(
+            f"default_character_field needs a base edition, got {edition!r} — "
+            "resolve the block/race edition first (block_edition/race_edition)"
+        )
     return "default_character_wii" if edition == "wii" else "default_character_switch"
 
 
@@ -2636,14 +2914,76 @@ def match_standings_to_players(rows, players, edition):
     return scores, sorted(ambiguous), sorted(unmatched)
 
 
-def _players_for_extraction(data):
+def parse_photo_block(data):
+    """Read an optional `block` from a JSON body. Returns (block, error): the
+    block is None when absent, an int in PHOTO_BLOCKS when valid, and anything
+    else is a 400."""
+    raw = data.get("block")
+    if raw is None:
+        return None, None
+    if isinstance(raw, bool) or not isinstance(raw, (int, str)):
+        return None, (jsonify({"error": "Invalid photo block"}), 400)
+    try:
+        block = parse_int_field(raw)
+    except ValueError:
+        return None, (jsonify({"error": "Invalid photo block"}), 400)
+    if block not in PHOTO_BLOCKS:
+        return None, (jsonify({"error": "Unknown photo block"}), 400)
+    return block, None
+
+
+def _load_stored_block_photo(cup_id_raw, block):
+    """Load the newest stored photo for one block of a cup, as
+    ((image_b64, mime_type), None) — or (None, error_response).
+
+    This is how a photo taken at the console SWAP (during race 2, long before
+    the completion form exists) later becomes block-1 scores: the completion
+    page asks the server to read the photo it already holds, so the image never
+    has to make a second round trip through the browser.
+    """
+    if isinstance(cup_id_raw, bool) or not isinstance(cup_id_raw, (int, str)):
+        return None, (jsonify({"error": "Invalid cup_id"}), 400)
+    try:
+        cup_id = parse_int_field(cup_id_raw)
+    except ValueError:
+        return None, (jsonify({"error": "Invalid cup_id"}), 400)
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT p.image, p.mime_type FROM cup_photos p "
+        "JOIN cups c ON c.id = p.cup_id "
+        "WHERE p.cup_id = ? AND p.block = ? AND c.deleted_at IS NULL "
+        "ORDER BY p.id DESC LIMIT 1",
+        (cup_id, block),
+    ).fetchone()
+    conn.close()
+    if row is None:
+        return None, (jsonify({"error": "No photo saved for this block yet"}), 404)
+    return (
+        base64.b64encode(bytes(row["image"])).decode("ascii"),
+        row["mime_type"],
+    ), None
+
+
+def _players_for_extraction(data, block=None):
     """Resolve the extraction context for /extract-scores from cup_id OR
     edition + player_ids.
 
     Returns (edition, players, partial_half, error_response). `partial_half` is
     True when the photo can only ever show PART of the cup's scoring — today
-    that means a mixed cup, whose second console restarted at zero — which the
-    caller uses to suppress auto-fill entirely.
+    that means a BLOCKLESS mixed-cup request, where the photographed screen is
+    one console's half — which the caller uses to suppress auto-fill entirely.
+
+    `block` (1 or 2, mixed cups only) says "this photo IS the whole of that
+    console's block": the edition resolves to THAT block's console and
+    partial_half is False, because the numbers are complete for the field they
+    fill (the block input, not the cup total).
+
+    THE correctness rule of this feature: exactly ONE base edition is resolved
+    per photo, and it is that photo's own console. Never `mixed`, never the
+    other half's. Resolving both editions against one screen re-opens the
+    character trap — a player's Wii main can be a CPU on the Switch screen, and
+    Switch rows carry no highlight to veto the match, so they'd be handed a
+    CPU's points with nothing to catch it.
     """
     player_select = (
         "SELECT p.id AS player_id, p.name, p.default_character_wii, "
@@ -2686,11 +3026,31 @@ def _players_for_extraction(data):
         # number written into the primary record with no signal is the one
         # failure mode nothing downstream can detect.
         edition = cup["game_edition"]
-        partial_half = edition == MIXED_EDITION
+        is_mixed = edition == MIXED_EDITION
+        if block is not None:
+            if not is_mixed:
+                # A pure cup has one console and one photo; a block tag there is
+                # meaningless and would silently pick an edition the screen
+                # isn't. Reject rather than reinterpret.
+                conn_error = jsonify({"error": "This cup has no console blocks"}), 400
+                return None, None, False, conn_error
+            # This photo is the WHOLE of its block, so its numbers are complete
+            # for the block field they fill — no suppression, and the edition is
+            # this block's console (never the other half's).
+            return (
+                block_edition(cup, block),
+                [dict(p) for p in players],
+                False,
+                None,
+            )
+        partial_half = is_mixed
         if partial_half:
             edition = race_edition(cup, MAX_RACES)
         return edition, [dict(p) for p in players], partial_half, None
 
+    if block is not None:
+        # The manual /cups/new path has no cup, so it has no blocks either.
+        return None, None, False, (jsonify({"error": "This cup has no console blocks"}), 400)
     edition = data.get("edition")
     if edition not in TRACK_SETS:
         return None, None, False, (jsonify({"error": "Unknown edition"}), 400)
@@ -2729,15 +3089,20 @@ def extract_scores():
 
     Request: {image: <base64>, mime_type: image/jpeg|image/png,
               cup_id: <id>}  — live session form, players/edition from the cup
+           or {cup_id: <id>, block: 1|2} — ONE console block of a mixed cup.
+              With no `image`, the photo already saved for that block is read
+              from the DB (the swap photo, taken during the cup).
            or {edition, player_ids: [...]} — manual /cups/new form.
     Response: {scores: {player_id: points}, ambiguous: [names],
                unmatched_players: [names], raw_rows: [...],
-               partial_half: bool}.
+               partial_half: bool, block: 1|2|null}.
 
-    `partial_half` is True for a MIXED cup, where the photographed screen holds
-    only the second console's half of the scoring. In that case `scores` is
-    ALWAYS empty — the client must not auto-fill — while `raw_rows` is still
-    returned so the mapping panel can be used as a reference.
+    `partial_half` is True only for a BLOCKLESS mixed-cup request, where the
+    photographed screen holds one console's half of the scoring but the field it
+    would fill is the cup TOTAL. In that case `scores` is ALWAYS empty — the
+    client must not auto-fill — while `raw_rows` is still returned so the
+    mapping panel can be used as a reference. A request that names a `block`
+    fills that block's own field, so it auto-fills normally.
     """
     if not extraction_enabled():
         return jsonify({"error": "extraction not configured"}), 503
@@ -2746,18 +3111,30 @@ def extract_scores():
     if not isinstance(data, dict):
         return jsonify({"error": "JSON body required"}), 400
 
+    block, error = parse_photo_block(data)
+    if error:
+        return error
+
     mime_type = data.get("mime_type")
+    image_b64 = data.get("image")
+    if image_b64 is None and block is not None:
+        # "Read scores from this photo" on the completion page: the image is
+        # already on the server (uploaded at the swap), so re-read it there.
+        loaded, error = _load_stored_block_photo(data.get("cup_id"), block)
+        if error:
+            return error
+        image_b64, mime_type = loaded
     try:
-        decode_photo(data.get("image"), mime_type)
+        decode_photo(image_b64, mime_type)
     except InvalidInput as e:
         return jsonify({"error": str(e)}), 400
 
-    edition, players, partial_half, error = _players_for_extraction(data)
+    edition, players, partial_half, error = _players_for_extraction(data, block)
     if error:
         return error
 
     try:
-        standings = extract_standings(data["image"], mime_type, edition=edition)
+        standings = extract_standings(image_b64, mime_type, edition=edition)
     except ExtractionError:
         app.logger.exception("Photo score extraction failed")
         return (
@@ -2765,6 +3142,11 @@ def extract_scores():
             502,
         )
 
+    # `edition` here is ALWAYS a single base edition — this block's console for a
+    # block request, the second half's for a blockless mixed one, the cup's own
+    # for a pure cup. match_standings_to_players therefore reads exactly one
+    # default-character column, which is what keeps a player's OTHER console's
+    # main from matching a CPU on this screen.
     scores, ambiguous, unmatched = match_standings_to_players(
         standings.rows, players, edition
     )
@@ -2784,6 +3166,7 @@ def extract_scores():
             "ambiguous": ambiguous,
             "unmatched_players": unmatched,
             "partial_half": partial_half,
+            "block": block,
             "raw_rows": [
                 {
                     "position": r.position,
