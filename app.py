@@ -3206,6 +3206,15 @@ def _extract_rate_limited(ip):
     a couple of retries, so a whole game night of cups stays well inside 10 per
     5 minutes. Only calls that are actually about to reach Anthropic are
     counted — a malformed request costs nothing, so it shouldn't spend quota.
+
+    Two honest limits, both shared with the login limiter and both acceptable
+    here because this route sits behind the shared password gate:
+      - the window is per gunicorn WORKER (in-process dict, no shared store);
+      - `--max-requests 1000` recycles workers, which drops the bucket. So the
+        real ceiling against a determined authenticated caller is closer to
+        "10 paid calls per ~1000 requests per worker" than a hard 10/5min.
+        Same class as issue #68 for the login limiter; fixing it properly needs
+        shared state, which this app deliberately doesn't have.
     """
     now = time.time()
     with _extract_call_lock:
@@ -3217,6 +3226,11 @@ def _extract_rate_limited(ip):
         if len(kept) >= EXTRACT_RATE_LIMIT_MAX:
             _extract_calls[ip] = kept
             return True
+        if not kept:
+            # Shed the empty entry rather than letting idle IPs accumulate,
+            # mirroring _prune_failures. Keeps MAX_TRACKED_IPS from filling
+            # with dead keys.
+            _extract_calls.pop(ip, None)
         if (
             len(_extract_calls) >= EXTRACT_RATE_LIMIT_MAX_TRACKED_IPS
             and ip not in _extract_calls

@@ -43,10 +43,14 @@ data/
 # cup), and this repo is PUBLIC — a stray `git add .` must not be able to
 # publish one. No JPEG/HEIC has ever been tracked; the committed icons are
 # .png/.ico, so this is deny-by-default with nothing to grandfather in.
-*.jpg
-*.jpeg
-*.heic
-*.heif
+# Case matters: gitignore matching is case-SENSITIVE on a case-sensitive
+# filesystem (CI runs ubuntu-latest), and iOS exports are uppercase —
+# IMG_1234.HEIC, IMG_1234.JPG. A lowercase-only rule looks like it works on a
+# Mac (core.ignorecase=true) while leaving the real risk uncovered.
+*.[jJ][pP][gG]
+*.[jJ][pP][eE][gG]
+*.[hH][eE][iI][cC]
+*.[hH][eE][iI][fF]
 
 # OS
 .DS_Store
