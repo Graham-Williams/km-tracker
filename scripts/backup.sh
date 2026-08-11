@@ -213,10 +213,11 @@ PY
 # (sha256, rclone) work without any container-user permission issues.
 docker cp "${BACKUP_CONTAINER}:${CONTAINER_TMP_SNAPSHOT}" "${TMP_SNAPSHOT}" \
   || die "docker cp of snapshot out of ${BACKUP_CONTAINER} failed"
-# Drop the container temp immediately, then clear the var so the EXIT trap
-# doesn't fire a second, redundant `docker exec` on every successful run.
-docker exec "${BACKUP_CONTAINER}" rm -f "${CONTAINER_TMP_SNAPSHOT}" >/dev/null 2>&1 || true
-CONTAINER_TMP_SNAPSHOT=""
+# Drop the container temp immediately, and clear the var ONLY if that removal
+# actually succeeded, so the EXIT trap skips its redundant `docker exec` on the
+# success path but still retries the removal if this one failed silently.
+docker exec "${BACKUP_CONTAINER}" rm -f "${CONTAINER_TMP_SNAPSHOT}" >/dev/null 2>&1 \
+  && CONTAINER_TMP_SNAPSHOT="" || true
 
 # Re-verify the HOST copy — the file we actually keep and push off-box. The
 # in-container integrity_check above validated the pre-`docker cp` file; a
