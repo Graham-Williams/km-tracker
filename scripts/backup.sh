@@ -170,6 +170,17 @@ import sys
 src_path = os.environ["SRC_PATH"]
 dst_path = os.environ["DST_PATH"]
 
+# Guard the file we are ACTUALLY backing up. The host-side `-f "${DB_PATH}"`
+# precondition checks a host path; the source we read here is CONTAINER_DB_PATH
+# inside the container, and those can diverge (e.g. a compose change remounts
+# /data from a fresh, empty volume). Without this, sqlite3.connect() would
+# CREATE the missing file and .backup() would faithfully copy an empty DB — a
+# 4 KB snapshot that passes integrity_check, reports success, and then rotates
+# every good copy out of the local ring and the Drive tiers. Fail loudly instead.
+if not os.path.isfile(src_path):
+    sys.stderr.write(f"source DB not found inside container at {src_path}\n")
+    sys.exit(1)
+
 src = sqlite3.connect(src_path)
 try:
     dst = sqlite3.connect(dst_path)
@@ -200,6 +211,31 @@ docker cp "${BACKUP_CONTAINER}:${CONTAINER_TMP_SNAPSHOT}" "${TMP_SNAPSHOT}" \
   || die "docker cp of snapshot out of ${BACKUP_CONTAINER} failed"
 # Drop the container temp immediately (also covered by the cleanup trap).
 docker exec "${BACKUP_CONTAINER}" rm -f "${CONTAINER_TMP_SNAPSHOT}" >/dev/null 2>&1 || true
+
+# Re-verify the HOST copy — the file we actually keep and push off-box. The
+# in-container integrity_check above validated the pre-`docker cp` file; a
+# truncated or corrupted copy would otherwise ship to Drive undetected, since
+# everything downstream only ever sha256s this file. The snapshot is owned by
+# the host user in a writable dir, so a plain host-side connection is fine here
+# (this is NOT the WAL-sidecar case that forced the snapshot into the container).
+python3 - "${TMP_SNAPSHOT}" <<'PY' || die "snapshot failed verification after copy out of the container"
+import sqlite3
+import sys
+
+path = sys.argv[1]
+conn = sqlite3.connect(path)
+try:
+    if conn.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+        sys.exit(1)
+    # An empty-but-valid DB passes integrity_check, so assert it has content.
+    if conn.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table'"
+    ).fetchone()[0] == 0:
+        sys.stderr.write("snapshot contains no tables\n")
+        sys.exit(1)
+finally:
+    conn.close()
+PY
 
 # --- Checksum + dedupe ------------------------------------------------------
 SNAP_CKSUM="$(sha256_of "${TMP_SNAPSHOT}")"
