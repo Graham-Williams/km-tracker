@@ -669,6 +669,30 @@ fire before the Docker socket exists. It's ordering only, with no `Requires=`, s
 the unit still runs (and fails with its own explicit diagnostics) on a box that
 doesn't have `docker.service`.
 
+#### Upgrading an ALREADY-INSTALLED unit
+
+`/etc/systemd/system/km-backup.service` is a **copy**. Nothing in the normal
+deploy path touches it — `git pull && docker compose up -d --build` only updates
+the app — so a change to `deploy/km-backup.service` in the repo has **no effect
+on a box that was set up earlier** until you re-apply it by hand. Do this
+whenever a pull changes that file (e.g. the `After=docker.service` line above):
+
+```bash
+cd /home/<user>/km-tracker
+
+# Either: re-copy the template and re-apply this box's real User=/ExecStart paths
+sudo cp deploy/km-backup.service /etc/systemd/system/
+sudo sed -i "s|<user>|$USER|g" /etc/systemd/system/km-backup.service
+
+# Or: leave the installed copy alone and just add the one new line under [Unit]
+#   sudo systemctl edit --full km-backup.service
+
+sudo systemctl daemon-reload
+
+# Confirm it took — After= should now list docker.service:
+systemctl show km-backup.service -p After
+```
+
 ### 5. Verify
 
 ```bash
@@ -741,6 +765,10 @@ python3 -c "import sqlite3,pathlib,sys;u=pathlib.Path(sys.argv[1]).expanduser().
 #    backup script while the app is still up: its in-container online backup
 #    folds the WAL in, whereas copying data/km_tracker.db by hand would miss
 #    whatever is still sitting in the -wal.
+#    If this step FAILS, that's expected in exactly the emergencies that bring
+#    you here — an empty DB trips the empty-snapshot guard, a corrupt one fails
+#    verification, a down or crash-looping container fails the "is it running"
+#    precondition. It is only a safety net: note the failure and go on to step 4.
 scripts/backup.sh && ls -1t ~/km-backups/snapshots/ | head -n1
 
 # 4. Park the automated backups for the duration. Between step 8 (app back up)

@@ -150,6 +150,16 @@ command -v docker >/dev/null 2>&1 || die "docker not found on PATH — the snaps
 # permission error as "container is not running" would send an operator hunting
 # the wrong thing entirely.
 #
+# stdout and stderr are captured SEPARATELY (never merged with `2>&1`). The
+# docker CLI writes warnings to stderr even when the command SUCCEEDS — a
+# malformed/unreadable ~/.docker/config.json, a credential-helper or CLI-plugin
+# gripe, a DOCKER_HOST deprecation notice — and folding those into stdout makes
+# the State.Running value read "WARNING: ...\ntrue" instead of "true". The
+# equality test below would then fail and report a perfectly healthy container as
+# "exists but is not running", every 5 minutes, with a flatly wrong diagnosis.
+# Classification still reads stderr (that's where docker's real errors are); only
+# the VALUE comparison is kept clean.
+#
 # The daemon-unreachable case has SEVERAL wordings, and matching only one of them
 # is how a plain "dockerd isn't up yet" gets mis-reported as "your container name
 # is wrong". Docker emits at least:
@@ -160,24 +170,50 @@ command -v docker >/dev/null 2>&1 || die "docker not found on PATH — the snaps
 #        correct and if the daemon is running: ..."
 #   - a remote/TLS DOCKER_HOST that won't dial:
 #       "error during connect: Get \"https://...\": dial tcp ..."
-# The genuinely-missing-container case is matched POSITIVELY instead ("No such
-# object" / "No such container"), so the fallback no longer has to assert a
+# The genuinely-missing-container case is matched POSITIVELY instead ("no such
+# object" / "no such container"), so the fallback no longer has to assert a
 # diagnosis it can't actually support — it lists the candidates instead.
+#
+# Matching is done on a LOWERCASED copy of docker's message because docker's
+# capitalisation is not stable across versions: 29.x (what the box runs) says
+# "error: no such object: <name>", so the capitalised-only patterns this block
+# used to carry matched nothing and the single most likely misconfiguration — a
+# wrong BACKUP_CONTAINER — fell through to the vague fallback. `docker exec` and
+# `docker cp` still say "No such container", so both spellings stay covered.
+# The reported text is the ORIGINAL, un-lowercased message.
+# ORDER MATTERS: docker 29's socket-permission error is "permission denied while
+# trying to connect to the docker API at ...", which also contains "docker API" —
+# so permission-denied must stay ahead of the daemon-unreachable patterns.
+DOCKER_INSPECT_ERR_FILE="$(mktemp "${TMPDIR:-/tmp}/km-backup-inspect.XXXXXX")" \
+  || die "could not create a temp file for the docker inspect precondition check"
 DOCKER_INSPECT_OUT=""
-if ! DOCKER_INSPECT_OUT="$(docker inspect -f '{{.State.Running}}' "${BACKUP_CONTAINER}" 2>&1)"; then
-  case "${DOCKER_INSPECT_OUT}" in
-    *"permission denied"*|*"Permission denied"*)
-      die "cannot access the Docker socket as user '$(id -un)' — the backup user must be in the 'docker' group (sudo usermod -aG docker $(id -un), then re-login / restart the unit; see DEPLOY.md → 'Automated backups'). docker said: ${DOCKER_INSPECT_OUT}" ;;
-    *"Cannot connect to the Docker daemon"*|*"Is the docker daemon running"*|*"failed to connect to the docker API"*|*"error during connect"*)
-      die "cannot connect to the Docker daemon (is it running, and is DOCKER_HOST/the socket path right?) — cannot snapshot. docker said: ${DOCKER_INSPECT_OUT}" ;;
-    *"No such object"*|*"No such container"*)
-      die "app container '${BACKUP_CONTAINER}' not found — cannot snapshot (set BACKUP_CONTAINER in .env.backup if the name differs). docker said: ${DOCKER_INSPECT_OUT}" ;;
+DOCKER_INSPECT_RC=0
+DOCKER_INSPECT_OUT="$(docker inspect -f '{{.State.Running}}' "${BACKUP_CONTAINER}" 2>"${DOCKER_INSPECT_ERR_FILE}")" \
+  || DOCKER_INSPECT_RC=$?
+DOCKER_INSPECT_ERR="$(cat "${DOCKER_INSPECT_ERR_FILE}" 2>/dev/null || true)"
+rm -f "${DOCKER_INSPECT_ERR_FILE}"
+if (( DOCKER_INSPECT_RC != 0 )); then
+  # Diagnose from stderr, falling back to stdout on the off chance a failure
+  # printed only there.
+  DOCKER_INSPECT_DIAG="${DOCKER_INSPECT_ERR:-${DOCKER_INSPECT_OUT}}"
+  DOCKER_INSPECT_DIAG_LC="$(printf '%s' "${DOCKER_INSPECT_DIAG}" | tr '[:upper:]' '[:lower:]')"
+  case "${DOCKER_INSPECT_DIAG_LC}" in
+    *"permission denied"*)
+      die "cannot access the Docker socket as user '$(id -un)' — the backup user must be in the 'docker' group (sudo usermod -aG docker $(id -un), then re-login / restart the unit; see DEPLOY.md → 'Automated backups'). docker said: ${DOCKER_INSPECT_DIAG}" ;;
+    *"cannot connect to the docker daemon"*|*"is the docker daemon running"*|*"failed to connect to the docker api"*|*"error during connect"*)
+      die "cannot connect to the Docker daemon (is it running, and is DOCKER_HOST/the socket path right?) — cannot snapshot. docker said: ${DOCKER_INSPECT_DIAG}" ;;
+    *"no such object"*|*"no such container"*)
+      die "app container '${BACKUP_CONTAINER}' not found — cannot snapshot (set BACKUP_CONTAINER in .env.backup if the name differs). docker said: ${DOCKER_INSPECT_DIAG}" ;;
     *)
-      die "could not inspect app container '${BACKUP_CONTAINER}' — cannot snapshot. Check, in this order: the Docker daemon is up and reachable, this user can use it, and BACKUP_CONTAINER matches the running container name (docker ps). docker said: ${DOCKER_INSPECT_OUT}" ;;
+      die "could not inspect app container '${BACKUP_CONTAINER}' — cannot snapshot. Check, in this order: the Docker daemon is up and reachable, this user can use it, and BACKUP_CONTAINER matches the running container name (docker ps). docker said: ${DOCKER_INSPECT_DIAG}" ;;
   esac
 fi
-[[ "${DOCKER_INSPECT_OUT}" == "true" ]] \
-  || die "app container '${BACKUP_CONTAINER}' exists but is not running (State.Running=${DOCKER_INSPECT_OUT}) — cannot snapshot"
+# Take only the LAST line of stdout: belt-and-braces against a docker build that
+# ever routes a warning to stdout (the separate stderr capture above already
+# covers today's behaviour). A well-behaved run makes this exactly "true".
+DOCKER_RUNNING="${DOCKER_INSPECT_OUT##*$'\n'}"
+[[ "${DOCKER_RUNNING}" == "true" ]] \
+  || die "app container '${BACKUP_CONTAINER}' exists but is not running (State.Running=${DOCKER_RUNNING:-<empty>}) — cannot snapshot"
 mkdir -p "${LOCAL_BACKUP_DIR}" "${STATE_DIR}"
 
 # --- Make a consistent snapshot --------------------------------------------

@@ -73,13 +73,18 @@ itself runs **inside the app container**), driven by the
   then `docker cp`s the finished snapshot out to the host. The backup user must be
   able to run `docker` (in the `docker` group). *(This was the root cause of a long silent backup
   outage. The host-side online-backup did NOT fail deterministically — it
-  **flapped**, which is why it went unnoticed: over the 30 days to 2026-08-10 the
-  timer started 7,834 times — 7,799 `attempt to write a readonly database`
-  failures and just 35 successes. Even that 35 overstates it: only **3** of those
-  runs wrote a new snapshot file (`saved local snapshot`); the other 32 got past
-  the backup step but produced a DB identical to the previous one and deduped it
-  away (`no change`). Correspondingly only three snapshots ever reached Drive,
-  with gaps of 23 days (`20260706T221310Z` → `20260729T023154Z`) and 12 days
+  **flapped**, which is why it went unnoticed. A **rolling** 30-day journal query
+  (`journalctl --since "30 days ago"`) run on 2026-08-10 counted 7,834 timer
+  starts: 7,799 `attempt to write a readonly database` failures and just 35
+  successes. Treat those as a snapshot of a moving window, not exact totals —
+  re-running the same query minutes later shifts them, and a fixed
+  2026-07-11→2026-08-10 window reads 7,835 starts / 7,823 failures / 12
+  successes. The shape is the point: near-total failure either way. And the
+  successes overstate the good news — only **3** of the 35 wrote a new snapshot
+  file (`saved local snapshot`); the other 32 got past the backup step but
+  produced a DB identical to the previous one and deduped it away (`no change`).
+  Correspondingly only three snapshots ever reached Drive,
+  with gaps of 23 days (`20260706T221310Z` → `20260729T193843Z`) and 12 days
   (→ `20260810T073719Z`). It succeeds only when SQLite doesn't need to create or
   write the container-owned `-shm` — i.e. when the WAL is empty or a reusable
   read-mark already exists — so an idle app can make it look healthy. Fixed by
