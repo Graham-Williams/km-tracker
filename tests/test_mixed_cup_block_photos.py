@@ -215,6 +215,30 @@ def test_a_mix_of_blocked_and_blank_rows_keeps_positional_alignment(client, monk
     ]
 
 
+def test_a_player_who_sat_out_does_not_shift_the_rows(client, monkeypatch):
+    """The cursor that walks scores_data must be the SKIPPED-ROW cursor, not the
+    raw form index. The pairing only diverges when a row is dropped BEFORE a
+    block-scored one — a player who sat the cup out, blank total and blank
+    halves — so `scores_data[i]` passes every other alignment test here while
+    silently writing Bob's halves onto Carol."""
+    _start_mixed(client, monkeypatch, player_ids=("1", "2", "3"))
+    _complete(
+        client,
+        player_ids=("1", "2", "3"),
+        scores=["", "50", "10"],
+        b1=["", "20", "4"],
+        b2=["", "30", "6"],
+    )
+    rows = _score_rows()
+    assert [
+        (r["player_id"], r["score"], r["block1_score"], r["block2_score"])
+        for r in rows
+    ] == [
+        (2, 50, 20, 30),
+        (3, 10, 4, 6),
+    ]
+
+
 def test_one_block_only_is_rejected_and_writes_nothing(client, monkeypatch):
     """Half a breakdown can't satisfy total == b1 + b2, and guessing the other
     half is the exact failure class this feature prevents."""
@@ -885,6 +909,38 @@ def test_extract_reads_the_photo_already_stored_for_a_block(client, monkeypatch)
     assert body["scores"] == {"1": 45}
     assert base64.b64decode(seen["image"]) == PHOTO_BYTES
     assert seen["edition"] == "wii"
+
+
+@pytest.mark.parametrize("first_edition", ["wii", "mk8dx"])
+@pytest.mark.parametrize("upload_order", [(1, 2), (2, 1)])
+def test_a_stored_read_uses_that_blocks_own_photo(
+    client, monkeypatch, first_edition, upload_order
+):
+    """The `p.block = ?` filter on the stored-photo read is THE line this
+    feature rests on, and one photo per cup can't test it: rewriting the query
+    to "newest photo of any block" passes every other test in the suite.
+
+    If it ever regresses, pressing "Read scores from this photo" on the block-1
+    panel feeds block 2's Switch screen to an extraction told it's Wii, and
+    fills block 1 from the Wii character column — the exact CPU-character trap
+    this feature exists to close, with no highlight on Switch rows to veto it.
+
+    Distinct bytes per block, both upload orders (so "newest of any block"
+    can't be right by luck), both coin-flip outcomes."""
+    _start_mixed_with_characters(client, monkeypatch, first_edition)
+    images = {1: PHOTO_B64, 2: OTHER_B64}
+    for block in upload_order:
+        _upload(client, 1, block, image=images[block])
+    fake, seen = _fake_standings((1, "Baby Peach", 45, True))
+    monkeypatch.setattr(appmod, "extract_standings", fake)
+
+    _extract(client, cup_id=1, block=1)
+    assert base64.b64decode(seen["image"]) == PHOTO_BYTES
+    assert seen["edition"] == first_edition
+
+    _extract(client, cup_id=1, block=2)
+    assert base64.b64decode(seen["image"]) == OTHER_BYTES
+    assert seen["edition"] == other_edition(first_edition)
 
 
 def test_extract_without_an_image_404s_when_that_block_has_no_photo(client, monkeypatch):
