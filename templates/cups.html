@@ -60,7 +60,22 @@
                 {% endfor %}
             </div>
             {% endif %}
-            {% if cup.id in photo_cup_ids %}
+            {% set cup_block_photos = block_photo_labels.get(cup.id) %}
+            {% if cup_block_photos %}
+            {# Mixed cup: one thumbnail per console block, labelled with the real
+               console in played order. #}
+            <div style="display:flex;flex-wrap:wrap;gap:var(--space-2);margin-top:var(--space-1);">
+                {% for block, label in cup_block_photos %}
+                <div>
+                    <a href="{{ url_for('cup_block_photo', cup_id=cup.id, block=block) }}" target="_blank" title="View full-size {{ label }} standings photo">
+                        <img src="{{ url_for('cup_block_photo', cup_id=cup.id, block=block) }}" alt="{{ label }} standings photo" loading="lazy"
+                             style="width:96px;border-radius:var(--radius-sm);display:block;">
+                    </a>
+                    <span class="list-meta">{{ label }}</span>
+                </div>
+                {% endfor %}
+            </div>
+            {% elif cup.id in photo_cup_ids %}
             <a href="{{ url_for('cup_photo', cup_id=cup.id) }}" target="_blank" title="View full-size standings photo">
                 <img src="{{ url_for('cup_photo', cup_id=cup.id) }}" alt="Cup standings photo" loading="lazy"
                      style="width:96px;border-radius:var(--radius-sm);display:block;margin-top:var(--space-1);">

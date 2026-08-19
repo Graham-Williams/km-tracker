@@ -55,6 +55,12 @@ CREATE TABLE IF NOT EXISTS cup_photos (
     image BLOB NOT NULL,
     mime_type TEXT NOT NULL,
     created_at DATETIME NOT NULL,
+    block INTEGER,          -- mixed cups: which BLOCK (1 = first console, 2 = second) this
+                            -- screen belongs to. NULL = "the cup's photo" (every pure cup,
+                            -- and every row written before per-block photos existed).
+                            -- Tagged by ORDINAL, never an edition string: the console is
+                            -- derived from (game_edition, first_edition, block) so a photo
+                            -- row can never disagree with the cup's coin flip.
     FOREIGN KEY (cup_id) REFERENCES cups(id)
 );
 
@@ -66,6 +72,14 @@ CREATE TABLE IF NOT EXISTS scores (
     line INTEGER NOT NULL DEFAULT 0,
     line_score INTEGER NOT NULL,
     won_tiebreaker BOOLEAN,  -- nullable: ties are allowed and don't always need to be broken
+    block1_score INTEGER,    -- mixed cups only: this player's points on the FIRST console.
+    block2_score INTEGER,    -- mixed cups only: their points on the SECOND console.
+                             -- Both NULL for pure cups (and for a mixed cup entered as a
+                             -- plain total). `score` always holds the cup TOTAL; when the
+                             -- blocks are set, score == block1_score + block2_score by
+                             -- construction — save_scores DELETEs + re-INSERTs every row,
+                             -- so any write path that doesn't know about blocks writes NULL
+                             -- rather than leaving a stale half behind.
     FOREIGN KEY (cup_id) REFERENCES cups(id),
     FOREIGN KEY (player_id) REFERENCES players(id),
     UNIQUE(cup_id, player_id)

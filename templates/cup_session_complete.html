@@ -36,6 +36,68 @@
         min-width: 3rem; text-align: right;
     }
     .score-input, .line-score-input { width: 5rem; }
+    /* Mixed cups: "Block A (Wii) + Block B (Switch) = Total" per player.
+       A mixed row carries THREE number boxes plus the name, the placement and
+       the tiebreaker — and the content column is capped at --content-width
+       (520px), so there is no viewport where all of that fits on one line with
+       a readable name. (Squeezed onto one line at phone width each box
+       collapsed to ~34px of usable space and a typed two-digit score rendered
+       INVISIBLE, while the row still pushed the page into horizontal scroll.)
+       So a mixed row always wraps onto two lines — name + placement, then
+       "A + B = Total" — and the three boxes keep a floor width instead of
+       shrinking below their own content. Deliberately NOT behind a width media
+       query: the constraint is the fixed content column, not the viewport, so
+       it holds at 390px and at 1400px alike.
+       Everything here is scoped to .score-row--mixed; a PURE cup's row is
+       untouched (one 5rem input, one line, exactly as before). */
+    .block-score-input { width: 4.5rem; }
+    /* Tighter column gap than a pure row: it buys the ~20px that keeps the
+       whole "A + B = Total" equation plus the TB checkbox on ONE line at
+       390px, and it reads better — the operators bind to their boxes. */
+    .score-row--mixed { flex-wrap: wrap; row-gap: var(--space-2); column-gap: var(--space-1); }
+    /* Zero-height full-width flex item = a forced line break after the name. */
+    .score-row--mixed .score-break { flex: 0 0 100%; height: 0; }
+    /* Wrap a long name rather than clipping it; it owns the whole first line. */
+    .score-row--mixed .score-name { min-width: 0; overflow-wrap: break-word; }
+    .score-row--mixed .score-place { min-width: 0; white-space: nowrap; }
+    .score-row--mixed .block-score-input,
+    .score-row--mixed .score-input {
+        /* Hold their designed width, shrink only as far as a still-legible box
+           (never below its own content, which is what made typed scores
+           invisible), never grow — growing to fill the line pushed the TB
+           checkbox onto a third row. Keep the 1rem font: under 16px iOS Safari
+           auto-zooms the page on focus. */
+        flex: 0 1 4.5rem; width: auto; min-width: 3.5rem;
+    }
+    .score-row--mixed .block-op,
+    .score-row--mixed .tb-wrapper { flex: 0 0 auto; }
+    /* The console names are the longest text in the row; at the narrow end a
+       1rem placeholder clips to "Swit"/"Tota". Only the HINT shrinks — the
+       typed value stays 1rem. */
+    .score-row--mixed input::placeholder { font-size: 0.8rem; }
+    /* The spin buttons reserve ~13px of a 70px box for arrows nobody uses on a
+       phone (typing and the arrow keys are unaffected) — that reservation is
+       what clipped "Switch" to "Switc". */
+    .score-row--mixed input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
+    .score-row--mixed input[type="number"]::-webkit-outer-spin-button,
+    .score-row--mixed input[type="number"]::-webkit-inner-spin-button {
+        -webkit-appearance: none; appearance: none; margin: 0;
+    }
+    .score-input[readonly] { background: var(--color-surface-2); color: var(--color-muted); }
+    .block-op { color: var(--color-faint); font-size: 0.9rem; }
+    .block-legend {
+        font-size: 0.8rem; color: var(--color-muted); margin-bottom: var(--space-2);
+    }
+    .photo-block {
+        border: 1px solid var(--color-border); border-radius: var(--radius-md);
+        padding: var(--space-3); margin-bottom: var(--space-3);
+    }
+    /* Three .btns (nowrap, min-width:auto) need more than a mixed panel's row
+       has at ANY width — unwrapped they hung outside the card and dragged the
+       page into horizontal scroll. Wrap instead. Scoped to .photo-block so the
+       pure-cup two-button row is untouched. */
+    .photo-block .field-row { flex-wrap: wrap; }
+    .photo-block .section-heading { margin-top: 0; }
     .line-input { width: 4rem; text-align: center; color: var(--color-muted); }
     .tb-wrapper {
         display: flex; align-items: center; gap: var(--space-1);
@@ -94,9 +156,12 @@
         <div class="section-heading">Scores</div>
         {% if is_mixed %}
         <p class="muted mixed-score-note">
-            📸 Mixed cup — the second console's scoreboard started from zero. Enter each player's
-            <strong>combined total</strong> across both halves (add the photo you took at the swap to
-            what's on screen now).
+            📸 Mixed cup — each console's scoreboard started from zero, so enter the two halves
+            separately and the total adds itself up.
+        </p>
+        <p class="block-legend">
+            <strong>{{ block_labels[1] }}</strong> (races 1–2) + <strong>{{ block_labels[2] }}</strong>
+            (races 3–4) = total. Either half can be typed by hand — a photo is never required.
         </p>
         {% endif %}
         <div id="score-rows">
@@ -106,11 +171,38 @@
         {% for player in players %}
         {% set existing = existing_scores.get(player.player_id) %}
         {% set show_line = player.has_line and lines_on %}
-        <div class="score-row" data-player-id="{{ player.player_id }}" data-player-line="{{ player.line }}" data-has-line="{{ show_line|int }}">
+        <div class="score-row{% if is_mixed %} score-row--mixed{% endif %}" data-player-id="{{ player.player_id }}" data-player-line="{{ player.line }}" data-has-line="{{ show_line|int }}">
             <span class="score-name">{{ player.name }}</span>
             <span class="score-place"></span>
             <input type="hidden" name="player_ids[]" value="{{ player.player_id }}">
+            {% if is_mixed %}
+            {# Two consoles, two scoreboards that each started at zero: the halves
+               are entered separately and the TOTAL is calculated (readonly —
+               never `disabled`, or the browser wouldn't submit it and the
+               issue-#45 player/score misalignment guard would reject the form).
+               The server recomputes the sum anyway; this input is for the human
+               and for the placement/tiebreaker JS, which reads .score-input.
+
+               The empty span is a flex line-break: the three number boxes get
+               their own line, so the name never has to compete with them for
+               width (see .score-row--mixed in the styles above). #}
+            <span class="score-break" aria-hidden="true"></span>
+            <input type="number" name="block1_scores[]" class="block-score-input" data-block="1"
+                   min="0" max="9999" step="1" placeholder="{{ block_labels[1] }}"
+                   aria-label="{{ player.name }} — {{ block_labels[1] }} score (races 1–2)"
+                   {% if existing and existing.block1_score is not none %}value="{{ existing.block1_score }}"{% endif %}>
+            <span class="block-op" aria-hidden="true">+</span>
+            <input type="number" name="block2_scores[]" class="block-score-input" data-block="2"
+                   min="0" max="9999" step="1" placeholder="{{ block_labels[2] }}"
+                   aria-label="{{ player.name }} — {{ block_labels[2] }} score (races 3–4)"
+                   {% if existing and existing.block2_score is not none %}value="{{ existing.block2_score }}"{% endif %}>
+            <span class="block-op" aria-hidden="true">=</span>
+            <input type="number" name="scores[]" placeholder="Total" min="0" class="score-input" readonly
+                   aria-label="{{ player.name }} — total score"
+                   {% if existing %}value="{{ existing.score }}"{% endif %}>
+            {% else %}
             <input type="number" name="scores[]" placeholder="{% if show_line %}Raw{% else %}Pts{% endif %}" min="0" class="score-input" {% if existing %}value="{{ existing.score }}"{% endif %}>
+            {% endif %}
             {% if show_line %}
             <input type="number" name="lines[]" value="{% if existing %}{{ existing.line }}{% else %}{{ player.line }}{% endif %}" class="line-input">
             <input type="number" name="line_scores[]" placeholder="Line" class="line-score-input">
@@ -123,19 +215,57 @@
         </div>
     </div>
 
+    {% if is_mixed %}
+    {# A mixed cup has TWO results screens, one per console, each starting from
+       zero — so it gets one photo panel per console block. Each panel writes
+       ONLY into its own block's inputs, and every photo is extracted against
+       ITS OWN console's edition (never 'mixed', never the other half's), which
+       is what keeps a player's other-console main from matching a CPU here.
+       Each photo POSTs on its own to /cups/<id>/photo/<block>, so this form
+       carries no photo payload at all — no 1 MB body, no attach/submit race. #}
+    <div id="photo-blocks">
+        <div class="section-heading">{% if photo_extraction_enabled %}Scores from photos{% else %}Attach photos{% endif %}</div>
+        <p class="photo-half-warning">
+            ⚠️ Two consoles, two scoreboards: the <strong>{{ first_console_label }}</strong> screen
+            started over at zero when you switched to <strong>{{ second_console_label }}</strong>.
+            Add a photo for either half, both, or neither — anything without a photo is just
+            typed in. Nothing is ever submitted for you.
+        </p>
+        {% for b in photo_blocks %}
+        <div class="photo-block" id="photo-block-{{ b }}" data-block="{{ b }}">
+            <div class="section-heading">
+                {{ block_labels[b] }} — {% if b == 1 %}races 1–2{% else %}races 3–4{% endif %}
+            </div>
+            <div class="field-row">
+                {# Buttons ship disabled; photo_score.js enables + wires them. If the
+                   script fails to load, the picker can't open — so a photo can never
+                   be picked without the guards in place. #}
+                <button type="button" class="btn btn-secondary" data-photo-input="photo-take-{{ b }}" disabled>Take photo</button>
+                <button type="button" class="btn btn-secondary" data-photo-input="photo-pick-{{ b }}" disabled>{% if block_photos[b] %}Replace photo{% else %}Upload photo{% endif %}</button>
+                {% if photo_extraction_enabled %}
+                <button type="button" class="btn btn-secondary photo-read-btn" {% if not block_photos[b] %}hidden{% endif %} disabled>Read scores</button>
+                {% endif %}
+            </div>
+            <input type="file" id="photo-take-{{ b }}" accept="image/*" capture="environment" hidden>
+            <input type="file" id="photo-pick-{{ b }}" accept="image/*" hidden>
+            <img class="photo-preview" alt="{{ block_labels[b] }} standings photo"
+                 {% if block_photos[b] %}src="{{ url_for('cup_block_photo', cup_id=cup.id, block=b) }}"{% endif %}
+                 style="max-width:160px; border-radius: var(--radius-sm); margin-top: var(--space-2);{% if not block_photos[b] %} display:none;{% endif %}">
+            <p class="photo-attach-status {% if block_photos[b] %}is-success{% endif %}" {% if not block_photos[b] %}hidden{% endif %}>{% if block_photos[b] %}{{ block_labels[b] }} photo saved ✓{% endif %}</p>
+            <p class="muted"><span class="photo-extract-spinner" hidden aria-hidden="true"></span><span class="photo-status"></span></p>
+            <p class="muted photo-notes"></p>
+            <div class="photo-mapping" hidden>
+                <div class="photo-mapping-title">Map each player to a row from the {{ block_labels[b] }} photo:</div>
+                <div class="photo-mapping-rows"></div>
+                <p class="photo-map-warning" hidden></p>
+                <p class="photo-map-unassigned" hidden></p>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% else %}
     <div id="photo-score">
         <div class="section-heading">{% if photo_extraction_enabled %}Score from photo{% else %}Attach photo{% endif %}</div>
-        {% if is_mixed %}
-        {# The photographed screen is the SECOND console's only — its numbers are
-           half totals. Auto-fill is disabled server-side for mixed cups; this
-           says why, right where the photo is taken. #}
-        <p class="photo-half-warning">
-            ⚠️ This photo shows the <strong>{{ second_console_label }}</strong> half only — the
-            {{ first_console_label }} screen started over at zero. Scores are <strong>not</strong>
-            filled in automatically for a mixed cup: add both halves together and enter each
-            player's combined total.
-        </p>
-        {% endif %}
         <div class="field-row">
             {# Buttons ship disabled; photo_score.js enables + wires them. If the
                script fails to load, the picker can't open — so a photo can never
@@ -158,7 +288,9 @@
             <p class="photo-map-unassigned" hidden></p>
         </div>
     </div>
+    {% endif %}
 
+    {% if is_mixed %}<p class="photo-attach-status" id="submit-warning" hidden></p>{% endif %}
     <div class="field-row">
         <button type="submit" class="btn btn-primary">Submit Cup</button>
         {% if cup.status == 'in_progress' %}
@@ -189,12 +321,27 @@
     now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
     document.getElementById("cup-date").value = now.toISOString().slice(0, 16);
 
+    {% if is_mixed %}
+    // Mixed cup: one independent panel per console block. Each uploads its own
+    // photo (its own request — this form carries no photo payload) and fills
+    // ONLY its own block's inputs.
+    {% for b in photo_blocks %}
+    initBlockPhoto({
+        block: {{ b }},
+        cupId: {{ cup.id }},
+        label: {{ block_labels[b]|tojson }},
+        uploadUrl: "{{ url_for('upload_cup_block_photo', cup_id=cup.id, block=b) }}",
+        extractUrl: {% if photo_extraction_enabled %}"{{ url_for('extract_scores') }}"{% else %}null{% endif %}
+    });
+    {% endfor %}
+    {% else %}
     initPhotoScore({
         extractUrl: {% if photo_extraction_enabled %}"{{ url_for('extract_scores') }}"{% else %}null{% endif %},
         getPayload: function () {
             return { cup_id: {{ cup.id }} };
         }
     });
+    {% endif %}
 
     function getLineValue(row) {
         var lineInput = row.querySelector(".line-input");
@@ -367,6 +514,104 @@
         }
         row.querySelector("input[type=checkbox]").addEventListener("change", updatePlacements);
     });
+
+    {% if is_mixed %}
+    // --- Mixed cups: the total is CALCULATED from the two console blocks ---
+    // The total input is readonly (never disabled — a disabled field isn't
+    // submitted, and the server's player/score alignment guard would then
+    // reject the whole form). It stays blank until BOTH halves are filled: a
+    // half-entered row must never look like a finished total, and the server
+    // rejects that shape rather than guessing the missing half.
+
+    // A half's value as the whole number the SERVER would accept, or null.
+    // parseInt() is wrong here twice over: it truncates ("1e3" -> 1, "2.5" -> 2)
+    // and so displayed a confident total for input the server then rejects —
+    // and a rejection redirects, discarding every number on the page. Anything
+    // that isn't a plain integer is treated as "not filled in yet".
+    function blockValue(input) {
+        var raw = input.value.trim();
+        if (raw === "") return null;
+        var num = input.valueAsNumber;
+        if (!Number.isInteger(num) || !/^[+-]?\d+$/.test(raw)) return null;
+        return num;
+    }
+
+    function syncBlockTotal(row) {
+        var totalInput = row.querySelector(".score-input");
+        if (!totalInput) return;
+        var blocks = row.querySelectorAll(".block-score-input");
+        var sum = 0;
+        var complete = blocks.length > 0;
+        blocks.forEach(function (input) {
+            var parsed = blockValue(input);
+            if (parsed === null) { complete = false; return; }
+            sum += parsed;
+        });
+        totalInput.value = complete ? sum : "";
+        // Dispatch a real input event so placements + tiebreakers recompute
+        // exactly as if the total had been typed.
+        totalInput.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+
+    document.querySelectorAll(".score-row").forEach(function (row) {
+        row.querySelectorAll(".block-score-input").forEach(function (input) {
+            input.addEventListener("input", function () { syncBlockTotal(row); });
+        });
+    });
+
+    // The mixed form carries no photo payload, so photo_score.js's submit guard
+    // never mounts here. This guard mirrors the two server-side rejections that
+    // would otherwise bounce the form — and a bounce REDIRECTS, so every number
+    // typed on the page is lost. The server stays authoritative; this only
+    // saves the user from retyping.
+    (function () {
+        var form = document.getElementById("cup-form");
+        var warning = document.getElementById("submit-warning");
+        // Same sentence the server raises, injected from BLOCK_HALF_MISSING_MSG
+        // so the two wordings can't drift.
+        var HALF_ROW_MSG = {{ block_half_missing_msg|tojson }};
+        function reject(e, msg) {
+            e.preventDefault();
+            warning.textContent = msg;
+            warning.classList.add("is-error");
+            warning.hidden = false;
+        }
+        form.addEventListener("submit", function (e) {
+            // (1) A row with exactly ONE half filled: the server rejects it, and
+            // the total input stays blank so the all-empty check below can't see
+            // it. Without this a single mistyped half discards the whole form.
+            var rows = form.querySelectorAll(".score-row");
+            for (var r = 0; r < rows.length; r++) {
+                var halves = rows[r].querySelectorAll(".block-score-input");
+                var filled = 0;
+                var whole = 0;
+                for (var h = 0; h < halves.length; h++) {
+                    if (halves[h].value.trim() !== "") filled++;
+                    if (blockValue(halves[h]) !== null) whole++;
+                }
+                if (filled > 0 && filled < halves.length) {
+                    return reject(e, HALF_ROW_MSG);
+                }
+                // Typed, but not a whole number the server will take (e.g.
+                // "1e3", "2.5"). Its total is blank, so the all-empty check
+                // below would let the form through to a redirect that throws
+                // the page away.
+                if (filled > 0 && whole < filled) {
+                    return reject(e, "Console scores must be whole numbers.");
+                }
+            }
+            // (2) Nothing scored at all — also a server-side reject + redirect.
+            var inputs = form.querySelectorAll(".score-input");
+            for (var i = 0; i < inputs.length; i++) {
+                if (!inputs[i].disabled && inputs[i].value.trim() !== "") {
+                    warning.hidden = true;
+                    return;
+                }
+            }
+            reject(e, "Enter each player's two console scores (or at least one player's) before submitting.");
+        });
+    })();
+    {% endif %}
 
     updatePlacements();
 </script>
