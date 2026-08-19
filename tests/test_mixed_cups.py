@@ -1133,13 +1133,16 @@ def test_mixed_complete_page_warns_inside_the_photo_panel(
     _create_session(client, ["1", "2"], edition=MIXED_EDITION)
     page = client.get("/cup-session/1/complete").get_data(as_text=True)
 
-    panel = page.split('id="photo-score"')[1]
+    # A mixed cup no longer renders the single #photo-score panel at all — it
+    # gets one panel PER CONSOLE BLOCK (see test_mixed_cup_block_photos.py).
+    assert 'id="photo-score"' not in page
+    panel = page.split('id="photo-blocks"')[1]
     assert 'class="photo-half-warning"' in panel
-    # Names the console the photo DOES show and the one it doesn't.
+    # Names BOTH consoles: the point of the warning is that each scoreboard
+    # started from zero, so there are two screens to account for.
     warning = panel.split('class="photo-half-warning"')[1].split("</p>")[0]
     assert "Switch" in warning
     assert "Wii" in warning
-    assert "combined total" in warning
 
 
 @pytest.mark.parametrize("edition", ["wii", "mk8dx"])

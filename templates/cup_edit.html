@@ -124,7 +124,21 @@
     </div>
 </form>
 
-{% if has_photo %}
+{% if block_photo_labels %}
+{# Mixed cup: one photo per console block, each labelled with the real console
+   in played order. #}
+<div class="card mt-4">
+    <div class="section-heading">Standings photos</div>
+    {% for block, label in block_photo_labels %}
+    <div class="mt-2">
+        <div class="list-meta">{{ label }}</div>
+        <a href="{{ url_for('cup_block_photo', cup_id=cup.id, block=block) }}" target="_blank" title="View full-size {{ label }} standings photo">
+            <img src="{{ url_for('cup_block_photo', cup_id=cup.id, block=block) }}" alt="{{ label }} standings photo" loading="lazy" class="cup-photo">
+        </a>
+    </div>
+    {% endfor %}
+</div>
+{% elif has_photo %}
 <div class="card mt-4">
     <div class="section-heading">Standings photo</div>
     <a href="{{ url_for('cup_photo', cup_id=cup.id) }}" target="_blank" title="View full-size standings photo">

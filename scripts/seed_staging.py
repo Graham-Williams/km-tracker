@@ -19,6 +19,7 @@ Usage (explicit path):
 """
 
 import argparse
+import base64
 import os
 import random
 import sys
@@ -84,6 +85,35 @@ def mixed_race_maps(first_edition):
         (3, TRACK_SETS[second][0]),
         (4, TRACK_SETS[second][1]),
     ]
+
+
+def split_blocks(score):
+    """Split a mixed cup's TOTAL into its two per-console halves.
+
+    The invariant the app enforces everywhere — score == block1 + block2 — has
+    to hold in seeded data too, or the QA gate audits a contradiction the app
+    itself could never produce.
+    """
+    block1 = score // 2
+    return block1, score - block1
+
+
+# A SYNTHETIC 1x1 JPEG — generated, not photographed. Seeded photos exist only
+# to exercise the per-block thumbnail/preview paths; a real standings photo is
+# a picture of somebody's living room and must never enter this repo.
+SYNTHETIC_JPEG = base64.b64decode(
+    "/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRof"
+    "Hh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAAB"
+    "AAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAD8AKp//2Q=="
+)
+
+
+def _insert_block_photo(conn, cup_id, block, created_at):
+    conn.execute(
+        "INSERT INTO cup_photos (cup_id, image, mime_type, created_at, block) "
+        "VALUES (?, ?, 'image/jpeg', ?, ?)",
+        (cup_id, SYNTHETIC_JPEG, created_at, block),
+    )
 
 
 def resolve_db_path(args_db, env):
@@ -196,11 +226,29 @@ def _insert_completed_cups(conn, rng, player_ids):
                     "INSERT INTO races (cup_id, race_number, map) VALUES (?, ?, ?)",
                     (cup_id, race_number, course),
                 )
+            # Two console blocks -> two results screens. Seed both photos so the
+            # per-block thumbnail path (history + cup edit) has something real
+            # to render, and a per-block score breakdown that ADDS UP.
+            for block in (1, 2):
+                _insert_block_photo(conn, cup_id, block, date_utc)
         for r in rows:
+            if edition == MIXED_EDITION:
+                block1, block2 = split_blocks(r["score"])
+            else:
+                block1 = block2 = None
             conn.execute(
-                "INSERT INTO scores (cup_id, player_id, score, line, line_score, won_tiebreaker) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (cup_id, r["player_id"], r["score"], r["line"], r["line_score"], r["won_tiebreaker"]),
+                "INSERT INTO scores (cup_id, player_id, score, line, line_score, won_tiebreaker, "
+                "block1_score, block2_score) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    cup_id,
+                    r["player_id"],
+                    r["score"],
+                    r["line"],
+                    r["line_score"],
+                    r["won_tiebreaker"],
+                    block1,
+                    block2,
+                ),
             )
 
 
@@ -226,6 +274,10 @@ def _insert_in_progress_cup(conn, rng, player_ids):
             "INSERT INTO races (cup_id, race_number, map) VALUES (?, ?, ?)",
             (cup_id, i, course),
         )
+    # The cup is parked exactly at the console swap, which is where the first
+    # console's results photo gets taken — seed it so staging lands on the
+    # "photo saved ✓ — replace" state rather than only the empty one.
+    _insert_block_photo(conn, cup_id, 1, date_utc)
     return cup_id
 
 

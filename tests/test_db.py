@@ -180,6 +180,106 @@ def test_cup_photos_table(db_path):
     conn.close()
 
 
+def test_cup_photos_block_column_is_nullable(db_path):
+    """NULL block = "the cup's photo" (pure cups + every pre-feature row);
+    1/2 tag a mixed cup's first/second console block."""
+    init_db(db_path)
+    conn = get_connection(db_path)
+    columns = {row["name"]: row for row in conn.execute("PRAGMA table_info(cup_photos)")}
+    assert "block" in columns
+    assert columns["block"]["notnull"] == 0
+    conn.execute(
+        "INSERT INTO cups (date) VALUES ('2026-01-01 00:00:00')"
+    )
+    conn.execute(
+        "INSERT INTO cup_photos (cup_id, image, mime_type, created_at) "
+        "VALUES (1, X'FFD8', 'image/jpeg', '2026-01-01 00:00:00')"
+    )
+    conn.execute(
+        "INSERT INTO cup_photos (cup_id, image, mime_type, created_at, block) "
+        "VALUES (1, X'FFD8', 'image/jpeg', '2026-01-01 00:00:00', 2)"
+    )
+    rows = [
+        r["block"]
+        for r in conn.execute("SELECT block FROM cup_photos ORDER BY id")
+    ]
+    conn.close()
+    assert rows == [None, 2]
+
+
+def test_scores_block_columns_are_nullable(db_path):
+    init_db(db_path)
+    conn = get_connection(db_path)
+    columns = {row["name"]: row for row in conn.execute("PRAGMA table_info(scores)")}
+    assert {"block1_score", "block2_score"} <= set(columns)
+    assert columns["block1_score"]["notnull"] == 0
+    assert columns["block2_score"]["notnull"] == 0
+    conn.close()
+
+
+def test_migration_adds_block_columns_to_an_existing_db(tmp_path):
+    """The pre-feature cup_photos/scores shapes must gain the new columns.
+
+    test_fresh_db_matches_migrated_db builds its "old" DB with only players +
+    cups, so BOTH legs get cup_photos/scores straight from schema.sql — it
+    could never catch a missing ALTER on those two tables. This creates the old
+    shapes explicitly, with a row in each, so the migration is really exercised.
+    """
+    db_path = str(tmp_path / "old.db")
+    conn = get_connection(db_path)
+    conn.execute(
+        "CREATE TABLE players (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "name TEXT NOT NULL UNIQUE, default_cup BOOLEAN NOT NULL DEFAULT 1, "
+        "line INTEGER NOT NULL DEFAULT 0, has_line BOOLEAN NOT NULL DEFAULT 0)"
+    )
+    conn.execute(
+        "CREATE TABLE cups (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "date DATETIME NOT NULL UNIQUE, notes TEXT, deleted_at DATETIME, "
+        "status TEXT NOT NULL DEFAULT 'completed', voto_count INTEGER NOT NULL DEFAULT 0)"
+    )
+    # Old cup_photos: no `block`. Old scores: no block1_score/block2_score.
+    conn.execute(
+        "CREATE TABLE cup_photos (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "cup_id INTEGER NOT NULL, image BLOB NOT NULL, mime_type TEXT NOT NULL, "
+        "created_at DATETIME NOT NULL, FOREIGN KEY (cup_id) REFERENCES cups(id))"
+    )
+    conn.execute(
+        "CREATE TABLE scores (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "cup_id INTEGER NOT NULL, player_id INTEGER NOT NULL, score INTEGER NOT NULL, "
+        "line INTEGER NOT NULL DEFAULT 0, line_score INTEGER NOT NULL, "
+        "won_tiebreaker BOOLEAN, FOREIGN KEY (cup_id) REFERENCES cups(id), "
+        "FOREIGN KEY (player_id) REFERENCES players(id), UNIQUE(cup_id, player_id))"
+    )
+    conn.execute("INSERT INTO players (name) VALUES ('Alice')")
+    conn.execute("INSERT INTO cups (date) VALUES ('2026-01-01 00:00:00')")
+    conn.execute(
+        "INSERT INTO cup_photos (cup_id, image, mime_type, created_at) "
+        "VALUES (1, X'FFD8', 'image/jpeg', '2026-01-01 00:00:00')"
+    )
+    conn.execute(
+        "INSERT INTO scores (cup_id, player_id, score, line, line_score) "
+        "VALUES (1, 1, 88, 0, 88)"
+    )
+    conn.commit()
+    conn.close()
+
+    init_db(db_path)
+
+    conn = get_connection(db_path)
+    photo_cols = {r["name"] for r in conn.execute("PRAGMA table_info(cup_photos)")}
+    score_cols = {r["name"] for r in conn.execute("PRAGMA table_info(scores)")}
+    assert "block" in photo_cols
+    assert {"block1_score", "block2_score"} <= score_cols
+    # Existing rows survive with NULLs — no backfill, no data loss.
+    photo = conn.execute("SELECT block FROM cup_photos WHERE id = 1").fetchone()
+    score = conn.execute(
+        "SELECT score, block1_score, block2_score FROM scores WHERE id = 1"
+    ).fetchone()
+    conn.close()
+    assert photo["block"] is None
+    assert (score["score"], score["block1_score"], score["block2_score"]) == (88, None, None)
+
+
 def test_fresh_db_matches_migrated_db(tmp_path):
     """A fresh DB from schema.sql must have the same tables/columns as an old
     pre-migration DB brought forward by run_migrations."""

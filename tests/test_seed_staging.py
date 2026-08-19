@@ -111,6 +111,54 @@ def test_seed_includes_mixed_cups_with_valid_shape(tmp_path):
     assert lined_lineless == 0
 
 
+def test_seed_block_scores_and_photos(tmp_path):
+    """Seeded mixed cups carry the per-block breakdown and a photo per console
+    block; pure cups carry neither. The QA gate audits `score == block1 +
+    block2`, so seeded data must never contradict it."""
+    from maps import MIXED_EDITION
+
+    db_path = str(tmp_path / "km_tracker.staging.db")
+    assert seed_staging.main(["--db", db_path, "--reset"]) == 0
+
+    conn = get_connection(db_path)
+    try:
+        scores = conn.execute(
+            "SELECT c.id AS cup_id, c.game_edition, c.status, s.score, "
+            "s.block1_score, s.block2_score FROM scores s "
+            "JOIN cups c ON c.id = s.cup_id"
+        ).fetchall()
+        photos = conn.execute(
+            "SELECT c.id AS cup_id, c.game_edition, c.status, p.block, p.mime_type "
+            "FROM cup_photos p JOIN cups c ON c.id = p.cup_id"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    mixed_rows = [s for s in scores if s["game_edition"] == MIXED_EDITION]
+    assert mixed_rows
+    for s in mixed_rows:
+        assert s["block1_score"] is not None and s["block2_score"] is not None
+        assert s["block1_score"] + s["block2_score"] == s["score"]
+    for s in scores:
+        if s["game_edition"] != MIXED_EDITION:
+            assert s["block1_score"] is None and s["block2_score"] is None
+
+    assert photos
+    # Only mixed cups get photos, always block-tagged (never a NULL block).
+    assert {p["game_edition"] for p in photos} == {MIXED_EDITION}
+    assert {p["block"] for p in photos} == {1, 2}
+    assert {p["mime_type"] for p in photos} == {"image/jpeg"}
+    # A completed mixed cup has BOTH blocks (two thumbnails to render).
+    completed = [p for p in photos if p["status"] == "completed"]
+    by_cup = {}
+    for p in completed:
+        by_cup.setdefault(p["cup_id"], set()).add(p["block"])
+    assert by_cup and all(blocks == {1, 2} for blocks in by_cup.values())
+    # The in-progress cup is parked at the swap: first console's photo only.
+    in_progress = [p for p in photos if p["status"] == "in_progress"]
+    assert [p["block"] for p in in_progress] == [1]
+
+
 def test_seed_is_deterministic(tmp_path):
     """Same seed -> identical scores, so staging looks stable across reseeds."""
     a = str(tmp_path / "a.staging.db")

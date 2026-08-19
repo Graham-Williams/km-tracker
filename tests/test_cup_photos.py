@@ -392,3 +392,61 @@ def test_newest_photo_wins_when_multiple(client):
     response = client.get("/cups/1/photo")
     assert response.data == newer
     assert response.mimetype == "image/png"
+
+
+# --- Block tagging (mixed cups) ---------------------------------------------
+#
+# The single whole-cup photo flow tested above is UNCHANGED by per-block photos:
+# every row it writes carries block = NULL, meaning "the cup's photo". The
+# per-block behaviour itself lives in test_mixed_cup_block_photos.py.
+
+
+def test_form_attached_photos_are_stored_blockless(client):
+    """Every existing caller of save_cup_photo passes no block, so a pure cup's
+    row is byte-identical to what it was before per-block photos existed."""
+    create_player(client, "Alice")
+    client.post(
+        "/cups",
+        data={
+            "date": "2026-03-15T20:00",
+            "player_ids[]": ["1"],
+            "scores[]": ["50"],
+            "lines[]": ["0"],
+            "photo_data": PHOTO_B64,
+            "photo_mime": "image/jpeg",
+        },
+    )
+    conn = get_connection()
+    blocks = [r["block"] for r in conn.execute("SELECT block FROM cup_photos")]
+    conn.close()
+    assert blocks == [None]
+
+
+def test_blockless_route_serves_the_newest_photo_of_any_block(client):
+    """/cups/<id>/photo deliberately ignores the block tag — the /cups
+    thumbnail and the tests above depend on "newest photo, whatever it is"."""
+    create_player(client, "Alice")
+    client.post(
+        "/cups",
+        data={
+            "date": "2026-03-15T20:00",
+            "player_ids[]": ["1"],
+            "scores[]": ["50"],
+            "lines[]": ["0"],
+            "photo_data": PHOTO_B64,
+            "photo_mime": "image/jpeg",
+        },
+    )
+    tagged = b"\xff\xd8block-tagged"
+    conn = get_connection()
+    conn.execute(
+        "INSERT INTO cup_photos (cup_id, image, mime_type, created_at, block) "
+        "VALUES (1, ?, 'image/jpeg', '2026-03-16 00:00:00', 2)",
+        (tagged,),
+    )
+    conn.commit()
+    conn.close()
+    assert client.get("/cups/1/photo").data == tagged
+    assert client.get("/cups/1/photo/2").data == tagged
+    # ...but the per-block route never falls back to an untagged photo.
+    assert client.get("/cups/1/photo/1").status_code == 404

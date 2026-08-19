@@ -19,6 +19,14 @@
     .completed-races .race-num { color: var(--color-faint); min-width: 4rem; display: inline-block; }
     .veto-status { font-size: 0.85rem; color: var(--color-muted); margin-bottom: var(--space-1); }
 
+    /* The swap modal's two capture buttons measure 125 + 8 + 139 = 272px inside
+       272px of modal content — flush to the sub-pixel. It doesn't overflow
+       today, but any font-metric shift (different OS/font stack, a browser
+       minimum font size, a longer label) would push a button outside the modal.
+       Let it wrap instead. The .photo-block rule doesn't cover this row because
+       the modal sits outside that container. */
+    .modal .field-row { flex-wrap: wrap; }
+
     /* Mixed cups: per-race console badges + the swap banner */
     .console-order { color: var(--color-faint); font-size: 0.85em; }
     .console-badge {
@@ -241,6 +249,34 @@
     </div>
     {% endif %}
 
+    {% if show_block_photo_button %}
+    <!-- Capture the FIRST console's results screen while it's still up. The
+         second console starts scoring from zero, so once you switch, these
+         points exist nowhere else. Entirely optional — skipping it just means
+         that half is typed in at completion. The photo POSTs on its own to
+         /cups/<id>/photo/1 (no form involved) and is read for scores later, on
+         the completion page. -->
+    <div class="swap-banner photo-block" id="photo-block-1" data-block="1">
+        <div>
+            📸 <strong>{{ finishing_console_label }}</strong> results — photograph the standings
+            screen before switching consoles. Optional; you can also type this half in later.
+        </div>
+        <div class="field-row" style="margin-top: var(--space-2)">
+            {# Buttons ship disabled; photo_score.js enables + wires them. #}
+            <button type="button" class="btn btn-secondary" data-photo-input="photo-take-1" disabled>Take photo</button>
+            <button type="button" class="btn btn-secondary" data-photo-input="photo-pick-1" disabled>{% if block1_photo_saved %}Replace photo{% else %}Upload photo{% endif %}</button>
+        </div>
+        <input type="file" id="photo-take-1" accept="image/*" capture="environment" hidden>
+        <input type="file" id="photo-pick-1" accept="image/*" hidden>
+        <img class="photo-preview" alt="{{ finishing_console_label }} standings photo"
+             {% if block1_photo_saved %}src="{{ url_for('cup_block_photo', cup_id=cup.id, block=1) }}"{% endif %}
+             style="max-width:160px; border-radius: var(--radius-sm); margin-top: var(--space-2);{% if not block1_photo_saved %} display:none;{% endif %}">
+        <p class="photo-attach-status {% if block1_photo_saved %}is-success{% endif %}" {% if not block1_photo_saved %}hidden{% endif %}>{% if block1_photo_saved %}{{ finishing_console_label }} photo saved ✓ — replace it any time{% endif %}</p>
+        <p class="muted"><span class="photo-extract-spinner" hidden aria-hidden="true"></span><span class="photo-status"></span></p>
+        <p class="muted photo-notes"></p>
+    </div>
+    {% endif %}
+
     {% if current_race <= max_races %}
     <!-- Wheel -->
     <div class="wheel-container">
@@ -362,8 +398,16 @@
                 <strong>{{ next_console_label }}</strong> — the second console starts scoring from
                 zero, so these points won't be on screen again.
             </p>
+            {# Same capture control as the panel behind the modal — it drives the
+               same hidden file inputs, so a photo taken from here lands as the
+               first console's block-1 photo. Always skippable: a missing photo
+               just means that half gets typed in at completion. #}
+            <div class="field-row" style="justify-content:center">
+                <button type="button" class="btn btn-secondary" data-photo-input="photo-take-1" disabled>Take photo</button>
+                <button type="button" class="btn btn-secondary" data-photo-input="photo-pick-1" disabled>Upload photo</button>
+            </div>
             <div class="modal-buttons">
-                <button class="btn btn-primary" id="swap-reminder-ok-btn">OK, got it</button>
+                <button class="btn btn-primary" id="swap-reminder-ok-btn">Skip for now</button>
             </div>
         </div>
     </div>
@@ -387,6 +431,7 @@
 
 
     <script src="{{ url_for('static', filename='js/sfx.js') }}"></script>
+    {% if show_block_photo_button %}<script src="{{ url_for('static', filename='js/photo_score.js') }}"></script>{% endif %}
     <script>
         // Fallback: a dropped /static/js/sfx.js request must never break the
         // page — degrade to silence, not ReferenceErrors. Every SFX call site
@@ -924,6 +969,20 @@
             };
         })();
 
+        {% if show_block_photo_button %}
+        // --- Mixed cups: capture the first console's results photo ---------
+        // Attach-only here (extractUrl: null): there are no score inputs on
+        // this page. The photo is stored against block 1 and read for scores
+        // later, on the completion page, where the fields it would fill exist.
+        initBlockPhoto({
+            block: 1,
+            cupId: CUP_ID,
+            label: {{ finishing_console_label|tojson }},
+            uploadUrl: "{{ url_for('upload_cup_block_photo', cup_id=cup.id, block=1) }}",
+            extractUrl: null
+        });
+        {% endif %}
+
         // --- Mixed cups: swap reminder (entering the second half) ---
         // Auto-opened once, dismissed with OK. Server-side it's gated purely on
         // "2 races played", which is true for every load of the race-3 page —
@@ -936,12 +995,18 @@
             if (!modal) return;
             var storageKey = "km-swap-reminder-" + CUP_ID;
             var okBtn = document.getElementById("swap-reminder-ok-btn");
-            if (okBtn) {
-                okBtn.addEventListener("click", function () {
-                    closeModal("swap-reminder-modal");
-                    try { sessionStorage.setItem(storageKey, "1"); } catch (e) {}
-                });
+            function dismiss() {
+                closeModal("swap-reminder-modal");
+                try { sessionStorage.setItem(storageKey, "1"); } catch (e) {}
             }
+            if (okBtn) okBtn.addEventListener("click", dismiss);
+            // Taking/uploading from inside the modal dismisses it too, so the
+            // progress + "photo saved ✓" state on the panel behind is visible.
+            // The file picker has already been opened by photo_score.js's own
+            // click handler at this point.
+            modal.querySelectorAll("[data-photo-input]").forEach(function (btn) {
+                btn.addEventListener("click", dismiss);
+            });
             var alreadyShown = false;
             try { alreadyShown = sessionStorage.getItem(storageKey) === "1"; }
             catch (e) { alreadyShown = false; }

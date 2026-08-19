@@ -9,13 +9,19 @@
  * the form on its own; the human always reviews first. Manual entry works
  * regardless of what happens here.
  *
- * Auto-fill is suppressed entirely when the response carries
- * `partial_half: true` — a MIXED (Wii + Switch) cup, where the photographed
- * screen holds only the second console's half of the scoring. Filling half
- * totals into a cup-total field would record silently-wrong numbers that look
- * completely plausible, so those responses render the mapping panel as a
- * READ-ONLY reference list (no dropdowns, no write path to the score inputs)
- * plus an explanatory status line.
+ * This is the PURE-cup entry point. A mixed (Wii + Switch) cup has two results
+ * screens, one per console, and uses `initBlockPhoto` at the bottom of this
+ * file instead — one panel per console block, each filling only its own half.
+ *
+ * Auto-fill is still suppressed entirely when a response carries
+ * `partial_half: true` — a BLOCKLESS mixed-cup request, where the photographed
+ * screen holds only one console's half of the scoring but the field it would
+ * fill is the cup TOTAL. Filling half totals there would record silently-wrong
+ * numbers that look completely plausible, so those responses render the mapping
+ * panel as a READ-ONLY reference list (no dropdowns, no write path to the score
+ * inputs) plus an explanatory status line. No UI reaches that path today (the
+ * mixed page is per-block), but the server still answers it and the guard is
+ * kept as the second lock.
  *
  * Silent-drop guards (the photo attach is async, so a submit could otherwise
  * race it or follow a failed decode without anyone noticing):
@@ -43,6 +49,33 @@
  *     getPayload: function () { return {cup_id: 7}; }  // merged into the POST
  *   });
  */
+// Shared canvas downscale (max 1200px long edge, JPEG ~0.8). Hoisted to module
+// scope so the block-photo entry point below reuses the exact same encoder —
+// the size budget it produces is what keeps a photo POST under the server's
+// 1 MB MAX_CONTENT_LENGTH.
+var PHOTO_MAX_EDGE = 1200;
+var PHOTO_JPEG_QUALITY = 0.8;
+
+function downscalePhoto(file, cb) {
+    var img = new Image();
+    var url = URL.createObjectURL(file);
+    img.onload = function () {
+        var w = img.naturalWidth, h = img.naturalHeight;
+        var scale = Math.min(1, PHOTO_MAX_EDGE / Math.max(w, h));
+        var canvas = document.createElement("canvas");
+        canvas.width = Math.max(1, Math.round(w * scale));
+        canvas.height = Math.max(1, Math.round(h * scale));
+        canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
+        URL.revokeObjectURL(url);
+        cb(canvas.toDataURL("image/jpeg", PHOTO_JPEG_QUALITY));
+    };
+    img.onerror = function () {
+        URL.revokeObjectURL(url);
+        cb(null);
+    };
+    img.src = url;
+}
+
 window.initPhotoScore = function (opts) {
     var block = document.getElementById("photo-score");
     if (!block) return;
@@ -64,8 +97,6 @@ window.initPhotoScore = function (opts) {
     var form = block.closest("form");
     var submitBtn = form ? form.querySelector('button[type="submit"]') : null;
 
-    var MAX_EDGE = 1200;
-    var JPEG_QUALITY = 0.8;
     var DECODE_ERROR_MSG =
         "Couldn't read that image — try taking the photo with the camera, " +
         "or use a JPEG/PNG.";
@@ -110,25 +141,7 @@ window.initPhotoScore = function (opts) {
         attachEl.hidden = false;
     }
 
-    function downscale(file, cb) {
-        var img = new Image();
-        var url = URL.createObjectURL(file);
-        img.onload = function () {
-            var w = img.naturalWidth, h = img.naturalHeight;
-            var scale = Math.min(1, MAX_EDGE / Math.max(w, h));
-            var canvas = document.createElement("canvas");
-            canvas.width = Math.max(1, Math.round(w * scale));
-            canvas.height = Math.max(1, Math.round(h * scale));
-            canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
-            URL.revokeObjectURL(url);
-            cb(canvas.toDataURL("image/jpeg", JPEG_QUALITY));
-        };
-        img.onerror = function () {
-            URL.revokeObjectURL(url);
-            cb(null);
-        };
-        img.src = url;
-    }
+    var downscale = downscalePhoto;
 
     function fillScores(scores) {
         var filled = 0;
@@ -573,6 +586,447 @@ window.initPhotoScore = function (opts) {
                     e.preventDefault();
                 }
             }
+        });
+    }
+};
+
+/*
+ * Per-console block photos (MIXED cups only).
+ *
+ * A mixed cup is two consoles' results screens, each starting from zero, so it
+ * gets one independent panel per BLOCK. This is a SECOND entry point rather
+ * than a mode of initPhotoScore on purpose: that function owns the shipped
+ * pure-cup flow and its documented silent-drop guards, and none of them should
+ * shift under a feature that doesn't touch pure cups.
+ *
+ * What is different here, and why:
+ *   - The photo POSTs on its OWN request to /cups/<id>/photo/<block> instead of
+ *     riding the form in a hidden field. Two base64 photos would flirt with the
+ *     server's 1 MB MAX_CONTENT_LENGTH (413 -> a flash-less error page), and
+ *     the swap photo is taken during race 2, long before the completion form
+ *     exists. A side effect worth naming: the mixed form carries no photo
+ *     payload at all, so there is no attach/submit race to guard against — the
+ *     server confirms each photo as it lands.
+ *   - Auto-fill writes into that block's OWN input, never the total. The total
+ *     is computed from both halves by the page, so a filled block can never
+ *     masquerade as a cup total (the failure this whole feature prevents).
+ *   - Extraction is per photo, with the server resolving THAT block's console.
+ *     Never both editions against one screen: a player's other-console main can
+ *     be a CPU here, and Switch rows carry no highlight to veto the match.
+ *   - Nothing is ever read-only: every block input stays hand-editable and the
+ *     form is never auto-submitted. Extraction reads digits reliably but cannot
+ *     tell a stale photo (one taken a race early reads perfectly while being 10
+ *     points short), so the visible per-block breakdown is the real guard.
+ *
+ * Usage (once per block):
+ *   initBlockPhoto({
+ *     block: 1, cupId: 7, label: "Wii",
+ *     uploadUrl: "/cups/7/photo/1",
+ *     extractUrl: "/extract-scores" or null   // null = attach-only mode
+ *   });
+ */
+
+// Shared across the panels on a page: how many block photos are mid-flight.
+// Both panels drive the same submit button, so a per-panel flag would let the
+// first one to finish re-enable it while the other is still working.
+var blockPhotoBusy = 0;
+
+window.initBlockPhoto = function (opts) {
+    var block = opts.block;
+    var root = document.getElementById("photo-block-" + block);
+    if (!root) return;
+
+    var attachEl = root.querySelector(".photo-attach-status");
+    var statusEl = root.querySelector(".photo-status");
+    var spinnerEl = root.querySelector(".photo-extract-spinner");
+    var notesEl = root.querySelector(".photo-notes");
+    var preview = root.querySelector(".photo-preview");
+    var mappingEl = root.querySelector(".photo-mapping");
+    var mappingRowsEl = root.querySelector(".photo-mapping-rows");
+    var mapWarnEl = root.querySelector(".photo-map-warning");
+    var mapUnassignedEl = root.querySelector(".photo-map-unassigned");
+    var readBtn = root.querySelector(".photo-read-btn");
+    // Every "Upload photo" control for this block, wherever it lives (the race
+    // page repeats it inside the swap-reminder modal) — they all relabel to
+    // "Replace photo" once a photo is saved.
+    var pickBtns = document.querySelectorAll(
+        '[data-photo-input="photo-pick-' + block + '"]'
+    );
+    var form = root.closest("form");
+    var submitBtn = form ? form.querySelector('button[type="submit"]') : null;
+
+    var DECODE_ERROR_MSG =
+        "Couldn't read that image — try taking the photo with the camera, " +
+        "or use a JPEG/PNG.";
+
+    // Bumped per pick; async work bails when a newer pick has superseded it.
+    var requestSeq = 0;
+    var busy = false;
+
+    function setStatus(msg) {
+        statusEl.textContent = msg;
+    }
+
+    function setBusy(isBusy) {
+        if (isBusy === busy) return;
+        busy = isBusy;
+        blockPhotoBusy += isBusy ? 1 : -1;
+        if (blockPhotoBusy < 0) blockPhotoBusy = 0;
+        if (spinnerEl) spinnerEl.hidden = !isBusy;
+        if (submitBtn) submitBtn.disabled = blockPhotoBusy > 0;
+    }
+
+    // kind: "success" | "error" | "pending" | null (null hides the indicator)
+    function setAttachState(kind, msg) {
+        attachEl.classList.remove("is-success", "is-error");
+        if (!kind) {
+            attachEl.hidden = true;
+            attachEl.textContent = "";
+            return;
+        }
+        if (kind === "success") attachEl.classList.add("is-success");
+        if (kind === "error") attachEl.classList.add("is-error");
+        attachEl.textContent = msg;
+        attachEl.hidden = false;
+    }
+
+    // --- Writing into THIS block's inputs (never the total) ----------------
+
+    function blockInput(pid) {
+        var row = document.querySelector('.score-row[data-player-id="' + pid + '"]');
+        if (!row || row.classList.contains("removed")) return null;
+        return row.querySelector('.block-score-input[data-block="' + block + '"]');
+    }
+
+    function fillBlockScores(scores) {
+        var filled = 0;
+        Object.keys(scores).forEach(function (pid) {
+            var input = blockInput(pid);
+            if (!input) return;
+            input.value = scores[pid];
+            // Same event a human typing would fire: the page recomputes the
+            // total from both halves and re-runs placements/tiebreakers.
+            input.dispatchEvent(new Event("input", { bubbles: true }));
+            filled++;
+        });
+        return filled;
+    }
+
+    // --- Mix-and-match mapping panel (this block only) ---------------------
+
+    function getRoster() {
+        var out = [];
+        document.querySelectorAll(".score-row").forEach(function (row) {
+            if (row.classList.contains("removed")) return;
+            var input = row.querySelector('.block-score-input[data-block="' + block + '"]');
+            if (!input || input.disabled) return;
+            var nameEl = row.querySelector(".score-name");
+            var pid = row.getAttribute("data-player-id");
+            out.push({
+                pid: pid,
+                name: nameEl ? nameEl.textContent.trim() : "Player " + pid,
+                input: input
+            });
+        });
+        return out;
+    }
+
+    function clearMapping() {
+        if (!mappingEl) return;
+        mappingRowsEl.innerHTML = "";
+        if (mapWarnEl) { mapWarnEl.hidden = true; mapWarnEl.textContent = ""; }
+        if (mapUnassignedEl) { mapUnassignedEl.hidden = true; mapUnassignedEl.textContent = ""; }
+        mappingEl.hidden = true;
+    }
+
+    function applySelection(input, value, orows) {
+        if (value === "") {
+            input.value = "";
+        } else {
+            var idx = parseInt(value, 10);
+            if (orows[idx]) input.value = orows[idx].points;
+        }
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+
+    // A row assigned to one player is greyed out in every other dropdown; the
+    // banners key off the HIGHLIGHTED rows as the expected human set (Switch
+    // photos have none, so they're simply suppressed there).
+    function refreshMapping(orows, hlCount, roster) {
+        var selects = mappingRowsEl.querySelectorAll(".photo-map-select");
+        var chosen = {};
+        selects.forEach(function (s) {
+            if (s.value !== "") chosen[s.value] = (chosen[s.value] || 0) + 1;
+        });
+        selects.forEach(function (s) {
+            var cur = s.value;
+            s.querySelectorAll("option").forEach(function (opt) {
+                if (opt.value === "") { opt.disabled = false; return; }
+                opt.disabled = !!(chosen[opt.value] && opt.value !== cur);
+            });
+        });
+        if (mapWarnEl) {
+            if (hlCount > 0 && hlCount !== roster.length) {
+                mapWarnEl.textContent =
+                    "Photo shows " + hlCount + " highlighted player" +
+                    (hlCount === 1 ? "" : "s") + ", but this cup has " +
+                    roster.length + " — check the mapping.";
+                mapWarnEl.hidden = false;
+            } else {
+                mapWarnEl.hidden = true;
+                mapWarnEl.textContent = "";
+            }
+        }
+        if (mapUnassignedEl) {
+            var unassigned = 0;
+            for (var i = 0; i < hlCount; i++) {
+                if (!chosen[String(i)]) unassigned++;
+            }
+            if (hlCount > 0 && unassigned > 0) {
+                mapUnassignedEl.textContent =
+                    unassigned + " highlighted player" +
+                    (unassigned === 1 ? "" : "s") + " unassigned";
+                mapUnassignedEl.hidden = false;
+            } else {
+                mapUnassignedEl.hidden = true;
+                mapUnassignedEl.textContent = "";
+            }
+        }
+    }
+
+    function renderMapping(rawRows) {
+        if (!mappingEl) return;
+        rawRows = rawRows || [];
+        if (!rawRows.length) { clearMapping(); return; }
+
+        var hrows = rawRows.filter(function (r) { return r && r.is_highlighted; });
+        var nrows = rawRows.filter(function (r) { return !(r && r.is_highlighted); });
+        var orows = hrows.concat(nrows);
+        var hlCount = hrows.length;
+
+        var roster = getRoster();
+        mappingRowsEl.innerHTML = "";
+
+        // Pre-select by reconstructing the auto-match from the already-filled
+        // block inputs: each player with a value claims the first unclaimed row
+        // whose points equal it. Reads inputs, never writes them, so a value
+        // typed by hand survives the render.
+        var claimed = {};
+        var preselect = {};
+        roster.forEach(function (p) {
+            var val = p.input.value.trim() !== "" ? parseInt(p.input.value, 10) : null;
+            var chosen = -1;
+            if (val !== null && !isNaN(val)) {
+                for (var i = 0; i < orows.length; i++) {
+                    if (!claimed[i] && orows[i].points === val) { chosen = i; break; }
+                }
+            }
+            if (chosen !== -1) claimed[chosen] = true;
+            preselect[p.pid] = chosen;
+        });
+
+        function makeOption(r, i) {
+            var opt = document.createElement("option");
+            opt.value = String(i);
+            var star = r.is_highlighted ? "★ " : "";
+            opt.textContent =
+                star + "P" + r.position + " · " + r.character + " — " + r.points + " pts";
+            return opt;
+        }
+
+        roster.forEach(function (p) {
+            var wrap = document.createElement("div");
+            wrap.className = "photo-map-row";
+            var name = document.createElement("span");
+            name.className = "photo-map-name";
+            name.textContent = p.name;
+            var sel = document.createElement("select");
+            sel.className = "photo-map-select";
+            sel.setAttribute("data-player-id", p.pid);
+            sel.setAttribute("data-block", String(block));
+            var blank = document.createElement("option");
+            blank.value = "";
+            blank.textContent = "— leave blank —";
+            sel.appendChild(blank);
+            if (hlCount && nrows.length) {
+                var gHuman = document.createElement("optgroup");
+                gHuman.label = "Human players ★";
+                hrows.forEach(function (r, i) { gHuman.appendChild(makeOption(r, i)); });
+                sel.appendChild(gHuman);
+                var gOther = document.createElement("optgroup");
+                gOther.label = "Other rows";
+                nrows.forEach(function (r, i) { gOther.appendChild(makeOption(r, hlCount + i)); });
+                sel.appendChild(gOther);
+            } else {
+                orows.forEach(function (r, i) { sel.appendChild(makeOption(r, i)); });
+            }
+            sel.value = preselect[p.pid] >= 0 ? String(preselect[p.pid]) : "";
+            sel.addEventListener("change", function () {
+                applySelection(p.input, sel.value, orows);
+                refreshMapping(orows, hlCount, roster);
+            });
+            wrap.appendChild(name);
+            wrap.appendChild(sel);
+            mappingRowsEl.appendChild(wrap);
+        });
+
+        mappingEl.hidden = false;
+        refreshMapping(orows, hlCount, roster);
+    }
+
+    // --- Extraction --------------------------------------------------------
+
+    // payload carries either a fresh image or nothing (server re-reads the
+    // photo it already stored for this block — the swap photo).
+    function extract(payload, seq) {
+        setBusy(true);
+        setStatus("Reading " + opts.label + " scores from the photo…");
+        payload.cup_id = opts.cupId;
+        payload.block = block;
+        fetch(opts.extractUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload)
+        }).then(function (res) {
+            return res.json().catch(function () { return {}; }).then(function (body) {
+                return { ok: res.ok, status: res.status, body: body };
+            });
+        }).then(function (res) {
+            if (seq !== requestSeq) return; // superseded by a newer photo
+            setBusy(false);
+            if (!res.ok) {
+                var msg = (res.body && res.body.error) ||
+                    "Extraction failed (" + res.status + ")";
+                setStatus(msg + " — the photo is saved; enter this half by hand.");
+                clearMapping();
+                return;
+            }
+            var body = res.body || {};
+            var filled = fillBlockScores(body.scores || {});
+            renderMapping(body.raw_rows || []);
+            setStatus(
+                "Filled " + filled + " " + opts.label + " score" +
+                (filled === 1 ? "" : "s") + " — check them against the photo " +
+                "before submitting."
+            );
+            var notes = [];
+            if (body.ambiguous && body.ambiguous.length) {
+                notes.push("Couldn't decide (shared character): " + body.ambiguous.join(", "));
+            }
+            if (body.unmatched_players && body.unmatched_players.length) {
+                notes.push("No match — fill in manually: " + body.unmatched_players.join(", "));
+            }
+            notesEl.textContent = notes.join(" · ");
+        }).catch(function () {
+            if (seq !== requestSeq) return;
+            setBusy(false);
+            setStatus("Network error during extraction — the photo is saved; enter this half by hand.");
+            clearMapping();
+        });
+    }
+
+    // --- Upload ------------------------------------------------------------
+
+    function upload(base64, seq) {
+        setBusy(true);
+        setAttachState("pending", "Saving " + opts.label + " photo…");
+        fetch(opts.uploadUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ image: base64, mime_type: "image/jpeg" })
+        }).then(function (res) {
+            return res.json().catch(function () { return {}; }).then(function (body) {
+                return { ok: res.ok, status: res.status, body: body };
+            });
+        }).then(function (res) {
+            if (seq !== requestSeq) return;
+            setBusy(false);
+            if (!res.ok || !res.body || !res.body.ok) {
+                var msg = (res.body && res.body.error) ||
+                    "Couldn't save the photo (" + res.status + ")";
+                setAttachState("error", msg + " — try again, or enter this half by hand.");
+                return;
+            }
+            // Server-confirmed, so the label can say so honestly.
+            setAttachState("success", (res.body.label || opts.label) + " photo saved ✓");
+            pickBtns.forEach(function (btn) { btn.textContent = "Replace photo"; });
+            if (readBtn) { readBtn.hidden = false; readBtn.disabled = false; }
+            if (opts.extractUrl) extract({ image: base64, mime_type: "image/jpeg" }, seq);
+        }).catch(function () {
+            if (seq !== requestSeq) return;
+            setBusy(false);
+            setAttachState("error", "Network error saving the photo — try again, or enter this half by hand.");
+        });
+    }
+
+    function handleFile(file) {
+        if (!file) return;
+        var seq = ++requestSeq;
+        setBusy(true);
+        setAttachState("pending", "Processing photo…");
+        setStatus("");
+        notesEl.textContent = "";
+        clearMapping();
+        downscalePhoto(file, function (dataUrl) {
+            if (seq !== requestSeq) return;
+            setBusy(false);
+            if (!dataUrl) {
+                setAttachState("error", DECODE_ERROR_MSG);
+                return;
+            }
+            preview.src = dataUrl;
+            preview.style.display = "";
+            upload(dataUrl.split(",")[1], seq);
+        });
+    }
+
+    // Wire the visible buttons to the hidden file inputs. They ship disabled,
+    // so a dead script means the picker never opens. Queried document-wide (by
+    // THIS block's input ids, so panels can't cross-wire) because the race page
+    // repeats the same control inside the swap-reminder modal, outside the
+    // panel — both must drive the same pick.
+    document.querySelectorAll(
+        '[data-photo-input="photo-take-' + block + '"],' +
+        '[data-photo-input="photo-pick-' + block + '"]'
+    ).forEach(function (btn) {
+        var input = document.getElementById(btn.getAttribute("data-photo-input"));
+        if (!input) return;
+        btn.disabled = false;
+        btn.addEventListener("click", function () { input.click(); });
+    });
+
+    ["photo-take-" + block, "photo-pick-" + block].forEach(function (id) {
+        var input = document.getElementById(id);
+        if (!input) return;
+        input.addEventListener("change", function () {
+            handleFile(input.files && input.files[0]);
+            input.value = ""; // allow re-picking the same file
+        });
+    });
+
+    // "Read scores" (this block's stored photo): no image in the body — the server reads
+    // the photo already stored for this block (typically taken at the swap).
+    if (readBtn && opts.extractUrl) {
+        readBtn.disabled = false;
+        readBtn.addEventListener("click", function () {
+            var seq = ++requestSeq;
+            notesEl.textContent = "";
+            clearMapping();
+            extract({}, seq);
+        });
+    }
+
+    // Block a submit while this panel is still saving/reading a photo — the
+    // scores would not be in the form yet. Never auto-resumes: the human
+    // reviews what got filled and submits themselves.
+    if (form) {
+        form.addEventListener("submit", function (e) {
+            if (!busy) return;
+            e.preventDefault();
+            setStatus(
+                "Still working on the " + opts.label + " photo — it'll finish " +
+                "shortly; review the scores, then submit."
+            );
         });
     }
 };
