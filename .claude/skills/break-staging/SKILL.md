@@ -434,12 +434,54 @@ can't exceed their caps under a race (read-check-write is non-atomic):
 - 2 concurrent `POST .../complete` on the same cup → duplicate scores, double
   line adjustment, or a 500 on the second?
 
-### Surface D — UI-level weirdness (only if cheap; use Playwright via the port-forward)
+### Surface D — the real browser (MANDATORY; never skipped, never "server-side only")
+
+**This surface is not optional and cannot be waived.** It used to say "only if
+cheap… skip if Playwright isn't readily available — B and C cover the same
+server-side logic via HTTP." That was wrong, and it cost us: a sweep that
+verified everything server-side passed a mixed-cup completion page whose score
+boxes collapsed to ~40px on a phone, so a typed `30` rendered **visibly empty**.
+Every server assertion passed — the value was in the DOM, the placements
+updated, the invariants held. It was simply unusable. Graham enters scores on
+his phone at game night, so "the HTTP layer is correct" is not the property that
+matters. **If you cannot drive a browser, the gate is RED — say so and stop; do
+not substitute HTTP checks and call the surface covered.**
+
+Drive a real browser via the port-forward (§1). Required every run:
+
+- **Measure, don't eyeball.** For every changed page, at **390px, 485px and
+  ~1400px**, assert:
+  - `documentElement.scrollWidth === clientWidth` (no page-level horizontal
+    scroll) — a real, common regression that screenshots hide;
+  - no element's bounding box extends past its container;
+  - for every text input: `input.scrollWidth === input.clientWidth` **with a
+    realistic value typed in** (2- and 3-digit numbers, and a long player name).
+    An empty box always looks fine — type first, then measure;
+  - every text-entry input computes to **≥16px font**. Below that iOS Safari
+    auto-zooms the viewport on focus. This is a standing repo rule, not a
+    preference.
+- **Chrome's window floor is ~500px.** Reproduce narrower widths with a
+  same-origin iframe pinned to the exact CSS width, or by pinning the container
+  width — and say in the report which method you used. Note this app has few or
+  no width media queries, so container width is faithful; re-check that
+  assumption if the CSS changes.
+- **Complete the primary flow end to end in the browser**, not via HTTP: start
+  the thing, fill it in, submit it, then verify the resulting DB rows. A flow
+  that works in `curl` and breaks in a form is exactly what this surface exists
+  to catch.
+- **Exercise every new control by clicking it** — buttons, modals, file inputs,
+  replace/undo affordances. "Present in the HTML" is not "works".
+- **Watch the console.** Assert zero uncaught errors and zero failed requests
+  across the sweep (`page.on("pageerror")`, `page.on("requestfailed")`).
 - **Back-button / stale-form replay:** complete a cup, hit Back, resubmit the
   now-stale form.
 - **Double-click submit:** submit a form twice rapidly.
-- Skip this surface if Playwright isn't readily available — B and C cover the same
-  server-side logic via HTTP.
+
+**State the limits honestly in the report.** A headless/desktop Chrome run is
+*not* an iPhone: real iOS Safari, the OS camera/file picker, and real touch
+targets are outside this harness. Say which of those you exercised with a real
+device or dialog (usually none) rather than implying full mobile coverage — and
+list any surface you drove only server-side as an explicit coverage gap.
 
 ---
 
@@ -493,6 +535,18 @@ End the report with:
   the currently-deployed unmerged change is safe, *separately* from pre-existing
   issues. If §3 found nothing, say so explicitly ("changed surface: no findings").
 - **Invariant-audit summary** — each §5 check and pass/fail.
+- **Browser coverage (§4 Surface D)** — the widths you measured, the flows you
+  drove end to end, the controls you actually clicked, and the console-error
+  result. If you drove a browser at all, say which harness and how you reproduced
+  sub-500px widths.
+- **Coverage gaps — REQUIRED, and stated plainly.** List what you did *not*
+  exercise and why: surfaces verified server-side only, flows stubbed instead of
+  run for real (extraction, payments, anything that costs money), dialogs you
+  bypassed (OS file/camera pickers), devices you didn't have (a real iPhone),
+  and anything a concurrent agent confounded. A sweep that reports only its wins
+  is worse than useless — it converts unknown coverage into false confidence,
+  which is how a phone-unusable page passed a green gate. Withdraw a confounded
+  observation rather than reporting it as a finding, and say you withdrew it.
 - **Confirmation staging was reseeded clean** (§7) and the throwaway container
   removed.
 
