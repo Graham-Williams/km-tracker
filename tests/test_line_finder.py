@@ -29,6 +29,7 @@ def cup(
     a_blocks=None,
     b_blocks=None,
     b_line=0,
+    a_line=0,
 ):
     return {
         "id": id,
@@ -42,6 +43,7 @@ def cup(
         "a_block2": None if a_blocks is None else a_blocks[1],
         "b_block1": None if b_blocks is None else b_blocks[0],
         "b_block2": None if b_blocks is None else b_blocks[1],
+        "a_line": a_line,
         "b_line": b_line,
     }
 
@@ -362,10 +364,18 @@ def test_compute_recommendations_and_shape():
     # The 2-player read (from the unfiltered cups) is in the notes.
     assert any("Just the two of them: 2 Wii cups, average +7.5" in n for n in wii["notes"])
     assert any("pairs" in n for n in mixed["notes"])
-    # Cups list is newest first with the line used.
+    # Cups list is newest first with the line used; ids stay (the page links
+    # each row to the cup) — nothing else in the payload carries a cup id.
     assert [c["id"] for c in out["cups"]] == [7, 6, 5, 4, 3, 2, 1]
     assert out["cups"][-1]["line_used"] == 9
     assert out["cups"][-1]["format_label"] == "Wii"
+    for key in ("editions", "stored_line"):
+        assert key not in out
+    assert "dates" not in wii and "half_line" not in wii
+    assert "cup_id" not in out["trend"]["points"][0]
+    assert "cup_id" not in out["backtest"]["rows"][0]
+    assert "cup_id" not in out["line_history"]["rows"][0]
+    assert "changes" not in out["line_history"]
 
 
 def test_compute_recommends_even_when_the_edge_is_inside_the_noise():
@@ -386,10 +396,13 @@ def test_compute_recommends_even_when_the_edge_is_inside_the_noise():
     assert sw["fitted_at_rec"] == pytest.approx(lf.fitted_pct(2 / 3, sw["model"]["sd"], 0), abs=0.05)
     assert any("not distinguishable from even" in n for n in sw["notes"])
     assert any("Fitted +0.7 ± " in n for n in sw["notes"])
+    assert any("at even (fitted" in n for n in sw["notes"])
+    assert not any("rule out ties" in n for n in sw["notes"])
     # The same edge with far less noise rounds normally.
     tight = lf.compute(cups * 40, half_life=None, today=TODAY)["formats"]["mk8dx"]
     assert tight["se"] < abs(tight["model"]["mean"])
     assert tight["rec"] == 1 and tight["rec_within_noise"] is False
+    assert any("Use +½ to rule out ties" in n for n in tight["notes"])
 
 
 def test_compute_uses_real_mixed_cups_over_the_pairs_proxy():
@@ -408,8 +421,8 @@ def test_compute_uses_real_mixed_cups_over_the_pairs_proxy():
     assert mixed["actual"][lines.index(15.0)] == 0
     assert any("1 real mixed cup drive" in n for n in mixed["notes"])
     # The blocks fed the per-edition pools: wii gained (10, 2), switch (0, 2).
-    assert out["editions"]["wii"]["n_samples"] == 5
-    assert out["editions"]["mk8dx"]["n_samples"] == 4
+    samples = lf.edition_samples(cups, None, TODAY)
+    assert len(samples["wii"]) == 5 and len(samples["mk8dx"]) == 4
     assert out["cups"][0]["format_label"] == "Wii → Switch"
 
 
@@ -456,6 +469,16 @@ def test_compute_two_player_filter():
     assert wii["margins"] == [10, 5]
     assert wii["model"]["mean"] == pytest.approx(7.5)
     assert all(c["n_players"] == 2 for c in out["cups"])
+    assert len(out["cups"]) == 5
+    # Every downstream section is built from the same filtered set.
+    assert len(out["backtest"]["rows"]) == 5
+    assert len(out["trend"]["points"]) == 5
+    assert all(p["n_players"] == 2 for p in out["trend"]["points"])
+    assert len(out["trend"]["running"]["wii"]) == 2
+    assert len(out["line_history"]["rows"]) == 5
+    # Pairs proxy: 2 Wii x 3 Switch, not 4 x 3.
+    mixed = out["formats"]["mixed"]
+    assert mixed["actual_source"] == "pairs" and mixed["actual_n"] == 6
 
 
 def test_compute_ignores_unknown_editions():
@@ -481,7 +504,7 @@ def test_compute_is_json_serialisable():
 def test_backtest_walks_chronologically_with_min_history():
     out = lf.backtest(_history(), half_life=None)
     rows = out["rows"]
-    assert [r["cup_id"] for r in rows] == [1, 2, 3, 4, 5, 6, 7]
+    assert [r["date"] for r in rows] == [f"2026-09-0{i}" for i in range(1, 8)]
     # First three Wii cups have < 3 prior Wii samples -> not enough history.
     assert [r["rec_line"] for r in rows[:3]] == [None, None, None]
     assert all(r["rec_outcome"] is None for r in rows[:3])
@@ -521,6 +544,21 @@ def test_backtest_recommends_even_inside_the_noise():
     assert out["summary"]["mk8dx"]["rec"] == {"a": 0, "b": 0, "tie": 1}
 
 
+def test_backtest_line_used_is_net_of_the_favourites_line():
+    """The app decides a cup on line_score, so 'the line actually used' is
+    b_line - a_line. Margin +3 with B +9 / A +7: net +2 -> A still wins;
+    comparing against B's +9 alone would wrongly hand it to B."""
+    cups = [
+        cup(1, "2026-09-01", "wii", 60, 40, b_line=9),
+        cup(2, "2026-09-02", "wii", 43, 40, b_line=9, a_line=7),
+        cup(3, "2026-09-03", "wii", 45, 40, b_line=9, a_line=4),  # net 5 -> tie
+    ]
+    rows = lf.backtest(cups, half_life=None)["rows"]
+    assert rows[0]["line_used"] == 9 and rows[0]["used_outcome"] == "a"
+    assert rows[1]["line_used"] == 2 and rows[1]["used_outcome"] == "a"
+    assert rows[2]["line_used"] == 5 and rows[2]["used_outcome"] == "tie"
+
+
 def test_backtest_counts_ties_and_mixed_needs_both_editions():
     cups = [
         cup(1, "2026-01-01", "wii", 50, 40),
@@ -534,14 +572,17 @@ def test_backtest_counts_ties_and_mixed_needs_both_editions():
         cup(9, "2026-01-09", "mixed", 50, 45, first_edition="mk8dx", a_blocks=(25, 25), b_blocks=(25, 20)),
     ]
     out = lf.backtest(cups, half_life=None)
-    by_id = {r["cup_id"]: r for r in out["rows"]}
-    assert by_id[4]["rec_line"] == 10 and by_id[4]["rec_outcome"] == "tie"
-    # Cup 6 (mixed): 4 wii samples but only 1 switch -> not enough.
-    assert by_id[6]["rec_line"] is None
-    # Cup 8: switch samples so far = cup5, cup6 block, cup7 = 3 -> enough.
-    assert by_id[8]["rec_line"] is not None
+    by_id = {r["date"]: r for r in out["rows"]}
+    assert by_id["2026-01-04"]["rec_line"] == 10 and by_id["2026-01-04"]["rec_outcome"] == "tie"
+    # Cup 6 (mixed): 16 wii races but only 4 switch -> not enough.
+    assert by_id["2026-01-06"]["rec_line"] is None
+    # Cup 8: switch races so far = cup5 (4) + cup6 block (2) + cup7 (4) = 10
+    # -> still short of 12, even though that is three samples.
+    assert by_id["2026-01-08"]["rec_line"] is None
+    # Cup 9: + cup8's switch block = 12 -> enough.
+    assert by_id["2026-01-09"]["rec_line"] is not None
     assert out["summary"]["wii"]["rec"]["tie"] == 1
-    assert out["summary"]["mixed"]["n"] == 2 and out["summary"]["mixed"]["skipped"] == 1
+    assert out["summary"]["mixed"]["n"] == 1 and out["summary"]["mixed"]["skipped"] == 2
 
 
 # =============================================================================
@@ -551,9 +592,8 @@ def test_backtest_counts_ties_and_mixed_needs_both_editions():
 
 def test_margin_trend_points_and_running_means():
     trend = lf.margin_trend(_history(), half_life=None)
-    assert [p["cup_id"] for p in trend["points"]] == [1, 2, 3, 4, 5, 6, 7]
+    assert [p["date"] for p in trend["points"]] == [f"2026-09-0{i}" for i in range(1, 8)]
     assert trend["points"][0] == {
-        "cup_id": 1,
         "date": "2026-09-01",
         "format": "wii",
         "margin": 20,
@@ -571,11 +611,12 @@ def test_line_history_merges_changes_with_lines_used():
     ]
     hist = lf.line_history(_history(), changes, stored_line=9)
     assert hist["stored_line"] == 9
-    assert hist["changes"][0] == {"cup_id": 2, "date": "2026-09-02", "line_before": 9, "line_after": 6}
-    row2 = next(r for r in hist["rows"] if r["cup_id"] == 2)
+    assert set(hist) == {"rows", "stored_line"}
+    row2 = next(r for r in hist["rows"] if r["date"] == "2026-09-02")
     assert row2["line_used"] == 6 and row2["line_before"] == 9 and row2["line_after"] == 6
-    row1 = next(r for r in hist["rows"] if r["cup_id"] == 1)
+    row1 = next(r for r in hist["rows"] if r["date"] == "2026-09-01")
     assert row1["line_before"] is None and row1["line_after"] is None
+    assert "cup_id" not in row1
 
 
 # =============================================================================
@@ -662,11 +703,21 @@ def pair_db(client):
     _insert_cup(conn, "2026-09-07 19:00:00", "wii", {1: (60, 0), 2: (40, 9)}, status="in_progress", cup_players=[1, 2])
     _insert_cup(conn, "2026-09-08 19:00:00", "wii", {1: (60, 0), 2: (40, 9)}, deleted=True, cup_players=[1, 2])
     _insert_cup(conn, "2026-09-09 19:00:00", "wii", {1: (60, 0), 3: (40, 0)}, cup_players=[1, 3])
+    # 10: B vs C only — the favourite wasn't in it, so its line change is not
+    # the pair's business. 11: cancelled cup B played, with a line change.
+    _insert_cup(conn, "2026-09-10 19:00:00", "wii", {2: (60, 6), 3: (40, 0)}, cup_players=[2, 3])
+    _insert_cup(conn, "2026-09-11 19:00:00", "wii", {1: (60, 0), 2: (40, 6)}, status="cancelled", cup_players=[1, 2])
     conn.execute(
         "INSERT INTO line_changes (cup_id, player_id, line_before, line_after) VALUES (1, 2, 9, 6)"
     )
     conn.execute(
         "INSERT INTO line_changes (cup_id, player_id, line_before, line_after) VALUES (1, 1, 0, 0)"
+    )
+    conn.execute(
+        "INSERT INTO line_changes (cup_id, player_id, line_before, line_after) VALUES (10, 2, 6, 3)"
+    )
+    conn.execute(
+        "INSERT INTO line_changes (cup_id, player_id, line_before, line_after) VALUES (11, 2, 3, 0)"
     )
     conn.commit()
     conn.close()
@@ -684,15 +735,31 @@ def test_load_pair_filters_and_shapes(pair_db):
     assert [c["id"] for c in cups] == [1, 2, 3, 4, 5]
     assert [c["n_players"] for c in cups] == [3, 2, 2, 2, 2]
     c1 = cups[0]
-    assert (c1["a_score"], c1["b_score"], c1["b_line"]) == (60, 40, 9)
+    assert (c1["a_score"], c1["b_score"], c1["a_line"], c1["b_line"]) == (60, 40, 0, 9)
     assert c1["a_block1"] is None
     c5 = cups[4]
     assert c5["game_edition"] == "mixed" and c5["first_edition"] == "mk8dx"
     assert (c5["a_block1"], c5["a_block2"], c5["b_block1"], c5["b_block2"]) == (30, 30, 31, 19)
-    # Only B's line changes, joined to the cup date.
+    # Only B's line changes, and only on cups the PAIR played (completed, not
+    # deleted): the change on cup 10 (B vs C) and cup 11 (cancelled) are out.
     assert pair["line_changes"] == [
         {"cup_id": 1, "date": "2026-09-01 19:00:00", "line_before": 9, "line_after": 6}
     ]
+
+
+def test_load_pair_reads_the_favourites_line(pair_db):
+    conn = get_connection()
+    try:
+        conn.execute("UPDATE scores SET line = 4, line_score = score + 4 WHERE cup_id = 2 AND player_id = 1")
+        conn.commit()
+        pair = lf.load_pair(conn, ("A", "B"))
+    finally:
+        conn.close()
+    c2 = next(c for c in pair["cups"] if c["id"] == 2)
+    assert (c2["a_line"], c2["b_line"]) == (4, 9)
+    out = lf.compute(pair["cups"], half_life=None, today=TODAY)
+    row = next(r for r in out["backtest"]["rows"] if r["date"] == "2026-09-02")
+    assert row["line_used"] == 5  # net 9 - 4
 
 
 def test_load_pair_missing_player_returns_none(pair_db):
@@ -717,7 +784,7 @@ def test_load_pair_feeds_compute(pair_db):
     assert out["formats"]["mk8dx"]["n"] == 1
     assert out["formats"]["mixed"]["n"] == 1
     # The mixed blocks give Switch its 2nd sample, so Switch gets a model.
-    assert out["editions"]["mk8dx"]["n_samples"] == 2
+    assert len(lf.edition_samples(pair["cups"], None, TODAY)["mk8dx"]) == 2
     assert out["formats"]["mk8dx"]["rec"] is not None
 
 
@@ -747,10 +814,12 @@ def test_page_renders(client, pair_env):
     _seed_pair(client)
     resp = client.get("/line-finder")
     assert resp.status_code == 200
+    assert resp.headers["Cache-Control"] == "no-store"
     html = resp.get_data(as_text=True)
     assert "<title>Line Finder — KM Tracker</title>" in html
     assert 'id="line-finder"' in html
     assert 'data-endpoint="/line-finder/data"' in html
+    assert 'data-cup-edit-url="/cups/0/edit"' in html
     assert 'data-half-life="90"' in html
     assert 'data-two-player="0"' in html
     assert "js/line_finder.js" in html
@@ -770,6 +839,7 @@ def test_page_empty_state_when_a_player_is_missing(client, monkeypatch):
     create_player(client, "A")
     resp = client.get("/line-finder")
     assert resp.status_code == 200
+    assert resp.headers["Cache-Control"] == "no-store"
     html = resp.get_data(as_text=True)
     assert "Nobody" in html and "players list" in html
     assert 'id="line-finder"' not in html
@@ -796,12 +866,12 @@ def test_data_json_shape(client, pair_env):
     assert d["settings"]["half_life"] == 90 and d["settings"]["two_player"] is False
     assert d["n_cups"] == 4
     assert set(d["formats"]) == {"wii", "mk8dx", "mixed"}
-    for key in ("lines", "editions", "trend", "backtest", "line_history", "cups", "stored_line"):
+    for key in ("lines", "trend", "backtest", "line_history", "cups"):
         assert key in d
     assert d["formats"]["wii"]["rec"] is not None
     assert len(d["formats"]["wii"]["fitted"]) == len(d["lines"])
     assert d["formats"]["mixed"]["actual_source"] == "pairs"
-    assert d["stored_line"] == 0
+    assert d["line_history"]["stored_line"] == 0
 
 
 def test_data_two_player_and_unweighted(client, pair_env):

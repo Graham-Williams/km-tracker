@@ -296,6 +296,7 @@
       tile.appendChild(value);
       var sub = [];
       if (fm.rec != null) sub.push(pct(fm.fitted_at_rec) + ' fitted', '±' + fm.se.toFixed(1));
+      if (fm.rec_within_noise) sub.push('inside the noise');
       sub.push(plural(fm.n, 'cup'));
       tile.appendChild(el('div', { class: 'lf-tile-sub', text: sub.join(' · ') }));
       var notes = el('div', { class: 'lf-tile-n' });
@@ -610,7 +611,7 @@
     var s = d.backtest.summary;
     var any = FORMATS.some(function (f) { return s[f].n > 0; });
     box.appendChild(el('p', { class: 'lf-note lf-note-top', text:
-      'Walk the cups in order; for each one, recommend a line from only the cups played BEFORE it (same settings), apply it, and see who would have won — versus the line that was actually used. A cup needs at least 3 earlier samples of each console involved, otherwise it is skipped as "not enough history".' }));
+      'Walk the cups in order; for each one, recommend a line from only the cups played BEFORE it (same settings), apply it, and see who would have won — versus the line that was actually used (net of any line the other player had). A cup needs at least 12 earlier races — three cups\' worth — on each console involved, otherwise it is skipped as "not enough history".' }));
     if (!any) {
       box.appendChild(el('p', { class: 'empty', text: 'Not enough history to backtest yet.' }));
       return;
@@ -717,9 +718,13 @@
       el('th', { class: 'num', text: 'Margin' }), el('th', { class: 'num', text: 'Line' })
     ])]));
     var tbody = el('tbody');
+    var editUrl = root.dataset.cupEditUrl || '';
     d.cups.forEach(function (c) {
+      var dateCell = editUrl
+        ? el('a', { href: editUrl.replace('/0/', '/' + c.id + '/'), title: 'Open this cup', text: fmtDateShort(c.date) })
+        : fmtDateShort(c.date);
       tbody.appendChild(el('tr', {}, [
-        el('td', { text: fmtDateShort(c.date) }),
+        el('td', {}, [dateCell]),
         el('td', { text: c.format_label }),
         el('td', { class: 'num', text: String(c.n_players) }),
         el('td', { class: 'num', text: String(c.a_score) }),

@@ -56,8 +56,10 @@ PAIRS_CAP = 100
 
 # Per-race sd needs at least this many samples of an edition.
 MIN_SD_SAMPLES = 2
-# Backtest: prior samples of each needed edition before a recommendation.
-BACKTEST_MIN_SAMPLES = 3
+# Backtest: prior RACES of each needed edition before a recommendation —
+# three cups' worth, counted in races so mixed-cup blocks (2 races) don't
+# satisfy it three-for-three.
+BACKTEST_MIN_RACES = 3 * RACES_PER_CUP
 RECENT_DAYS = 90
 
 FORMATS = ("wii", "mk8dx", "mixed")
@@ -320,9 +322,9 @@ def _mean(values):
 
 def _recommend_from(prior, fmt, half_life, as_of):
     """Recommended line for a `fmt` cup using only `prior` cups, or None when
-    any needed edition has fewer than BACKTEST_MIN_SAMPLES prior samples."""
+    any needed edition has fewer than BACKTEST_MIN_RACES prior races."""
     samples = edition_samples(prior, half_life, as_of)
-    if any(len(samples[e]) < BACKTEST_MIN_SAMPLES for e in FORMAT_RACES[fmt]):
+    if any(sum(r for _, r, _ in samples[e]) < BACKTEST_MIN_RACES for e in FORMAT_RACES[fmt]):
         return None
     stats = {e: edition_stats(samples[e]) for e in BASE_EDITIONS}
     model = format_model(fmt, stats)
@@ -332,8 +334,10 @@ def _recommend_from(prior, fmt, half_life, as_of):
 def backtest(cups, half_life):
     """Walk the cups chronologically; for each, recommend a line from the cups
     BEFORE it (same settings) and record who would have won under that line
-    and under the line actually used. Weights are taken relative to the cup's
-    own date — which is what would have been computed that night."""
+    and under the line actually used. "Used" is the NET line the app scored
+    the cup with — the receiver's `scores.line` minus the favourite's — since
+    winners are decided on line_score. Weights are taken relative to the
+    cup's own date — which is what would have been computed that night."""
     ordered = sorted(cups, key=_sort_key)
     rows = []
     summary = {
@@ -348,10 +352,9 @@ def backtest(cups, half_life):
     for i, cup in enumerate(ordered):
         fmt = cup["game_edition"]
         margin = margin_of(cup)
-        used = cup["b_line"]
+        used = cup["b_line"] - cup.get("a_line", 0)
         rec = _recommend_from(ordered[:i], fmt, half_life, cup_date(cup))
         row = {
-            "cup_id": cup["id"],
             "date": str(cup["date"])[:10],
             "format": fmt,
             "margin": margin,
@@ -377,7 +380,6 @@ def margin_trend(cups, half_life):
     ordered = sorted(cups, key=_sort_key)
     points = [
         {
-            "cup_id": c["id"],
             "date": str(c["date"])[:10],
             "format": c["game_edition"],
             "margin": margin_of(c),
@@ -405,14 +407,14 @@ def margin_trend(cups, half_life):
 
 def line_history(cups, line_changes, stored_line):
     """The receiver's line over time: every cup's line actually used, merged
-    with the before/after of each recorded line change."""
+    with the before/after of each recorded line change (only changes on the
+    pair's own cups are ever passed in — see load_pair)."""
     changes_by_cup = {lc["cup_id"]: lc for lc in line_changes}
     rows = []
     for c in sorted(cups, key=_sort_key):
         lc = changes_by_cup.get(c["id"])
         rows.append(
             {
-                "cup_id": c["id"],
                 "date": str(c["date"])[:10],
                 "format": c["game_edition"],
                 "line_used": c["b_line"],
@@ -420,19 +422,7 @@ def line_history(cups, line_changes, stored_line):
                 "line_after": None if lc is None else lc["line_after"],
             }
         )
-    return {
-        "rows": rows,
-        "changes": [
-            {
-                "cup_id": lc["cup_id"],
-                "date": str(lc["date"])[:10],
-                "line_before": lc["line_before"],
-                "line_after": lc["line_after"],
-            }
-            for lc in line_changes
-        ],
-        "stored_line": stored_line,
-    }
+    return {"rows": rows, "stored_line": stored_line}
 
 
 # ---------------------------------------------------------------------------
@@ -450,17 +440,21 @@ def _tile_notes(fmt, a, b, cups, all_cups, fm, stats, half_life, today, stored_l
             f"Not enough {label} cups to fit a line yet — each console needs at "
             f"least {MIN_SD_SAMPLES} samples."
         )
+    elif fm["rec_within_noise"]:
+        notes.append(
+            f"{a} wins about {round(fm['fitted_at_rec'])}% of {label} cups at even "
+            f"(fitted, ±{fm['se']:.1f})."
+        )
+        notes.append(
+            f"Fitted {fmt_signed(fm['model']['mean'])} ± {fm['se']:.1f} — not "
+            f"distinguishable from even, so play it straight."
+        )
     else:
         notes.append(
             f"{a} wins about {round(fm['fitted_at_rec'])}% of {label} cups at "
             f"{fmt_line(fm['rec'])} (fitted, ±{fm['se']:.1f}). "
-            f"Use {fmt_line(fm['half_line'])} to rule out ties."
+            f"Use {fmt_line(half_line(fm['model']['mean'], fm['rec']))} to rule out ties."
         )
-        if fm["rec_within_noise"]:
-            notes.append(
-                f"Fitted {fmt_signed(fm['model']['mean'])} ± {fm['se']:.1f} — not "
-                f"distinguishable from even, so play it straight."
-            )
     own = [c for c in cups if c["game_edition"] == fmt]
     if fmt in BASE_EDITIONS and own:
         margins = [margin_of(c) for c in own]
@@ -535,7 +529,9 @@ def compute(
     line_changes=(),
     stored_line=None,
 ):
-    """Everything the page renders, as one JSON-serialisable dict.
+    """Everything the page renders — and nothing it doesn't — as one
+    JSON-serialisable dict (the raw fitted mean/sd and SE stay in for the
+    tiles; cup ids appear only on `cups[]`, which links to each cup).
 
     `cups`: dicts with id, date ('YYYY-MM-DD…'), game_edition, first_edition,
     n_players, a_score, b_score, a_block1, a_block2, b_block1, b_block2,
@@ -583,10 +579,8 @@ def compute(
             "rec": rec,
             "rec_within_noise": within_noise,
             "se": None if model is None else _r(model["se"], 2),
-            "half_line": None if rec is None else half_line(model["mean"], rec),
             "fitted_at_rec": None if rec is None else _r(fitted_pct(model["mean"], model["sd"], rec), 2),
             "margins": real,
-            "dates": [str(c["date"])[:10] for c in cups if c["game_edition"] == fmt],
             "n_players": [c["n_players"] for c in cups if c["game_edition"] == fmt],
         }
         extra = {
@@ -627,22 +621,11 @@ def compute(
         "n_cups": len(cups),
         "n_all_cups": len(all_cups),
         "lines": LINES,
-        "editions": {
-            e: {
-                "label": edition_label(e),
-                "n_samples": stats[e]["n_samples"],
-                "races": stats[e]["races"],
-                "mu": _r(stats[e]["mu"]),
-                "sd": _r(stats[e]["sd"]),
-            }
-            for e in BASE_EDITIONS
-        },
         "formats": formats,
         "trend": margin_trend(cups, half_life),
         "backtest": backtest(cups, half_life),
         "line_history": line_history(cups, line_changes, stored_line),
         "cups": cup_rows,
-        "stored_line": stored_line,
     }
 
 
@@ -665,7 +648,10 @@ def load_pair(conn, players=DEFAULT_PLAYERS):
     when either name has no players row (the page renders an empty state).
     Cups: status='completed', not soft-deleted, BOTH players have a scores
     row. n_players is the cup_players count, falling back to the scores count
-    for cups entered by hand (POST /cups writes no cup_players rows).
+    for cups entered by hand (POST /cups writes no cup_players rows). The
+    receiver's line_changes are limited to THOSE SAME CUPS — a line change
+    from a cup the favourite wasn't in is not the pair's business and must
+    not be serialised.
     """
     ids = []
     for name in players:
@@ -680,7 +666,7 @@ def load_pair(conn, players=DEFAULT_PLAYERS):
                sa.score AS a_score, sb.score AS b_score,
                sa.block1_score AS a_block1, sa.block2_score AS a_block2,
                sb.block1_score AS b_block1, sb.block2_score AS b_block2,
-               sb.line AS b_line,
+               sa.line AS a_line, sb.line AS b_line,
                (SELECT COUNT(*) FROM cup_players cp WHERE cp.cup_id = c.id) AS n_cup_players,
                (SELECT COUNT(*) FROM scores s WHERE s.cup_id = c.id) AS n_scores
         FROM cups c
@@ -706,17 +692,21 @@ def load_pair(conn, players=DEFAULT_PLAYERS):
                 "a_block2": r["a_block2"],
                 "b_block1": r["b_block1"],
                 "b_block2": r["b_block2"],
+                "a_line": r["a_line"],
                 "b_line": r["b_line"],
             }
         )
     changes = conn.execute(
         """
         SELECT lc.cup_id, c.date, lc.line_before, lc.line_after
-        FROM line_changes lc JOIN cups c ON c.id = lc.cup_id
-        WHERE lc.player_id = ?
+        FROM line_changes lc
+        JOIN cups c ON c.id = lc.cup_id
+        JOIN scores sa ON sa.cup_id = c.id AND sa.player_id = ?
+        JOIN scores sb ON sb.cup_id = c.id AND sb.player_id = ?
+        WHERE lc.player_id = ? AND c.status = 'completed' AND c.deleted_at IS NULL
         ORDER BY c.date, lc.id
         """,
-        (b_id,),
+        (a_id, b_id, b_id),
     ).fetchall()
     return {
         "players": tuple(players),

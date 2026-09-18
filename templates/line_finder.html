@@ -11,6 +11,7 @@
 {% else %}
 <div id="line-finder" class="line-finder"
      data-endpoint="{{ url_for('line_finder_data') }}"
+     data-cup-edit-url="{{ url_for('edit_cup', cup_id=0) }}"
      data-half-life="{{ params.half_life if params.half_life is not none else 'none' }}"
      data-two-player="{{ 1 if params.two_player else 0 }}"
      data-actual="{{ 1 if params.actual else 0 }}"

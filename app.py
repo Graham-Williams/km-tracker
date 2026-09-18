@@ -26,6 +26,7 @@ from flask import (
     abort,
     flash,
     jsonify,
+    make_response,
     redirect,
     render_template,
     request,
@@ -3506,13 +3507,19 @@ def line_finder():
     except InvalidInput as e:
         abort(400, description=str(e))
     names, pair = _load_line_finder_pair()
-    return render_template(
-        "line_finder.html",
-        params=params,
-        player_a=names[0],
-        player_b=names[1],
-        pair_available=pair is not None,
+    resp = make_response(
+        render_template(
+            "line_finder.html",
+            params=params,
+            player_a=names[0],
+            player_b=names[1],
+            pair_available=pair is not None,
+        )
     )
+    # Same posture as the JSON: the page embeds the pair's names and the
+    # current controls, and sits behind a session cookie — never cache it.
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 
 @app.route("/line-finder/data")
