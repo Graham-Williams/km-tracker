@@ -36,6 +36,14 @@ from werkzeug.routing import IntegerConverter, ValidationError
 
 from db import get_connection, get_db_path, init_db
 from extraction import ExtractionError, extract_standings, extraction_enabled
+from line_finder import (
+    DEFAULT_HALF_LIFE,
+    MAX_HALF_LIFE,
+    MIN_HALF_LIFE,
+    compute as line_finder_compute,
+    line_finder_players,
+    load_pair,
+)
 from maps import (
     BASE_EDITIONS,
     DEFAULT_EDITION,
@@ -3421,6 +3429,100 @@ def extract_scores():
             ],
         }
     )
+
+
+
+# --- Line Finder (read-only) ---
+#
+# "How many points should the second player get at the start of a cup for it
+# to be a coin flip?" — per format, with the evidence. All the math lives in
+# line_finder.py; these routes only validate the query string, load the pair
+# and serialise. Both sit behind the password gate like every other page
+# (nothing here is in GATE_EXEMPT_PATHS), and there is no write path.
+
+
+def parse_line_finder_params(args):
+    """Validate the Line Finder query string.
+
+    half_life: int 14..365, or the literal "none"/"all" for unweighted
+    (default 90). two_player: "0"/"1" (default 0). actual/fitted: "0"/"1"
+    (default 1) — view-only flags the page reads back so a shared URL opens
+    the same way. Anything else raises InvalidInput (-> 400, never a 500).
+    """
+    raw = (args.get("half_life") or str(DEFAULT_HALF_LIFE)).strip().lower()
+    if raw in ("none", "all"):
+        half_life = None
+    else:
+        try:
+            half_life = int(raw)
+        except ValueError:
+            raise InvalidInput("half_life must be a whole number of days, or 'none'.")
+        if not (MIN_HALF_LIFE <= half_life <= MAX_HALF_LIFE):
+            raise InvalidInput(
+                f"half_life must be between {MIN_HALF_LIFE} and {MAX_HALF_LIFE} days, or 'none'."
+            )
+    flags = {}
+    for name, default in (("two_player", "0"), ("actual", "1"), ("fitted", "1")):
+        value = (args.get(name) or default).strip()
+        if value not in ("0", "1"):
+            raise InvalidInput(f"{name} must be 0 or 1.")
+        flags[name] = value == "1"
+    return {"half_life": half_life, **flags}
+
+
+def _load_line_finder_pair():
+    names = line_finder_players()
+    conn = get_connection()
+    try:
+        return names, load_pair(conn, names)
+    finally:
+        conn.close()
+
+
+@app.route("/line-finder")
+def line_finder():
+    try:
+        params = parse_line_finder_params(request.args)
+    except InvalidInput as e:
+        abort(400, description=str(e))
+    names, pair = _load_line_finder_pair()
+    return render_template(
+        "line_finder.html",
+        params=params,
+        player_a=names[0],
+        player_b=names[1],
+        pair_available=pair is not None,
+    )
+
+
+@app.route("/line-finder/data")
+def line_finder_data():
+    try:
+        params = parse_line_finder_params(request.args)
+    except InvalidInput as e:
+        return jsonify({"error": str(e)}), 400
+    names, pair = _load_line_finder_pair()
+    if pair is None:
+        return jsonify(
+            {
+                "available": False,
+                "players": {"a": names[0], "b": names[1]},
+                "message": (
+                    f"Line Finder needs players named {names[0]!r} and {names[1]!r} "
+                    f"— one of them isn't in the players list."
+                ),
+            }
+        )
+    data = line_finder_compute(
+        pair["cups"],
+        half_life=params["half_life"],
+        two_player=params["two_player"],
+        today=datetime.now(timezone.utc).date(),
+        players=pair["players"],
+        line_changes=pair["line_changes"],
+        stored_line=pair["stored_line"],
+    )
+    return jsonify(data)
 
 
 if __name__ == "__main__":

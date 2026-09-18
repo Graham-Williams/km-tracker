@@ -600,3 +600,208 @@ def test_load_pair_feeds_compute(pair_db):
     # The mixed blocks give Switch its 2nd sample, so Switch gets a model.
     assert out["editions"]["mk8dx"]["n_samples"] == 2
     assert out["formats"]["mk8dx"]["rec"] is not None
+
+
+# =============================================================================
+# Routes
+# =============================================================================
+
+
+def _seed_pair(client, names=("A", "B")):
+    create_player(client, names[0])
+    create_player(client, names[1], has_line=True)
+    conn = get_connection()
+    _insert_cup(conn, "2026-09-01 19:00:00", "wii", {1: (60, 0), 2: (40, 9)}, cup_players=[1, 2])
+    _insert_cup(conn, "2026-09-02 19:00:00", "wii", {1: (50, 0), 2: (45, 9)}, cup_players=[1, 2])
+    _insert_cup(conn, "2026-09-03 19:00:00", "mk8dx", {1: (40, 0), 2: (41, 0)}, cup_players=[1, 2])
+    _insert_cup(conn, "2026-09-04 19:00:00", "mk8dx", {1: (44, 0), 2: (41, 0)}, cup_players=[1, 2])
+    conn.commit()
+    conn.close()
+
+
+@pytest.fixture
+def pair_env(monkeypatch):
+    monkeypatch.setenv("LINE_FINDER_PLAYERS", "A,B")
+
+
+def test_page_renders(client, pair_env):
+    _seed_pair(client)
+    resp = client.get("/line-finder")
+    assert resp.status_code == 200
+    html = resp.get_data(as_text=True)
+    assert "<title>Line Finder — KM Tracker</title>" in html
+    assert 'id="line-finder"' in html
+    assert 'data-endpoint="/line-finder/data"' in html
+    assert 'data-half-life="90"' in html
+    assert 'data-two-player="0"' in html
+    assert "js/line_finder.js" in html
+
+
+def test_page_reflects_query_params(client, pair_env):
+    _seed_pair(client)
+    html = client.get("/line-finder?half_life=none&two_player=1&actual=0").get_data(as_text=True)
+    assert 'data-half-life="none"' in html
+    assert 'data-two-player="1"' in html
+    assert 'data-actual="0"' in html
+    assert 'data-fitted="1"' in html
+
+
+def test_page_empty_state_when_a_player_is_missing(client, monkeypatch):
+    monkeypatch.setenv("LINE_FINDER_PLAYERS", "A,Nobody")
+    create_player(client, "A")
+    resp = client.get("/line-finder")
+    assert resp.status_code == 200
+    html = resp.get_data(as_text=True)
+    assert "Nobody" in html and "players list" in html
+    assert 'id="line-finder"' not in html
+
+
+def test_page_default_pair_names_when_env_unset(client, monkeypatch):
+    monkeypatch.delenv("LINE_FINDER_PLAYERS", raising=False)
+    html = client.get("/line-finder").get_data(as_text=True)
+    assert lf.DEFAULT_PLAYERS[0] in html and lf.DEFAULT_PLAYERS[1] in html
+
+
+def test_home_links_to_line_finder(client):
+    assert 'href="/line-finder"' in client.get("/").get_data(as_text=True)
+
+
+def test_data_json_shape(client, pair_env):
+    _seed_pair(client)
+    resp = client.get("/line-finder/data")
+    assert resp.status_code == 200
+    assert resp.mimetype == "application/json"
+    d = resp.get_json()
+    assert d["available"] is True
+    assert d["players"] == {"a": "A", "b": "B"}
+    assert d["settings"]["half_life"] == 90 and d["settings"]["two_player"] is False
+    assert d["n_cups"] == 4
+    assert set(d["formats"]) == {"wii", "mk8dx", "mixed"}
+    for key in ("lines", "editions", "trend", "backtest", "line_history", "cups", "stored_line"):
+        assert key in d
+    assert d["formats"]["wii"]["rec"] is not None
+    assert len(d["formats"]["wii"]["fitted"]) == len(d["lines"])
+    assert d["formats"]["mixed"]["actual_source"] == "pairs"
+    assert d["stored_line"] == 0
+
+
+def test_data_two_player_and_unweighted(client, pair_env):
+    _seed_pair(client)
+    conn = get_connection()
+    create_player(client, "C")
+    _insert_cup(conn, "2026-09-05 19:00:00", "wii", {1: (60, 0), 2: (40, 9), 3: (10, 0)}, cup_players=[1, 2, 3])
+    conn.commit()
+    conn.close()
+    all_cups = client.get("/line-finder/data?half_life=all").get_json()
+    assert all_cups["settings"]["half_life"] is None
+    assert all_cups["n_cups"] == 5
+    two = client.get("/line-finder/data?half_life=none&two_player=1").get_json()
+    assert two["n_cups"] == 4
+    assert all(c["n_players"] == 2 for c in two["cups"])
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "half_life=13",
+        "half_life=366",
+        "half_life=abc",
+        "half_life=1e2",
+        "half_life=-90",
+        "half_life=99999999999999999999",
+        "two_player=2",
+        "two_player=yes",
+        "actual=maybe",
+        "fitted=2",
+    ],
+)
+def test_bad_params_are_400_not_500(client, pair_env, query):
+    _seed_pair(client)
+    data = client.get("/line-finder/data?" + query)
+    assert data.status_code == 400
+    assert "error" in data.get_json()
+    page = client.get("/line-finder?" + query)
+    assert page.status_code == 400
+
+
+def test_empty_params_fall_back_to_defaults(client, pair_env):
+    _seed_pair(client)
+    d = client.get("/line-finder/data?half_life=&two_player=").get_json()
+    assert d["settings"] == {"half_life": 90, "two_player": False, "today": d["settings"]["today"]}
+    html = client.get("/line-finder?actual=&fitted=").get_data(as_text=True)
+    assert 'data-actual="1"' in html and 'data-fitted="1"' in html
+
+
+def test_data_empty_when_player_missing(client, monkeypatch):
+    monkeypatch.setenv("LINE_FINDER_PLAYERS", "A,Nobody")
+    create_player(client, "A")
+    resp = client.get("/line-finder/data")
+    assert resp.status_code == 200
+    d = resp.get_json()
+    assert d["available"] is False
+    assert "Nobody" in d["message"]
+
+
+def test_data_with_no_cups(client, pair_env):
+    create_player(client, "A")
+    create_player(client, "B")
+    d = client.get("/line-finder/data").get_json()
+    assert d["available"] is True and d["n_cups"] == 0
+
+
+def test_data_excludes_non_completed_and_deleted_cups(client, pair_env):
+    _seed_pair(client)
+    conn = get_connection()
+    _insert_cup(conn, "2026-09-06 19:00:00", "wii", {1: (60, 0), 2: (40, 9)}, status="cancelled", cup_players=[1, 2])
+    _insert_cup(conn, "2026-09-07 19:00:00", "wii", {1: (60, 0), 2: (40, 9)}, status="in_progress", cup_players=[1, 2])
+    _insert_cup(conn, "2026-09-08 19:00:00", "wii", {1: (60, 0), 2: (40, 9)}, deleted=True, cup_players=[1, 2])
+    conn.commit()
+    conn.close()
+    d = client.get("/line-finder/data").get_json()
+    assert d["n_cups"] == 4
+    assert {c["id"] for c in d["cups"]} == {1, 2, 3, 4}
+
+
+def test_routes_are_read_only(client, pair_env):
+    _seed_pair(client)
+    for path in ("/line-finder", "/line-finder/data"):
+        assert client.post(path).status_code == 405
+
+
+def test_routes_behind_password_gate(client, monkeypatch):
+    monkeypatch.setattr(app_module, "APP_PASSWORD", "hunter2")
+    monkeypatch.setattr(app_module, "PASSWORD_GATE_ENABLED", True)
+    for path in ("/line-finder", "/line-finder/data"):
+        resp = client.get(path)
+        assert resp.status_code == 302
+        assert "/login" in resp.headers["Location"]
+    # And the JSON endpoint stays gated even when asked for JSON.
+    resp = client.get("/line-finder/data?half_life=30", headers={"Accept": "application/json"})
+    assert resp.status_code == 302
+
+
+def test_seeded_staging_pair_has_cups_on_every_console(tmp_path, monkeypatch):
+    """The compose file points staging's Line Finder at Test Toad + Dummy Diddy;
+    the seed must give that pair cups on both consoles, a mixed cup, and some
+    2-player cups, or the staging page is an empty state."""
+    import os
+    import sys
+
+    scripts = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts")
+    if scripts not in sys.path:
+        sys.path.insert(0, scripts)
+    import seed_staging
+
+    db_path = str(tmp_path / "km_tracker.staging.db")
+    assert seed_staging.main(["--db", db_path, "--reset"]) == 0
+    conn = get_connection(db_path)
+    try:
+        pair = lf.load_pair(conn, ("Test Toad", "Dummy Diddy"))
+    finally:
+        conn.close()
+    assert pair is not None
+    editions = {c["game_edition"] for c in pair["cups"]}
+    assert editions == {"wii", "mk8dx", "mixed"}
+    assert sum(1 for c in pair["cups"] if c["n_players"] == 2) >= 3
+    out = lf.compute(pair["cups"], half_life=None, today=date(2026, 9, 18))
+    assert all(out["formats"][f]["rec"] is not None for f in ("wii", "mk8dx", "mixed"))
