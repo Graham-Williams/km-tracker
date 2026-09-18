@@ -52,6 +52,11 @@ NUM_COMPLETED_CUPS = 11
 NUM_IN_PROGRESS_CUPS = 1
 NUM_CUPS = NUM_COMPLETED_CUPS + NUM_IN_PROGRESS_CUPS
 
+# Completed-cup indexes played head-to-head by the first two seeded players
+# (two Wii cups + one Switch cup, per seed_cup_edition) — the staging pair for
+# /line-finder, which has an "only cups with just the two of us" filter.
+TWO_PLAYER_CUP_INDEXES = frozenset({8, 9, 10})
+
 # The in-progress cup is a MIXED ("Wii + Switch") cup parked exactly at the
 # console swap: both first-half races played, so loading it puts staging on the
 # swap-reminder + second-half-wheel screen — the newest surface for the QA gate
@@ -183,9 +188,15 @@ def _insert_completed_cups(conn, rng, player_ids):
 
         edition, first_edition = seed_cup_edition(c)
 
-        # Pick 4-6 players for this cup (varied field sizes).
-        field_size = rng.randint(4, len(player_ids))
-        cup_players = rng.sample(player_ids, field_size)
+        # Pick 4-6 players for this cup (varied field sizes) — except the last
+        # few, which are head-to-head between the first two seeded players
+        # (the LINE_FINDER_PLAYERS pair on staging) so /line-finder has some
+        # "just the two of us" cups to filter down to.
+        if c in TWO_PLAYER_CUP_INDEXES:
+            cup_players = list(player_ids[:2])
+        else:
+            field_size = rng.randint(4, len(player_ids))
+            cup_players = rng.sample(player_ids, field_size)
 
         rows = []
         for pid in cup_players:
@@ -217,6 +228,14 @@ def _insert_completed_cups(conn, rng, player_ids):
             (date_utc, notes, edition, first_edition),
         )
         cup_id = cur.lastrowid
+        # A live session records its roster in cup_players; mirror that so
+        # seeded history looks like session-played cups (and per-cup player
+        # counts, e.g. Line Finder's 2-player filter, read the same way).
+        for pid in cup_players:
+            conn.execute(
+                "INSERT INTO cup_players (cup_id, player_id) VALUES (?, ?)",
+                (cup_id, pid),
+            )
         # Mixed cups get real race rows so the completion/edit screens have
         # per-race console dropdowns to exercise. (Pure seeded cups keep their
         # existing race-less shape.)
