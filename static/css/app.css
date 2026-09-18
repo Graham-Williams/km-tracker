@@ -1318,3 +1318,15 @@ input[type="range"] {
   color: var(--color-muted);
   margin-bottom: var(--space-2);
 }
+
+/* Backtest summary tallies: one outcome per line, wrapping inside the cell. */
+.lf-table td.lf-tally-cell {
+  white-space: normal;
+  vertical-align: top;
+}
+
+.lf-tally {
+  display: inline-block;
+  text-align: right;
+  line-height: 1.35;
+}

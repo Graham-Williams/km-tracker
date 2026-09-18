@@ -623,14 +623,20 @@
       el('th', { class: 'num', text: 'Line used' })
     ])]));
     var tbody = el('tbody');
-    var tally = function (c) { return d.players.a + ' ' + c.a + ' · ' + d.players.b + ' ' + c.b + (c.tie ? ' · tie ' + c.tie : ''); };
+    // One line per outcome so long player names wrap inside the cell instead
+    // of pushing the table into a sideways scroll on a phone.
+    var tally = function (c) {
+      var lines = [d.players.a + ' ' + c.a, d.players.b + ' ' + c.b];
+      if (c.tie) lines.push('tie ' + c.tie);
+      return el('div', { class: 'lf-tally' }, lines.map(function (t) { return el('div', { text: t }); }));
+    };
     FORMATS.forEach(function (f) {
       var row = s[f];
       tbody.appendChild(el('tr', {}, [
         el('td', { text: d.formats[f].label }),
         el('td', { class: 'num', text: row.n + (row.skipped ? ' (+' + row.skipped + ' skipped)' : '') }),
-        el('td', { class: 'num', text: row.n ? tally(row.rec) : '—' }),
-        el('td', { class: 'num', text: row.n ? tally(row.used) : '—' })
+        el('td', { class: 'num lf-tally-cell' }, [row.n ? tally(row.rec) : '—']),
+        el('td', { class: 'num lf-tally-cell' }, [row.n ? tally(row.used) : '—'])
       ]));
     });
     table.appendChild(tbody);
