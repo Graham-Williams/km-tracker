@@ -133,6 +133,20 @@ def recommend(mean):
     return int(math.floor(abs(mean) + 0.5)) * (1 if mean >= 0 else -1)
 
 
+def recommend_line(model):
+    """(recommended line, within_noise) for a format model.
+
+    The model mean rounded half away from zero — unless the mean is smaller
+    than its own standard error (|mean| < se), in which case the edge is not
+    distinguishable from zero and the recommendation is "even" (0), flagged
+    so the tile can say why. Every consumer (tiles, chart markers, shaded
+    table rows, the backtest walk) goes through this one function.
+    """
+    if abs(model["mean"]) < model["se"]:
+        return 0, True
+    return recommend(model["mean"]), False
+
+
 def half_line(mean, rec):
     """The nearest half-point line to the mean — the tie-proof option."""
     return rec - 0.5 if mean < rec else rec + 0.5
@@ -143,7 +157,7 @@ def fmt_line(value):
     if isinstance(value, float) and not value.is_integer():
         whole = int(math.floor(abs(value)))
         sign = "-" if value < 0 else "+"
-        return f"{sign}{whole}½"
+        return f"{sign}{whole or ''}½"
     n = int(value)
     if n == 0:
         return "even"
@@ -287,7 +301,7 @@ def _recommend_from(prior, fmt, half_life, as_of):
         return None
     stats = {e: edition_stats(samples[e]) for e in BASE_EDITIONS}
     model = format_model(fmt, stats)
-    return None if model is None else recommend(model["mean"])
+    return None if model is None else recommend_line(model)[0]
 
 
 def backtest(cups, half_life):
@@ -417,6 +431,11 @@ def _tile_notes(fmt, a, b, cups, all_cups, fm, stats, half_life, today, stored_l
             f"{fmt_line(fm['rec'])} (fitted, ±{fm['se']:.1f}). "
             f"Use {fmt_line(fm['half_line'])} to rule out ties."
         )
+        if fm["rec_within_noise"]:
+            notes.append(
+                f"Fitted {fmt_signed(fm['model']['mean'])} ± {fm['se']:.1f} — not "
+                f"distinguishable from even, so play it straight."
+            )
     own = [c for c in cups if c["game_edition"] == fmt]
     if fmt in BASE_EDITIONS and own:
         margins = [margin_of(c) for c in own]
@@ -520,7 +539,7 @@ def compute(
             source = "real"
         actual, wins, ties = actual_curve(curve_margins)
         fitted = None if model is None else [fitted_pct(model["mean"], model["sd"], L) for L in LINES]
-        rec = None if model is None else recommend(model["mean"])
+        rec, within_noise = (None, False) if model is None else recommend_line(model)
         fm = {
             "label": FORMAT_LABELS[fmt],
             "n": len(real),
@@ -534,6 +553,7 @@ def compute(
             if model is None
             else {"mean": _r(model["mean"]), "sd": _r(model["sd"])},
             "rec": rec,
+            "rec_within_noise": within_noise,
             "se": None if model is None else _r(model["se"], 2),
             "half_line": None if rec is None else half_line(model["mean"], rec),
             "fitted_at_rec": None if rec is None else _r(fitted_pct(model["mean"], model["sd"], rec), 2),

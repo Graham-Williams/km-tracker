@@ -218,7 +218,23 @@ def test_fmt_line_renders_even_and_halves():
     assert lf.fmt_line(18) == "+18"
     assert lf.fmt_line(-4) == "-4"
     assert lf.fmt_line(8.5) == "+8½"
-    assert lf.fmt_line(-0.5) == "-0½"
+    assert lf.fmt_line(-0.5) == "-½"
+    assert lf.fmt_line(0.5) == "+½"
+
+
+@pytest.mark.parametrize(
+    "mean,se,expected",
+    [
+        (-0.6, 3.5, (0, True)),  # inside the noise -> even
+        (2.9, 3.0, (0, True)),
+        (18.4, 2.2, (18, False)),  # clear edge -> round(mean)
+        (-4.0, 3.5, (-4, False)),
+        (3.0, 3.0, (3, False)),  # boundary: |mean| == se is NOT inside
+        (0.0, 0.0, (0, False)),
+    ],
+)
+def test_recommend_line_is_even_inside_the_noise(mean, se, expected):
+    assert lf.recommend_line({"mean": mean, "sd": 1.0, "se": se}) == expected
 
 
 def test_half_line_is_the_half_step_nearest_the_mean():
@@ -252,9 +268,13 @@ def test_compute_recommendations_and_shape():
     assert out["n_cups"] == 7
     assert out["settings"] == {"half_life": None, "two_player": False, "today": "2026-09-18"}
     wii, sw, mixed = out["formats"]["wii"], out["formats"]["mk8dx"], out["formats"]["mixed"]
-    # Wii: mean margin 12.5 -> rec 13 (half away from zero on 12.5)
+    # Wii: mean margin 12.5 -> rec 13 (half away from zero on 12.5); the edge
+    # is well outside its standard error, so the rounding rule applies.
     assert wii["model"]["mean"] == pytest.approx(12.5)
     assert wii["rec"] == 13
+    assert wii["rec_within_noise"] is False
+    assert wii["se"] < 12.5
+    assert not any("distinguishable" in n for n in wii["notes"])
     assert wii["n"] == 4
     assert wii["actual_source"] == "real"
     # Switch: mean 0 -> "even"
@@ -287,6 +307,30 @@ def test_compute_recommendations_and_shape():
     assert [c["id"] for c in out["cups"]] == [7, 6, 5, 4, 3, 2, 1]
     assert out["cups"][-1]["line_used"] == 9
     assert out["cups"][-1]["format_label"] == "Wii"
+
+
+def test_compute_recommends_even_when_the_edge_is_inside_the_noise():
+    """Switch margins +1, +3, -2: mean +0.67 but SE ~1.2, so the fitted edge is
+    not distinguishable from zero -> recommend even (not +1), say why, and
+    keep the raw mean/SE in the JSON."""
+    cups = [
+        cup(1, "2026-09-01", "mk8dx", 41, 40),
+        cup(2, "2026-09-02", "mk8dx", 43, 40),
+        cup(3, "2026-09-03", "mk8dx", 38, 40),
+    ]
+    out = lf.compute(cups, half_life=None, today=TODAY, players=("A", "B"))
+    sw = out["formats"]["mk8dx"]
+    assert sw["model"]["mean"] == pytest.approx(2 / 3, abs=1e-3)
+    assert sw["se"] > abs(sw["model"]["mean"])
+    assert sw["rec"] == 0
+    assert sw["rec_within_noise"] is True
+    assert sw["fitted_at_rec"] == pytest.approx(lf.fitted_pct(2 / 3, sw["model"]["sd"], 0), abs=0.05)
+    assert any("not distinguishable from even" in n for n in sw["notes"])
+    assert any("Fitted +0.7 ± " in n for n in sw["notes"])
+    # The same edge with far less noise rounds normally.
+    tight = lf.compute(cups * 40, half_life=None, today=TODAY)["formats"]["mk8dx"]
+    assert tight["se"] < abs(tight["model"]["mean"])
+    assert tight["rec"] == 1 and tight["rec_within_noise"] is False
 
 
 def test_compute_uses_real_mixed_cups_over_the_pairs_proxy():
@@ -400,6 +444,22 @@ def test_backtest_walks_chronologically_with_min_history():
     }
     assert summary["mk8dx"]["n"] == 0 and summary["mk8dx"]["skipped"] == 3
     assert summary["mixed"]["n"] == 0 and summary["mixed"]["skipped"] == 0
+
+
+def test_backtest_recommends_even_inside_the_noise():
+    """Prior Switch cups +1, +3, -2 -> mean +0.67 inside SE ~1.2 -> the walk
+    hands the 4th cup an 'even' line, not +1 (same rule as the tiles)."""
+    cups = [
+        cup(1, "2026-09-01", "mk8dx", 41, 40),
+        cup(2, "2026-09-02", "mk8dx", 43, 40),
+        cup(3, "2026-09-03", "mk8dx", 38, 40),
+        cup(4, "2026-09-04", "mk8dx", 40, 40),  # margin 0 -> a tie at "even"
+    ]
+    out = lf.backtest(cups, half_life=None)
+    row = out["rows"][3]
+    assert row["rec_line"] == 0
+    assert row["rec_outcome"] == "tie"
+    assert out["summary"]["mk8dx"]["rec"] == {"a": 0, "b": 0, "tie": 1}
 
 
 def test_backtest_counts_ties_and_mixed_needs_both_editions():
