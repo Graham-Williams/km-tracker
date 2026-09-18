@@ -615,7 +615,7 @@
       return;
     }
     var wrap = el('div', { class: 'lf-table-wrap' });
-    var table = el('table', { class: 'table lf-table' });
+    var table = el('table', { class: 'table lf-table lf-table-summary' });
     table.appendChild(el('thead', {}, [el('tr', {}, [
       el('th', { text: 'Format' }),
       el('th', { class: 'num', text: 'Cups' }),
@@ -634,7 +634,7 @@
       var row = s[f];
       tbody.appendChild(el('tr', {}, [
         el('td', { text: d.formats[f].label }),
-        el('td', { class: 'num', text: row.n + (row.skipped ? ' (+' + row.skipped + ' skipped)' : '') }),
+        el('td', { class: 'num' }, [String(row.n), row.skipped ? el('div', { class: 'text-faint', text: '+' + row.skipped + ' skipped' }) : null]),
         el('td', { class: 'num lf-tally-cell' }, [row.n ? tally(row.rec) : '—']),
         el('td', { class: 'num lf-tally-cell' }, [row.n ? tally(row.used) : '—'])
       ]));
