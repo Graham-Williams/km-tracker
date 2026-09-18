@@ -135,6 +135,42 @@ def test_edition_stats_weighted_edge_and_unweighted_sd():
     assert st["n_samples"] == 2 and st["races"] == 8
 
 
+def test_edition_stats_zero_weight_sum_is_no_usable_samples():
+    # Every weight underflowed to 0.0 (cups far older than the half-life
+    # allows) -> no evidence, never a ZeroDivisionError.
+    st = lf.edition_stats([(20, 4, 0.0), (10, 4, 0.0)])
+    assert st == {"n_samples": 2, "races": 8, "mu": None, "sd": None}
+
+
+def test_future_dated_cup_never_breaks_the_math():
+    """A cup dated in the year 2400 alongside normal cups: it weighs 1 today
+    (clamped, no OverflowError), and when the backtest weights FROM its date
+    every prior weight underflows to 0 -> that row is 'not enough history',
+    not a ZeroDivisionError."""
+    cups = _history() + [cup(99, "2400-01-01", "wii", 60, 40, b_line=9)]
+    for hl in (14, 90):
+        out = lf.compute(cups, half_life=hl, today=TODAY, players=("A", "B"), stored_line=9)
+        assert out["n_cups"] == 8
+        assert out["formats"]["wii"]["rec"] is not None
+        future = out["backtest"]["rows"][-1]
+        assert future["date"] == "2400-01-01"
+        assert future["rec_line"] is None and future["rec_outcome"] is None
+        assert future["used_outcome"] == "a"
+        # The running mean at the future cup is that cup alone (weight 1).
+        assert out["trend"]["running"]["wii"][-1]["value"] == pytest.approx(20.0)
+        assert all(isinstance(n, str) for n in out["formats"]["wii"]["notes"])
+
+
+def test_all_ancient_cups_are_not_enough_evidence():
+    cups = [cup(1, "1900-01-01", "wii", 60, 40), cup(2, "1900-02-01", "wii", 50, 40)]
+    out = lf.compute(cups, half_life=14, today=TODAY)
+    wii = out["formats"]["wii"]
+    assert wii["n"] == 2 and wii["actual"] is not None
+    assert wii["rec"] is None and wii["fitted"] is None
+    assert any("Not enough" in n for n in wii["notes"])
+    assert any("recency-weighted n/a" in n for n in wii["notes"])
+
+
 def test_edition_stats_needs_two_samples_for_sd():
     st = lf.edition_stats([(20, 4, 1.0)])
     assert st["mu"] == 5.0
@@ -196,8 +232,31 @@ def test_fitted_pct_zero_spread_is_a_step():
 
 
 def test_pairs_proxy_is_every_wii_by_every_switch():
-    assert sorted(lf.pairs_proxy_margins([20, 10], [0])) == [5.0, 10.0]
-    assert lf.pairs_proxy_margins([], [0]) == []
+    margins, capped = lf.pairs_proxy_margins([20, 10], [0])
+    assert sorted(margins) == [5.0, 10.0] and capped is False
+    assert lf.pairs_proxy_margins([], [0]) == ([], False)
+
+
+def test_pairs_proxy_caps_at_the_most_recent_100_cups_per_console():
+    wii = list(range(101))  # chronological; the oldest (0) must drop
+    margins, capped = lf.pairs_proxy_margins(wii, [0])
+    assert capped is True and len(margins) == 100
+    assert 0.0 not in margins and 50.0 in margins  # 100/2 + 0
+    margins, capped = lf.pairs_proxy_margins(wii[:100], [0])
+    assert capped is False and len(margins) == 100
+
+
+def test_compute_reports_the_pairs_cap():
+    cups = [cup(i, f"2020-01-{1 + i % 28:02d}", "wii", 40 + (i % 5), 40) for i in range(101)]
+    cups += [cup(500, "2026-09-01", "mk8dx", 40, 40)]
+    out = lf.compute(cups, half_life=None, today=TODAY)
+    mixed = out["formats"]["mixed"]
+    assert mixed["actual_source"] == "pairs"
+    assert mixed["actual_n"] == 100 and mixed["pairs_capped"] is True
+    assert any("most recent 100 cups per console" in n for n in mixed["notes"])
+    assert out["formats"]["wii"]["pairs_capped"] is False
+    small = lf.compute(_history(), half_life=None, today=TODAY)["formats"]["mixed"]
+    assert small["pairs_capped"] is False
 
 
 # =============================================================================
@@ -769,8 +828,16 @@ def test_data_two_player_and_unweighted(client, pair_env):
         "half_life=1e2",
         "half_life=-90",
         "half_life=99999999999999999999",
+        "half_life=%2B14",  # "+14"
+        "half_life=1_5",
+        "half_life=%2090",  # " 90"
+        "half_life=90%20",  # "90 "
+        "half_life=%EF%BC%91%EF%BC%94",  # fullwidth digits
+        "half_life=None",
+        "half_life=ALL",
         "two_player=2",
         "two_player=yes",
+        "two_player=%201",
         "actual=maybe",
         "fitted=2",
     ],
@@ -792,11 +859,33 @@ def test_empty_params_fall_back_to_defaults(client, pair_env):
     assert 'data-actual="1"' in html and 'data-fitted="1"' in html
 
 
+def test_data_is_never_cached(client, pair_env):
+    _seed_pair(client)
+    assert client.get("/line-finder/data").headers["Cache-Control"] == "no-store"
+    assert client.get("/line-finder/data?half_life=13").headers["Cache-Control"] == "no-store"
+
+
+def test_data_future_dated_cup_is_200(client, pair_env):
+    _seed_pair(client)
+    conn = get_connection()
+    _insert_cup(conn, "2400-01-01 19:00:00", "wii", {1: (60, 0), 2: (40, 9)}, cup_players=[1, 2])
+    conn.commit()
+    conn.close()
+    for hl in (14, 90, "none"):
+        resp = client.get(f"/line-finder/data?half_life={hl}")
+        assert resp.status_code == 200, hl
+        d = resp.get_json()
+        assert d["n_cups"] == 5
+        assert d["backtest"]["rows"][-1]["date"] == "2400-01-01"
+    assert client.get("/line-finder?half_life=14").status_code == 200
+
+
 def test_data_empty_when_player_missing(client, monkeypatch):
     monkeypatch.setenv("LINE_FINDER_PLAYERS", "A,Nobody")
     create_player(client, "A")
     resp = client.get("/line-finder/data")
     assert resp.status_code == 200
+    assert resp.headers["Cache-Control"] == "no-store"
     d = resp.get_json()
     assert d["available"] is False
     assert "Nobody" in d["message"]

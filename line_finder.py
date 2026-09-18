@@ -50,6 +50,10 @@ LINES = [x / 2 for x in range(LINE_MIN * 2, LINE_MAX * 2 + 1)]
 RACES_PER_CUP = 4
 RACES_PER_BLOCK = 2
 
+# The Wii x Switch pairs proxy is O(n_wii * n_switch); cap each side at the
+# most recent PAIRS_CAP cups so a long history can't blow up the response.
+PAIRS_CAP = 100
+
 # Per-race sd needs at least this many samples of an edition.
 MIN_SD_SAMPLES = 2
 # Backtest: prior samples of each needed edition before a recommendation.
@@ -91,7 +95,13 @@ def line_finder_players(env=None):
 
 def weight(age_days, half_life):
     """Recency weight 0.5 ** (age / half_life); half_life None = unweighted.
-    A future-dated cup (negative age) is clamped to weight 1."""
+
+    A future-dated cup (negative age) is clamped to age 0 -> weight 1: it
+    counts as "today", never as a weight above 1 (which would also overflow
+    for a far-future date). Very old cups underflow to exactly 0.0 — every
+    consumer treats a zero weight-sum as "no usable samples" rather than
+    dividing by it.
+    """
     if half_life is None:
         return 1.0
     return 0.5 ** (max(age_days, 0) / half_life)
@@ -165,6 +175,8 @@ def fmt_line(value):
 
 
 def fmt_signed(value, places=1):
+    if value is None:
+        return "n/a"
     return f"{value:+.{places}f}"
 
 
@@ -242,7 +254,13 @@ def edition_stats(samples):
     if n == 0:
         return {"n_samples": 0, "races": 0, "mu": None, "sd": None}
     races = sum(r for _, r, _ in samples)
-    mu = sum(w * m for m, _, w in samples) / sum(w * r for _, r, w in samples)
+    weighted_races = sum(w * r for _, r, w in samples)
+    if weighted_races <= 0:
+        # Every sample's weight underflowed to 0 (all far older than the
+        # half-life allows, e.g. when weighting from a far-future cup date).
+        # No usable evidence -> same as having no samples.
+        return {"n_samples": n, "races": races, "mu": None, "sd": None}
+    mu = sum(w * m for m, _, w in samples) / weighted_races
     sd = None
     if n >= MIN_SD_SAMPLES:
         sd = math.sqrt(sum((m - r * mu) ** 2 for m, r, _ in samples) / races)
@@ -271,17 +289,24 @@ def format_margins(cups, fmt):
     return [margin_of(c) for c in cups if c["game_edition"] == fmt]
 
 
-def pairs_proxy_margins(wii_margins, switch_margins):
+def pairs_proxy_margins(wii_margins, switch_margins, cap=PAIRS_CAP):
     """Every Wii cup x every Switch cup, half of each standing in for its two
-    races. Empty when either list is empty."""
-    return [w / 2 + s / 2 for w in wii_margins for s in switch_margins]
+    races. Empty when either list is empty. Inputs are chronological; only the
+    most recent `cap` cups per console are paired. Returns (margins, capped)."""
+    capped = len(wii_margins) > cap or len(switch_margins) > cap
+    wii_margins = wii_margins[-cap:]
+    switch_margins = switch_margins[-cap:]
+    return [w / 2 + s / 2 for w in wii_margins for s in switch_margins], capped
 
 
 def _weighted_mean(cups, half_life, today):
     if not cups:
         return None
     ws = [weight((today - cup_date(c)).days, half_life) for c in cups]
-    return sum(w * margin_of(c) for w, c in zip(ws, cups)) / sum(ws)
+    total = sum(ws)
+    if total <= 0:
+        return None
+    return sum(w * margin_of(c) for w, c in zip(ws, cups)) / total
 
 
 def _mean(values):
@@ -468,7 +493,8 @@ def _tile_notes(fmt, a, b, cups, all_cups, fm, stats, half_life, today, stored_l
             notes.append(
                 f"No completed mixed cup yet — the actual curve is built from "
                 f"{extra['n_wii']}×{extra['n_switch']} = {extra['n_pairs']} "
-                f"Wii×Switch pairs."
+                f"Wii×Switch pairs"
+                + (f" (the most recent {PAIRS_CAP} cups per console)." if extra["pairs_capped"] else ".")
             )
         else:
             notes.append("No completed mixed cup yet, and no Wii×Switch pairs to stand in.")
@@ -517,14 +543,15 @@ def compute(
     """
     today = today or date.today()
     a, b = players
-    all_cups = [c for c in cups if c["game_edition"] in FORMATS]
+    all_cups = sorted((c for c in cups if c["game_edition"] in FORMATS), key=_sort_key)
     cups = [c for c in all_cups if c["n_players"] == 2] if two_player else all_cups
 
     samples = edition_samples(cups, half_life, today)
     stats = {e: edition_stats(samples[e]) for e in BASE_EDITIONS}
 
     margins = {f: format_margins(cups, f) for f in FORMATS}
-    n_pairs = len(margins["wii"]) * len(margins["mk8dx"])
+    pairs, pairs_capped = pairs_proxy_margins(margins["wii"], margins["mk8dx"])
+    n_pairs = len(pairs)
 
     formats = {}
     for fmt in FORMATS:
@@ -533,7 +560,7 @@ def compute(
         source = None
         curve_margins = real
         if fmt == "mixed" and not real:
-            curve_margins = pairs_proxy_margins(margins["wii"], margins["mk8dx"])
+            curve_margins = pairs
             source = "pairs" if curve_margins else None
         elif real:
             source = "real"
@@ -548,6 +575,7 @@ def compute(
             "actual_ties": ties,
             "actual_n": len(curve_margins),
             "actual_source": source,
+            "pairs_capped": pairs_capped if fmt == "mixed" else False,
             "fitted": None if fitted is None else [_r(v, 2) for v in fitted],
             "model": None
             if model is None
@@ -564,8 +592,9 @@ def compute(
         extra = {
             "n_real": len(real),
             "n_pairs": n_pairs,
-            "n_wii": len(margins["wii"]),
-            "n_switch": len(margins["mk8dx"]),
+            "n_wii": min(len(margins["wii"]), PAIRS_CAP),
+            "n_switch": min(len(margins["mk8dx"]), PAIRS_CAP),
+            "pairs_capped": pairs_capped,
         }
         fm["notes"] = _tile_notes(
             fmt, a, b, cups, all_cups, fm, stats, half_life, today, stored_line, extra

@@ -5,6 +5,7 @@ import hmac
 import json
 import os
 import random
+import re
 import secrets
 import sqlite3
 import sys
@@ -3441,33 +3442,52 @@ def extract_scores():
 # (nothing here is in GATE_EXEMPT_PATHS), and there is no write path.
 
 
-def parse_line_finder_params(args):
-    """Validate the Line Finder query string.
+_HALF_LIFE_RE = re.compile(r"[0-9]{1,6}")
 
-    half_life: int 14..365, or the literal "none"/"all" for unweighted
-    (default 90). two_player: "0"/"1" (default 0). actual/fitted: "0"/"1"
-    (default 1) — view-only flags the page reads back so a shared URL opens
-    the same way. Anything else raises InvalidInput (-> 400, never a 500).
+
+def parse_line_finder_params(args):
+    """Validate the Line Finder query string — strictly.
+
+    half_life: ASCII digits only, 14..365, or the exact literal "none"/"all"
+    for unweighted (default 90). two_player: exactly "0"/"1" (default 0).
+    actual/fitted: exactly "0"/"1" (default 1) — view-only flags the page
+    reads back so a shared URL opens the same way. An EMPTY value means the
+    default; anything else ("+14", " 90", "1_5", non-ASCII digits, "yes")
+    raises InvalidInput (-> 400, never a 500).
     """
-    raw = (args.get("half_life") or str(DEFAULT_HALF_LIFE)).strip().lower()
-    if raw in ("none", "all"):
+    raw = args.get("half_life") or ""
+    if raw == "":
+        half_life = DEFAULT_HALF_LIFE
+    elif raw in ("none", "all"):
         half_life = None
-    else:
-        try:
-            half_life = int(raw)
-        except ValueError:
-            raise InvalidInput("half_life must be a whole number of days, or 'none'.")
+    elif _HALF_LIFE_RE.fullmatch(raw):
+        half_life = int(raw)
         if not (MIN_HALF_LIFE <= half_life <= MAX_HALF_LIFE):
             raise InvalidInput(
                 f"half_life must be between {MIN_HALF_LIFE} and {MAX_HALF_LIFE} days, or 'none'."
             )
+    else:
+        raise InvalidInput("half_life must be a whole number of days, or 'none'.")
     flags = {}
-    for name, default in (("two_player", "0"), ("actual", "1"), ("fitted", "1")):
-        value = (args.get(name) or default).strip()
-        if value not in ("0", "1"):
+    for name, default in (("two_player", False), ("actual", True), ("fitted", True)):
+        value = args.get(name) or ""
+        if value == "":
+            flags[name] = default
+        elif value in ("0", "1"):
+            flags[name] = value == "1"
+        else:
             raise InvalidInput(f"{name} must be 0 or 1.")
-        flags[name] = value == "1"
     return {"half_life": half_life, **flags}
+
+
+def _line_finder_json(payload, status=200):
+    """JSON response that is never cached: the numbers change with every cup
+    and the page sits behind a session cookie (defence in depth behind the
+    Cloudflare edge)."""
+    resp = jsonify(payload)
+    resp.status_code = status
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
 
 
 def _load_line_finder_pair():
@@ -3500,10 +3520,10 @@ def line_finder_data():
     try:
         params = parse_line_finder_params(request.args)
     except InvalidInput as e:
-        return jsonify({"error": str(e)}), 400
+        return _line_finder_json({"error": str(e)}, 400)
     names, pair = _load_line_finder_pair()
     if pair is None:
-        return jsonify(
+        return _line_finder_json(
             {
                 "available": False,
                 "players": {"a": names[0], "b": names[1]},
@@ -3522,7 +3542,7 @@ def line_finder_data():
         line_changes=pair["line_changes"],
         stored_line=pair["stored_line"],
     )
-    return jsonify(data)
+    return _line_finder_json(data)
 
 
 if __name__ == "__main__":

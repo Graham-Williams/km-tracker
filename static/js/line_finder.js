@@ -327,7 +327,8 @@
     var note = 'Solid steps count real cups (a tie at the line counts as half a win). Dashed curves are a normal fit centred on the recency-weighted per-race edge. ' +
       'Dots along the bottom are the individual cups — ' + d.players.a + "'s margin over " + d.players.b + ': filled = just the two of them, hollow = more players in the cup.';
     if (d.formats.mixed.actual_source === 'pairs') {
-      note += ' No mixed cup has been played yet, so the solid Mixed line pairs every Wii cup with every Switch cup (' + d.formats.mixed.actual_n + ' combos), half of each standing in for its two races.';
+      note += ' No mixed cup has been played yet, so the solid Mixed line pairs every Wii cup with every Switch cup (' + d.formats.mixed.actual_n + ' combos' +
+        (d.formats.mixed.pairs_capped ? ', most recent 100 cups per console' : '') + '), half of each standing in for its two races.';
     }
     ui.chartNote.textContent = note;
   }
@@ -543,7 +544,7 @@
 
     var note = 'Actual = share of real cups ' + d.players.a + ' won with that line applied (a tie counts half). Fitted = the normal model. ★ = recommended line.';
     if (state.tab === 'mixed' && fm.actual_source === 'pairs') {
-      note += ' Mixed actual is built from ' + fm.actual_n + ' Wii×Switch cup pairs — no mixed cup has been played yet.';
+      note += ' Mixed actual is built from ' + fm.actual_n + ' Wii×Switch cup pairs' + (fm.pairs_capped ? ' (most recent 100 cups per console)' : '') + ' — no mixed cup has been played yet.';
     }
     if (!fm.fitted) note += ' Not enough cups for a fitted curve yet.';
     ui.tableNote.textContent = note;
