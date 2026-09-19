@@ -197,10 +197,37 @@ prod container. Full runbook (Cloudflare dashboard steps, first bring-up) is in
 ## Security Hardening (public access)
 
 The app is exposed publicly at `km.graham-williams.com` behind a Cloudflare
-tunnel + Cloudflare Access. Three `before_request` hooks in `app.py` handle
-access control (full operator docs in `DEPLOY.md` → "Public access hardening"
-and "Sign-in"):
+tunnel + Cloudflare Access. Four `before_request` hooks in `app.py` handle
+transport + access control (full operator docs in `DEPLOY.md` → "Public access
+hardening" and "Sign-in"):
 
+- **HTTPS enforcement (`https_redirect` + the `hsts_header` `after_request`
+  hook) — issue #85.** Registered **first**, so it runs before CSRF, Access and
+  the password gate; a plain-http visitor is never handed the login page in the
+  clear. 301s to `https://{APP_HOST}{path?query}`, and every response carries
+  `Strict-Transport-Security: max-age=31536000` (no `includeSubDomains`, no
+  `preload` — each host under `graham-williams.com` owns its own policy; matches
+  the apex landing page's `snippets/security-headers.conf`). Three rules that
+  future changes must not break:
+  - **⚠️ Redirect ONLY when `X-Forwarded-Proto` is present and *exactly*
+    `http`.** An **absent** header must pass straight through. cloudflared
+    always sets it, so every real visitor is covered — while the in-network
+    health probe (`docker exec … urlopen('http://localhost:8080/healthz')`), the
+    CI `docker-e2e` job, the `break-staging` QA container, local dev and the
+    test suite send no such header and keep working. **The header rule IS the
+    exemption — do not add per-path exemptions on top of it.**
+  - **Never build the target from the request's `Host`/URL** — that would be an
+    open redirect. It comes from the `APP_HOST` pin only, and when `APP_HOST` is
+    blank the hook **fails open** (no redirect; an empty host would emit a broken
+    `https:///…` loop). So `APP_HOST` is load-bearing in prod — it is defaulted in
+    `docker-compose.access.yml` (prod) and `docker-compose.staging.yml` (staging),
+    not required in the box `.env`.
+  - **Path + query survive byte-for-byte.** `request.path`/`full_path` are
+    already percent-**decoded**, so building the target from them mangles `%20`,
+    `%3F`, a literal `%`, etc. `_forwarded_request_target()` instead reads the
+    raw request line (`RAW_URI`/`REQUEST_URI` — gunicorn and werkzeug both set
+    it), validating it is origin-form (`/…`) and control-char-free, and falls
+    back to re-quoting `SCRIPT_NAME + PATH_INFO` + `QUERY_STRING`.
 - **CSRF — Origin/Referer host check (`csrf_origin_check`).** On every
   `POST`/`PUT`/`PATCH`/`DELETE`, rejects (403) requests whose `Origin` (else
   `Referer`) host ≠ the app's own host. Requests with neither header (curl, the
@@ -247,9 +274,15 @@ built-in signed session).
 
 ### Hardening test coverage
 
-Both hooks have dedicated offline unit tests (no network; a real RS256 keypair
+Every hook has dedicated offline unit tests (no network; a real RS256 keypair
 is generated in-process and the JWKS fetch is monkeypatched):
 
+- `tests/test_https_enforcement.py` — the http→https redirect (301, query +
+  percent-encoding preserved, no `Host` reflection, absolute-form/control-char
+  `RAW_URI` rejected, POST redirected before the CSRF hook, redirect beats the
+  password gate), the non-redirect cases (`https`, **no header at all**,
+  `APP_HOST` blank), the HSTS header on normal/redirect/404 responses, and the
+  session-cookie flags.
 - `tests/test_cf_access.py` — CF Access JWT verification: valid/expired/wrong-aud/
   wrong-issuer/bad-signature/malformed/kid-less/HS256-confusion tokens, static
   exemption, JWKS caching + unknown-`kid` throttling + key rotation + fail-closed.

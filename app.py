@@ -13,7 +13,7 @@ import threading
 import time
 import urllib.request
 from datetime import datetime, timedelta, timezone
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 from collections import Counter
 
@@ -64,6 +64,16 @@ from maps import (
 load_dotenv()
 
 app = Flask(__name__)
+
+
+def _env_flag(name, default):
+    """Read a boolean-ish env var. Absent -> default; '0'/'false'/'no'/'off'/'' -> False."""
+    val = os.environ.get(name)
+    if val is None:
+        return default
+    return val.strip().lower() not in ("0", "false", "no", "off", "")
+
+
 # The session cookie is signed (itsdangerous HMAC) with this key. SECRET_KEY is
 # the app's existing signing key and is REUSED for the login-gate session — so
 # the shared-password gate needs no new signing secret. SESSION_SECRET is
@@ -88,14 +98,8 @@ app.secret_key = (
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 # Secure defaults ON; only an explicit falsey env value ('0'/'false'/'no'/'off'/'')
-# turns it off (mirrors _env_flag, inlined here because _env_flag is defined
-# further down and this runs at import time).
-_secure_env = os.environ.get("SESSION_COOKIE_SECURE")
-app.config["SESSION_COOKIE_SECURE"] = (
-    True
-    if _secure_env is None
-    else _secure_env.strip().lower() not in ("0", "false", "no", "off", "")
-)
+# turns it off.
+app.config["SESSION_COOKIE_SECURE"] = _env_flag("SESSION_COOKIE_SECURE", True)
 app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(days=30)
 
 
@@ -163,14 +167,6 @@ def inject_photo_extraction():
 # ---------------------------------------------------------------------------
 
 
-def _env_flag(name, default):
-    """Read a boolean-ish env var. Absent -> default; '0'/'false'/'no'/'off'/'' -> False."""
-    val = os.environ.get(name)
-    if val is None:
-        return default
-    return val.strip().lower() not in ("0", "false", "no", "off", "")
-
-
 # --- 1. CSRF protection via Origin/Referer host matching ---
 
 CSRF_PROTECTION = _env_flag("CSRF_PROTECTION", True)  # default ON; set 0 to disable for local dev
@@ -187,6 +183,97 @@ def _expected_host():
     if APP_ORIGIN:
         return urlsplit(APP_ORIGIN).netloc
     return request.host
+
+
+# --- 0. HTTPS enforcement at the origin (issue #85) ---
+#
+# Defence in depth. Cloudflare's zone-wide "Always Use HTTPS" already 301s
+# http -> https at the edge, but that is one dashboard toggle away from
+# regressing, so the app enforces it too and advertises HSTS itself.
+#
+# ONLY the Cloudflare tunnel reaches this container, and cloudflared forwards
+# the visitor's scheme as X-Forwarded-Proto ("http" or "https").
+#
+# ⚠️ LOAD-BEARING RULE: redirect ONLY when X-Forwarded-Proto is present and
+# EXACTLY "http". An ABSENT header must never redirect — in-network callers
+# (the documented `docker exec ... urlopen('http://localhost:8080/healthz')`
+# health probe, the CI smoke checks, the break-staging QA container, local dev
+# and the test suite) send no X-Forwarded-Proto at all. The header rule IS the
+# exemption; do not add per-path exemptions on top of it.
+#
+# The redirect target is built from the configured APP_HOST pin, NEVER from the
+# request's own Host header or URL — reflecting the Host here would be an open
+# redirect. With APP_HOST unset/empty we fail OPEN (no redirect at all), because
+# a redirect to "https://" with an empty host is a broken loop; that is also
+# what keeps un-pinned local dev working.
+# One year. Deliberately NO includeSubDomains and NO preload: each host under
+# graham-williams.com owns its own policy (this matches the apex landing page's
+# snippets/security-headers.conf, the reference implementation for all the apps).
+HSTS_HEADER_VALUE = "max-age=31536000"
+
+# Characters that must never reach a Location header (response-splitting) or a
+# URL path. Anything with these falls back to the rebuilt-from-WSGI form.
+_CTL_CHARS = frozenset(chr(c) for c in range(0x20)) | {"\x7f"}
+
+# Sub-delims + ':' and '@' are legal, unencoded path characters (RFC 3986
+# pchar). Keeping them in `safe` means the rebuilt path stays byte-identical to
+# a normal request line. '%' is deliberately NOT safe: PATH_INFO arrives already
+# percent-DECODED, so a literal '%' in the path must be re-encoded to '%25'.
+_PATH_SAFE = "/:@!$&'()*+,;=~"
+
+
+def _forwarded_request_target():
+    """Return the request target (path + query) to redirect to, byte-for-byte.
+
+    Preferred source is the raw request line the WSGI server recorded (gunicorn
+    sets RAW_URI; werkzeug sets both RAW_URI and REQUEST_URI), because it is the
+    ONLY exact copy of what the client sent. Flask's request.path / full_path
+    are already percent-DECODED, so building the target from them mangles
+    "%20", "%3F" and friends.
+
+    Falls back to re-encoding SCRIPT_NAME + PATH_INFO (+ QUERY_STRING) when no
+    raw target is available or it isn't an origin-form path.
+    """
+    environ = request.environ
+    for key in ("RAW_URI", "REQUEST_URI"):
+        raw = environ.get(key)
+        if not isinstance(raw, str) or not raw.startswith("/"):
+            continue  # absent, or absolute-form / "*" — not usable as a path
+        if any(ch in _CTL_CHARS for ch in raw):
+            continue  # header-injection attempt; fall through to the rebuild
+        return raw
+    path = (environ.get("SCRIPT_NAME") or "") + (environ.get("PATH_INFO") or "")
+    # PATH_INFO is latin-1-encoded bytes per the WSGI "encoding dance"; round-trip
+    # through latin-1 to recover the original UTF-8 bytes before quoting them.
+    target = quote(path.encode("latin-1", "replace"), safe=_PATH_SAFE)
+    if not target.startswith("/"):
+        target = "/" + target
+    query = environ.get("QUERY_STRING") or ""
+    if query:
+        target = f"{target}?{quote(query, safe=_PATH_SAFE + '?%')}"
+    return target
+
+
+@app.before_request
+def https_redirect():
+    """301 plain-http requests to the https origin (registered FIRST, see above)."""
+    if request.headers.get("X-Forwarded-Proto") != "http":
+        return  # https, or no header at all (in-network probe / dev / tests)
+    if not APP_HOST:
+        return  # fail open — no pinned host means no safe target to build
+    return redirect(f"https://{APP_HOST}{_forwarded_request_target()}", code=301)
+
+
+@app.after_request
+def hsts_header(response):
+    """Advertise HSTS so browsers refuse plain http to this host for a year.
+
+    Sent unconditionally: a browser ignores HSTS delivered over plain http, so
+    this is inert in local dev and meaningful the moment the response is served
+    over TLS.
+    """
+    response.headers.setdefault("Strict-Transport-Security", HSTS_HEADER_VALUE)
+    return response
 
 
 @app.before_request

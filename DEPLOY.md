@@ -181,8 +181,65 @@ get in — verify that others can't:
 
 ## Public access hardening
 
-Two app-side guards back up Cloudflare Access as defense-in-depth. Both are
+Three app-side guards back up Cloudflare Access as defense-in-depth. All are
 `before_request` hooks in `app.py`.
+
+### HTTPS enforcement at the origin (issue #85)
+
+Cloudflare's zone-wide **Always Use HTTPS** already 301s `http` → `https` at the
+edge, but that is one dashboard toggle away from regressing, so the app enforces
+it itself:
+
+- **Redirect.** `https_redirect()` 301s to `https://$APP_HOST<path?query>` when
+  the request carries `X-Forwarded-Proto: http` (cloudflared forwards the
+  visitor's scheme in that header). It is registered **first**, so a plain-http
+  request is redirected before the CSRF, Access and password-gate hooks run — a
+  visitor never gets the login page in the clear.
+- **⚠️ It only fires when the header is present and exactly `http`.** A request
+  with **no** `X-Forwarded-Proto` is never redirected. That is deliberate and
+  load-bearing: the in-network health probe
+  (`docker exec km-tracker-app-1 python3 -c "...urlopen('http://localhost:8080/healthz')"`),
+  the CI docker-e2e job and the `break-staging` QA container all speak plain
+  HTTP without that header. **The header rule is the exemption — never add
+  per-path exemptions on top of it.**
+- **The target is built from `APP_HOST`, never from the request's `Host`.**
+  Reflecting the Host would be an open redirect. If `APP_HOST` is unset/empty
+  the app **fails open** and does not redirect (an empty host would produce a
+  broken `https:///…` loop, and local dev has no pinned host).
+  → **`APP_HOST` is therefore load-bearing in production.** Prod gets it from
+  `docker-compose.access.yml` (defaults to `km.graham-williams.com`) and staging
+  from `docker-compose.staging.yml` (`staging-km.graham-williams.com`), so a
+  normal deploy is already covered; a deploy that omits those override files
+  silently loses the redirect.
+- **HSTS.** `hsts_header()` (an `after_request` hook) adds
+  `Strict-Transport-Security: max-age=31536000` to every response — no
+  `includeSubDomains`, no `preload`, because each host under
+  `graham-williams.com` owns its own policy. Browsers ignore HSTS delivered
+  over plain http, so it is inert in local dev.
+- **Session cookies** are `Secure` + `HttpOnly` + `SameSite=Lax`. `Secure` is on
+  by default and only an explicit falsey `SESSION_COOKIE_SECURE`
+  (`0`/`false`/`no`/`off`/empty) turns it off — the test suite and plain-http
+  local dev do that so the cookie round-trips.
+
+Verify after a deploy (from the box, inside the compose network):
+
+```bash
+# 301 to the https origin — note the explicit header; without it there is no redirect.
+docker exec -i km-tracker-app-1 python3 - <<'PY'
+import urllib.error
+import urllib.request
+req = urllib.request.Request("http://localhost:8080/", headers={"X-Forwarded-Proto": "http"})
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *a, **k): return None
+try:
+    urllib.request.build_opener(NoRedirect).open(req)
+except urllib.error.HTTPError as e:
+    print(e.code, e.headers.get("Location"), e.headers.get("Strict-Transport-Security"))
+PY
+
+# And from outside:
+curl -sI https://km.graham-williams.com/ | grep -i strict-transport-security
+```
 
 ### CSRF (Origin/Referer check) — on by default
 
