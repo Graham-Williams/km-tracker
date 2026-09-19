@@ -249,7 +249,12 @@ HSTS_HEADER_VALUE = "max-age=31536000"
 # NOTE \A/\Z + fullmatch, NOT ^/$ with match: in Python "$" also matches
 # immediately BEFORE A TRAILING NEWLINE, so "evil.net\n" would sail through a
 # "^...$" check and reach a response header.
-_HOSTNAME_RE = re.compile(r"\A[A-Za-z0-9](?:[A-Za-z0-9.-]{0,252}[A-Za-z0-9])?\Z")
+# Per-LABEL pattern (each dot-separated label 1-63 chars, no leading or
+# trailing hyphen) — byte-identical to the one in jjho-fan-almanac, so all
+# five sibling apps agree on exactly what a hostname is.
+_HOSTNAME_RE = re.compile(
+    r"\A[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+    r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*\Z")
 
 
 def _validated_redirect_host(value):

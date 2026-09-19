@@ -216,6 +216,8 @@ def test_valid_app_host_values_are_accepted(value):
         " km.graham-williams.com",          # leading space
         "km graham-williams.com",           # interior space
         "-km.graham-williams.com",          # leading hyphen
+        "km-.graham-williams.com",          # TRAILING-hyphen label
+        "km..graham-williams.com",          # empty label
         "",
         None,
     ],
