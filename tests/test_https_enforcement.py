@@ -190,12 +190,21 @@ def test_multi_hop_forwarded_proto_does_not_redirect(client, pinned, value):
 # --- APP_HOST validation (it is spliced into a Location header) ------------
 
 
+# The DNS maximum is 253 characters. Both sides of that boundary are pinned:
+# a 253-char host must still work, 254 must not. Built from valid 63-char
+# labels so ONLY the total length can be what rejects the long one.
+_MAX_LEN_HOST = ("a" * 63 + ".") * 3 + "b" * 61      # exactly 253
+_OVERLONG_HOST = ("a" * 63 + ".") * 3 + "b" * 62     # exactly 254
+assert (len(_MAX_LEN_HOST), len(_OVERLONG_HOST)) == (253, 254)
+
+
 @pytest.mark.parametrize(
     "value",
     [
         "km.graham-williams.com",
         "staging-km.graham-williams.com",
         "localhost",
+        _MAX_LEN_HOST,           # exactly at the DNS maximum
     ],
 )
 def test_valid_app_host_values_are_accepted(value):
@@ -217,6 +226,7 @@ def test_valid_app_host_values_are_accepted(value):
         "km graham-williams.com",           # interior space
         "-km.graham-williams.com",          # leading hyphen
         "km-.graham-williams.com",          # TRAILING-hyphen label
+        _OVERLONG_HOST,                     # 254 chars: one over the DNS max
         "km..graham-williams.com",          # empty label
         "",
         None,
