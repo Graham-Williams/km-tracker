@@ -232,9 +232,16 @@ hardening" and "Sign-in"):
     (`_validated_redirect_host()`, `\A…\Z` + `fullmatch` — *not* `^…$`, which in
     Python also matches before a trailing newline) before it can reach a
     `Location`: `host@evil.com`, `https://host`, a port, a path or any whitespace
-    all collapse to blank → fail open. Fail-open **logs a startup warning** under
-    `APP_ENV=production`; an external `curl -I` can't detect it, because HSTS is
-    still sent either way.
+    all collapse to blank → fail open. Fail-open **logs a startup warning**; an
+    external `curl -I` can't detect it, because HSTS is still sent either way.
+    The two fail-open cases warn under **different** conditions on purpose: an
+    *invalid* `APP_HOST` warns **unconditionally** (a typo is always worth
+    shouting about), while a *blank* one warns only when `APP_ENV` is
+    **explicitly** set to `production` (`_APP_ENV_IS_EXPLICITLY_PRODUCTION`,
+    which reads the raw env var — `APP_ENV` itself *defaults* to `production`,
+    so testing it would fire the warning on every local `import app`, pytest run
+    and dev-server start, where it is meaningless noise). Both compose files set
+    `APP_ENV` explicitly, so prod and staging are unaffected.
   - **Path + query survive byte-for-byte.** `request.path`/`full_path` are
     already percent-**decoded**, so building the target from them mangles `%20`,
     `%3F`, a literal `%`, etc. `_forwarded_request_target()` instead reads the

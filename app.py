@@ -140,6 +140,19 @@ app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024  # 1 MB
 APP_ENV = (os.environ.get("APP_ENV") or "production").strip().lower() or "production"
 IS_STAGING = APP_ENV == "staging"
 
+# Did an operator actually SAY "production", or did we merely default to it?
+# Used only to decide whether a missing APP_HOST is worth warning about: because
+# APP_ENV defaults to "production", the blank-APP_HOST warning would otherwise
+# fire on every local `import app`, every pytest run and every dev-server start,
+# where it means nothing. Noise there trains people to ignore the same warning
+# on the box, where it means the http->https redirect is off. The real
+# deployments (docker-compose.yml / .staging.yml) set APP_ENV explicitly, so the
+# warning still fires exactly where it matters. NOTE this checks the RAW env var
+# on purpose — reading APP_ENV above cannot distinguish set-from-defaulted.
+_APP_ENV_IS_EXPLICITLY_PRODUCTION = (
+    os.environ.get("APP_ENV", "").strip().lower() == "production"
+)
+
 
 @app.context_processor
 def inject_app_env():
@@ -265,7 +278,7 @@ if APP_HOST and not HTTPS_REDIRECT_HOST:
         "'km.graham-williams.com', with no scheme, port, path or '@'.",
         APP_HOST,
     )
-elif not HTTPS_REDIRECT_HOST and APP_ENV == "production":
+elif not HTTPS_REDIRECT_HOST and _APP_ENV_IS_EXPLICITLY_PRODUCTION:
     # Fail-open used to be completely silent: a deploy that drops APP_HOST turns
     # enforcement off with zero signal, and HSTS keeps being sent so an external
     # `curl -I` still LOOKS enforced. APP_HOST is a public hostname, so there is

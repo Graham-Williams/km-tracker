@@ -411,6 +411,27 @@ def test_blank_app_host_in_production_warns_loudly(tmp_path):
     assert "DISABLED" in stderr
 
 
+def test_blank_app_host_is_quiet_when_app_env_was_never_set(tmp_path):
+    # APP_ENV *defaults* to "production", so testing it would print the warning
+    # above on every local `import app`, pytest run and dev-server start, where
+    # it means nothing — and noise trains people to ignore the same warning on
+    # the box, where it means the redirect is off. The gate reads the RAW env
+    # var; both compose files set APP_ENV explicitly, so prod/staging still warn.
+    stdout, stderr = _import_app_with_env(tmp_path)
+    assert "REDIRECT_HOST=''" in stdout  # still fails open, just silently
+    assert "APP_HOST is not set" not in stderr
+
+
+def test_invalid_app_host_warns_even_without_app_env(tmp_path):
+    # The invalid-value warning is deliberately NOT gated: a typo'd APP_HOST is
+    # worth shouting about wherever it happens.
+    stdout, stderr = _import_app_with_env(
+        tmp_path, APP_HOST="km.graham-williams.com@evil.com"
+    )
+    assert "REDIRECT_HOST=''" in stdout
+    assert "not a bare hostname" in stderr
+
+
 def test_invalid_app_host_warns_and_disables_the_redirect_at_import(tmp_path):
     stdout, stderr = _import_app_with_env(
         tmp_path, APP_ENV="production", APP_HOST="km.graham-williams.com@evil.com"
