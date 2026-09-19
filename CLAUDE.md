@@ -265,7 +265,7 @@ is generated in-process and the JWKS fetch is monkeypatched):
   session cookie rejected.
 - `tests/test_hostile_input.py` — malformed/hostile input on the main POST
   endpoints. Bad input must return a 4xx / flash+redirect, never a 500, and
-  never persist bad state. **The input-validation bugs it documents (BUG-1 …
+  never persist bad state (a `cups.date` without a 4-digit year — a mangled row — is skipped and counted in `skipped_unparseable_dates`, never raised). **The input-validation bugs it documents (BUG-1 …
   BUG-10, listed in the module docstring) are now FIXED** — all cases pass as
   ordinary tests (no `xfail` remaining). The hardening in `app.py`:
   - `parse_int_field()` + the `InvalidInput` exception centralize "parse a form

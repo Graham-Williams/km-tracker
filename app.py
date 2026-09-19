@@ -20,6 +20,7 @@ from collections import Counter
 import jwt
 from jwt.algorithms import RSAAlgorithm
 from dotenv import load_dotenv
+from werkzeug.exceptions import BadRequest
 from flask import (
     Flask,
     Response,
@@ -3505,7 +3506,11 @@ def line_finder():
     try:
         params = parse_line_finder_params(request.args)
     except InvalidInput as e:
-        abort(400, description=str(e))
+        # Same no-store posture as every other Line Finder response, 400s
+        # included (abort() would bypass the header).
+        err = BadRequest(description=str(e)).get_response()
+        err.headers["Cache-Control"] = "no-store"
+        return err
     names, pair = _load_line_finder_pair()
     resp = make_response(
         render_template(

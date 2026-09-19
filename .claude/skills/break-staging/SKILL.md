@@ -124,6 +124,14 @@ COMPOSE="docker compose -f docker-compose.yml -f docker-compose.access.yml -f do
 # APP_PASSWORD= is REQUIRED: staging inherits the shared password gate, and with
 # it set every path 302s to /login, so the whole sweep would measure the login
 # page instead of the app. Blank turns the gate off in this throwaway only.
+#
+# GOTCHA (learned 2026-09-18): compose config is read from the MAIN checkout on
+# `main`, so env that the feature branch adds to docker-compose.staging.yml
+# (e.g. LINE_FINDER_PLAYERS) is NOT present in this throwaway — the Line Finder
+# page then shows its "players missing" empty state, a false finding. Pass such
+# vars explicitly (e.g. add `-e "LINE_FINDER_PLAYERS=Test Toad,Dummy Diddy"`
+# below), or flip the main checkout to the branch for this `run` the way
+# DEPLOY.md describes for the staging `up`, flipping back to main right after.
 $COMPOSE run -d --name km-tracker-qa --no-deps \
   -p 127.0.0.1:18080:8080 \
   -e CSRF_PROTECTION=0 \

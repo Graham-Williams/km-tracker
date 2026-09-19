@@ -118,7 +118,11 @@
   function fmtDateShort(iso) {
     var d = new Date(iso.slice(0, 10) + 'T00:00:00');
     if (isNaN(d)) return iso.slice(0, 10);
-    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    var opts = { month: 'short', day: 'numeric' };
+    // Any cup outside the current year carries its year, so a 1900 or 9999
+    // row can never pass for one of this year's.
+    if (d.getFullYear() !== new Date().getFullYear()) opts.year = 'numeric';
+    return d.toLocaleDateString(undefined, opts);
   }
 
   function plural(n, word) {
@@ -330,6 +334,10 @@
     if (d.formats.mixed.actual_source === 'pairs') {
       note += ' No mixed cup has been played yet, so the solid Mixed line pairs every Wii cup with every Switch cup (' + d.formats.mixed.actual_n + ' combos' +
         (d.formats.mixed.pairs_capped ? ', most recent 100 cups per console' : '') + '), half of each standing in for its two races.';
+    }
+    if (d.skipped_unparseable_dates > 0) {
+      var k = d.skipped_unparseable_dates;
+      note += ' ' + k + (k === 1 ? ' cup has an unreadable stored date and is' : ' cups have unreadable stored dates and are') + ' left out.';
     }
     ui.chartNote.textContent = note;
   }
@@ -583,8 +591,9 @@
       svgEl('line', { x1: ML, x2: ML + PW, y1: y(v), y2: y(v), stroke: v === 0 ? 'var(--color-faint)' : 'var(--color-border)', 'stroke-width': v === 0 ? 1.2 : 1 }, svg);
       svgText(fmtLine(v) === 'even' ? '0' : (v > 0 ? '+' + v : String(v)), { x: ML - 6, y: y(v) + 4, 'text-anchor': 'end', class: 'lf-axis' }, svg);
     }
-    svgText(fmtDateShort(pts[0].date), { x: ML, y: H - 8, 'text-anchor': 'start', class: 'lf-axis' }, svg);
-    svgText(fmtDateShort(pts[pts.length - 1].date), { x: ML + PW, y: H - 8, 'text-anchor': 'end', class: 'lf-axis' }, svg);
+    var axisFmt = pts[0].date.slice(0, 4) !== pts[pts.length - 1].date.slice(0, 4) ? fmtDate : fmtDateShort;
+    svgText(axisFmt(pts[0].date), { x: ML, y: H - 8, 'text-anchor': 'start', class: 'lf-axis' }, svg);
+    svgText(axisFmt(pts[pts.length - 1].date), { x: ML + PW, y: H - 8, 'text-anchor': 'end', class: 'lf-axis' }, svg);
     svgText(d.players.a + "'s margin", { x: ML + PW / 2, y: H - 8, 'text-anchor': 'middle', class: 'lf-cap' }, svg);
 
     ['wii', 'mk8dx'].forEach(function (f) {

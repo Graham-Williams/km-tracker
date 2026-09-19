@@ -1024,3 +1024,28 @@ def test_seeded_staging_pair_has_cups_on_every_console(tmp_path, monkeypatch):
     assert sum(1 for c in pair["cups"] if c["n_players"] == 2) >= 3
     out = lf.compute(pair["cups"], half_life=None, today=date(2026, 9, 18))
     assert all(out["formats"][f]["rec"] is not None for f in ("wii", "mk8dx", "mixed"))
+
+
+def test_unparseable_stored_dates_are_skipped_not_500(client, pair_env):
+    """A cups row whose date lost its 4-digit year (the form once accepted an
+    unbounded tz_offset) must be left out and counted, never a 500."""
+    _seed_pair(client)
+    conn = get_connection()
+    for raw in ("128-10-08 23:20:00", "1-01-01 00:01:00", "garbage", "2026-13-40 00:00:00"):
+        _insert_cup(conn, raw, "wii", {1: (60, 0), 2: (40, 0)}, cup_players=[1, 2])
+    conn.commit()
+    conn.close()
+    for query in ("", "?half_life=14", "?half_life=none", "?two_player=1"):
+        r = client.get("/line-finder/data" + query)
+        assert r.status_code == 200, query
+        d = r.get_json()
+        assert d["skipped_unparseable_dates"] == 4
+        assert all(c["date"][:4].isdigit() and c["date"][4] == "-" for c in d["cups"])
+        assert d["n_cups"] >= 1
+    assert client.get("/line-finder").status_code == 200
+
+
+def test_page_400_is_never_cached(client, pair_env):
+    r = client.get("/line-finder?half_life=13")
+    assert r.status_code == 400
+    assert r.headers["Cache-Control"] == "no-store"

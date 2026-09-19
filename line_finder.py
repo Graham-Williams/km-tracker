@@ -19,6 +19,7 @@ the actual win % counts real cups (a tie at the line is half a win).
 
 import math
 import os
+import re
 from datetime import date
 
 from maps import (
@@ -182,8 +183,21 @@ def fmt_signed(value, places=1):
     return f"{value:+.{places}f}"
 
 
+_ISO_DAY = re.compile(r"^\d{4}-\d{2}-\d{2}")
+
+
 def cup_date(cup):
-    return date.fromisoformat(str(cup["date"])[:10])
+    """The cup's calendar day, or None when the stored date is not a
+    4-digit-year ISO day. A mangled row (the cups form once accepted an
+    unbounded tz_offset) must never take the page down — compute() skips
+    such cups and counts them in `skipped_unparseable_dates`."""
+    raw = str(cup["date"])
+    if not _ISO_DAY.match(raw):
+        return None
+    try:
+        return date.fromisoformat(raw[:10])
+    except ValueError:
+        return None
 
 
 def _sort_key(cup):
@@ -539,7 +553,9 @@ def compute(
     """
     today = today or date.today()
     a, b = players
-    all_cups = sorted((c for c in cups if c["game_edition"] in FORMATS), key=_sort_key)
+    in_scope = [c for c in cups if c["game_edition"] in FORMATS]
+    skipped_dates = sum(1 for c in in_scope if cup_date(c) is None)
+    all_cups = sorted((c for c in in_scope if cup_date(c) is not None), key=_sort_key)
     cups = [c for c in all_cups if c["n_players"] == 2] if two_player else all_cups
 
     samples = edition_samples(cups, half_life, today)
@@ -620,6 +636,7 @@ def compute(
         },
         "n_cups": len(cups),
         "n_all_cups": len(all_cups),
+        "skipped_unparseable_dates": skipped_dates,
         "lines": LINES,
         "formats": formats,
         "trend": margin_trend(cups, half_life),
