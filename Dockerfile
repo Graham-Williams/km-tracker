@@ -10,7 +10,10 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app.py db.py maps.py extraction.py schema.sql ./
+# Explicit allowlist on purpose (never `*.py`). Every local module app.py
+# imports must be listed here — tests/test_dockerfile.py fails fast if one is
+# missing, because a missing module only surfaces as a crash-loop on the box.
+COPY app.py db.py maps.py extraction.py line_finder.py schema.sql ./
 COPY templates/ templates/
 COPY static/ static/
 # scripts/ carries the staging seed helper (scripts/seed_staging.py), invoked via

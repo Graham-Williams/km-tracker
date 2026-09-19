@@ -1,0 +1,80 @@
+{% extends "base.html" %}
+
+{% block title %}Line Finder — KM Tracker{% endblock %}
+{% block back %}<a class="back-link" href="/">← Home</a>{% endblock %}
+{% block heading %}Line Finder{% endblock %}
+{% block subtitle %}<p class="page-subtitle">How many points {{ player_b }} should get at the start of a cup so it's a coin flip against {{ player_a }} — per format, with the evidence behind the number.</p>{% endblock %}
+
+{% block content %}
+{% if not pair_available %}
+<p class="empty">Line Finder needs players named “{{ player_a }}” and “{{ player_b }}” — one of them isn't in the <a href="{{ url_for('players') }}">players list</a>.</p>
+{% else %}
+<div id="line-finder" class="line-finder"
+     data-endpoint="{{ url_for('line_finder_data') }}"
+     data-cup-edit-url="{{ url_for('edit_cup', cup_id=0) }}"
+     data-half-life="{{ params.half_life if params.half_life is not none else 'none' }}"
+     data-two-player="{{ 1 if params.two_player else 0 }}"
+     data-actual="{{ 1 if params.actual else 0 }}"
+     data-fitted="{{ 1 if params.fitted else 0 }}">
+
+    {# Controls. Every control is mirrored into the query string so the URL is
+       shareable; changing one re-fetches /line-finder/data (no reload). #}
+    <form class="card lf-controls" id="lf-controls">
+        <div class="lf-checks">
+            <label class="check"><input type="checkbox" id="lf-two-player"> Only cups with just the two of us</label>
+            <label class="check"><input type="checkbox" id="lf-show-actual" checked> Show actual</label>
+            <label class="check"><input type="checkbox" id="lf-show-fitted" checked> Show fitted</label>
+        </div>
+        <div class="field lf-range-field">
+            <label for="lf-half-life">Recency weighting · half-life <output id="lf-half-life-value" for="lf-half-life">90 days</output></label>
+            <input type="range" id="lf-half-life" min="14" max="366" step="1" value="90" aria-describedby="lf-range-help">
+            <div class="lf-range-ends" id="lf-range-help"><span>14 days</span><span>all cups equal</span></div>
+        </div>
+        <p class="lf-status text-faint" id="lf-status" aria-live="polite" hidden></p>
+    </form>
+
+    <div class="lf-empty" id="lf-empty" hidden></div>
+
+    <div id="lf-body">
+        <div class="lf-tiles" id="lf-tiles"></div>
+
+        <h2 class="section-heading">Share of cups {{ player_a }} wins, by line given to {{ player_b }}</h2>
+        <div class="card lf-chart-card">
+            <div class="lf-legend" id="lf-legend"></div>
+            <figure class="lf-figure" id="lf-figure">
+                <svg class="lf-svg" id="lf-chart" viewBox="0 0 420 340" role="img" aria-labelledby="lf-chart-title">
+                    <title id="lf-chart-title">Percentage of cups {{ player_a }} would have won at each line given to {{ player_b }}, for Wii, Switch and mixed cups</title>
+                </svg>
+                <div class="lf-tip" id="lf-tip" hidden></div>
+            </figure>
+            <p class="lf-note" id="lf-chart-note"></p>
+        </div>
+
+        <h2 class="section-heading">Every line, one row each</h2>
+        <div class="card">
+            <div class="lf-tabs" id="lf-tabs" role="tablist" aria-label="Cup format"></div>
+            <div id="lf-tables"></div>
+            <p class="lf-note" id="lf-table-note"></p>
+        </div>
+
+        <h2 class="section-heading">Margin trend</h2>
+        <div class="card">
+            <div class="lf-legend" id="lf-trend-legend"></div>
+            <svg class="lf-svg" id="lf-trend" viewBox="0 0 420 240" role="img" aria-label="Each cup's margin by date"></svg>
+            <p class="lf-note" id="lf-trend-note"></p>
+        </div>
+
+        <h2 class="section-heading">Backtest</h2>
+        <div class="card" id="lf-backtest"></div>
+
+        <h2 class="section-heading">{{ player_b }}'s line over time</h2>
+        <div class="card" id="lf-history"></div>
+
+        <h2 class="section-heading">The cups behind it</h2>
+        <div class="card" id="lf-cups"></div>
+    </div>
+    <noscript><p class="empty">Line Finder needs JavaScript to draw the chart.</p></noscript>
+</div>
+<script src="{{ url_for('static', filename='js/line_finder.js') }}"></script>
+{% endif %}
+{% endblock %}

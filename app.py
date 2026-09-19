@@ -5,6 +5,7 @@ import hmac
 import json
 import os
 import random
+import re
 import secrets
 import sqlite3
 import sys
@@ -19,12 +20,14 @@ from collections import Counter
 import jwt
 from jwt.algorithms import RSAAlgorithm
 from dotenv import load_dotenv
+from werkzeug.exceptions import BadRequest
 from flask import (
     Flask,
     Response,
     abort,
     flash,
     jsonify,
+    make_response,
     redirect,
     render_template,
     request,
@@ -36,6 +39,14 @@ from werkzeug.routing import IntegerConverter, ValidationError
 
 from db import get_connection, get_db_path, init_db
 from extraction import ExtractionError, extract_standings, extraction_enabled
+from line_finder import (
+    DEFAULT_HALF_LIFE,
+    MAX_HALF_LIFE,
+    MIN_HALF_LIFE,
+    compute as line_finder_compute,
+    line_finder_players,
+    load_pair,
+)
 from maps import (
     BASE_EDITIONS,
     DEFAULT_EDITION,
@@ -3421,6 +3432,129 @@ def extract_scores():
             ],
         }
     )
+
+
+
+# --- Line Finder (read-only) ---
+#
+# "How many points should the second player get at the start of a cup for it
+# to be a coin flip?" — per format, with the evidence. All the math lives in
+# line_finder.py; these routes only validate the query string, load the pair
+# and serialise. Both sit behind the password gate like every other page
+# (nothing here is in GATE_EXEMPT_PATHS), and there is no write path.
+
+
+_HALF_LIFE_RE = re.compile(r"[0-9]{1,6}")
+
+
+def parse_line_finder_params(args):
+    """Validate the Line Finder query string — strictly.
+
+    half_life: ASCII digits only, 14..365, or the exact literal "none"/"all"
+    for unweighted (default 90). two_player: exactly "0"/"1" (default 0).
+    actual/fitted: exactly "0"/"1" (default 1) — view-only flags the page
+    reads back so a shared URL opens the same way. An EMPTY value means the
+    default; anything else ("+14", " 90", "1_5", non-ASCII digits, "yes")
+    raises InvalidInput (-> 400, never a 500).
+    """
+    raw = args.get("half_life") or ""
+    if raw == "":
+        half_life = DEFAULT_HALF_LIFE
+    elif raw in ("none", "all"):
+        half_life = None
+    elif _HALF_LIFE_RE.fullmatch(raw):
+        half_life = int(raw)
+        if not (MIN_HALF_LIFE <= half_life <= MAX_HALF_LIFE):
+            raise InvalidInput(
+                f"half_life must be between {MIN_HALF_LIFE} and {MAX_HALF_LIFE} days, or 'none'."
+            )
+    else:
+        raise InvalidInput("half_life must be a whole number of days, or 'none'.")
+    flags = {}
+    for name, default in (("two_player", False), ("actual", True), ("fitted", True)):
+        value = args.get(name) or ""
+        if value == "":
+            flags[name] = default
+        elif value in ("0", "1"):
+            flags[name] = value == "1"
+        else:
+            raise InvalidInput(f"{name} must be 0 or 1.")
+    return {"half_life": half_life, **flags}
+
+
+def _line_finder_json(payload, status=200):
+    """JSON response that is never cached: the numbers change with every cup
+    and the page sits behind a session cookie (defence in depth behind the
+    Cloudflare edge)."""
+    resp = jsonify(payload)
+    resp.status_code = status
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+def _load_line_finder_pair():
+    names = line_finder_players()
+    conn = get_connection()
+    try:
+        return names, load_pair(conn, names)
+    finally:
+        conn.close()
+
+
+@app.route("/line-finder")
+def line_finder():
+    try:
+        params = parse_line_finder_params(request.args)
+    except InvalidInput as e:
+        # Same no-store posture as every other Line Finder response, 400s
+        # included (abort() would bypass the header).
+        err = BadRequest(description=str(e)).get_response()
+        err.headers["Cache-Control"] = "no-store"
+        return err
+    names, pair = _load_line_finder_pair()
+    resp = make_response(
+        render_template(
+            "line_finder.html",
+            params=params,
+            player_a=names[0],
+            player_b=names[1],
+            pair_available=pair is not None,
+        )
+    )
+    # Same posture as the JSON: the page embeds the pair's names and the
+    # current controls, and sits behind a session cookie — never cache it.
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@app.route("/line-finder/data")
+def line_finder_data():
+    try:
+        params = parse_line_finder_params(request.args)
+    except InvalidInput as e:
+        return _line_finder_json({"error": str(e)}, 400)
+    names, pair = _load_line_finder_pair()
+    if pair is None:
+        return _line_finder_json(
+            {
+                "available": False,
+                "players": {"a": names[0], "b": names[1]},
+                "message": (
+                    f"Line Finder needs players named {names[0]!r} and {names[1]!r} "
+                    f"— one of them isn't in the players list."
+                ),
+            }
+        )
+    data = line_finder_compute(
+        pair["cups"],
+        half_life=params["half_life"],
+        two_player=params["two_player"],
+        today=datetime.now(timezone.utc).date(),
+        players=pair["players"],
+        line_changes=pair["line_changes"],
+        stored_line=pair["stored_line"],
+    )
+    return _line_finder_json(data)
 
 
 if __name__ == "__main__":

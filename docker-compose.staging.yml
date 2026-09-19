@@ -50,4 +50,9 @@ services:
       - SESSION_SECRET=${SESSION_SECRET:-}
       # Optional — photo score extraction (same key as prod; staging parity).
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      # Line Finder (/line-finder) compares a hard-wired pair of players by
+      # NAME. The seeded staging DB has no real players, so point it at two
+      # seeded ones that share cups on every console. Prod uses the default
+      # pair baked into line_finder.py and needs no variable.
+      - LINE_FINDER_PLAYERS=Test Toad,Dummy Diddy
     restart: unless-stopped
