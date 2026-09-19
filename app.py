@@ -195,21 +195,87 @@ def _expected_host():
 # the visitor's scheme as X-Forwarded-Proto ("http" or "https").
 #
 # ⚠️ LOAD-BEARING RULE: redirect ONLY when X-Forwarded-Proto is present and
-# EXACTLY "http". An ABSENT header must never redirect — in-network callers
-# (the documented `docker exec ... urlopen('http://localhost:8080/healthz')`
-# health probe, the CI smoke checks, the break-staging QA container, local dev
-# and the test suite) send no X-Forwarded-Proto at all. The header rule IS the
-# exemption; do not add per-path exemptions on top of it.
+# (case-insensitively) exactly "http". An ABSENT header must never redirect —
+# in-network callers (the documented
+# `docker exec ... urlopen('http://localhost:8080/healthz')` health probe, the
+# CI smoke checks, the break-staging QA container, local dev and the test
+# suite) send no X-Forwarded-Proto at all. The header rule IS the exemption; do
+# not add per-path exemptions on top of it. Schemes are case-insensitive
+# (RFC 9110), so the comparison is lowercased — an exact `!= "http"` check let
+# `X-Forwarded-Proto: HTTP` through and served plain http silently.
 #
 # The redirect target is built from the configured APP_HOST pin, NEVER from the
 # request's own Host header or URL — reflecting the Host here would be an open
-# redirect. With APP_HOST unset/empty we fail OPEN (no redirect at all), because
-# a redirect to "https://" with an empty host is a broken loop; that is also
-# what keeps un-pinned local dev working.
+# redirect. With APP_HOST unset/empty/invalid we fail OPEN (no redirect at all),
+# because a redirect to "https://" with an empty host is a broken loop; that is
+# also what keeps un-pinned local dev working.
+#
+# ⚠️ The redirect is 307, NOT 301, and carries `Cache-Control: no-store` +
+# `Vary: X-Forwarded-Proto`. A 301 is heuristically cacheable *indefinitely*
+# under RFC 9111 with no Cache-Control at all, and a misconfigured deploy (e.g.
+# staging inheriting prod's APP_HOST default) would then burn a permanent
+# staging -> prod redirect into every visitor's browser, unfixable by any later
+# deploy. 307 also preserves the method, so a plain-http POST is re-sent over
+# https instead of being silently downgraded to a bodiless GET. HSTS already
+# provides the durable client-side upgrade, so permanence buys nothing.
+HTTPS_REDIRECT_CODE = 307
+
 # One year. Deliberately NO includeSubDomains and NO preload: each host under
 # graham-williams.com owns its own policy (this matches the apex landing page's
 # snippets/security-headers.conf, the reference implementation for all the apps).
 HSTS_HEADER_VALUE = "max-age=31536000"
+
+# APP_HOST is operator-configured, but the redirect splices it into a Location
+# header, so it is validated as a BARE HOSTNAME (no scheme, no port, no path,
+# no credentials) before it can be used there. Same shape as taste-twin's
+# _HOSTNAME_RE, deliberately, so the sibling apps agree on what a host is.
+# Without this: "km.example.com@evil.com" sends the browser to evil.com
+# (userinfo trick), "https://km.example.com" yields "https://https://…" (a very
+# plausible typo, since the sibling APP_ORIGIN var *does* take a scheme), and an
+# interior CR/LF makes Werkzeug raise -> 500 on every request.
+# NOTE \A/\Z + fullmatch, NOT ^/$ with match: in Python "$" also matches
+# immediately BEFORE A TRAILING NEWLINE, so "evil.net\n" would sail through a
+# "^...$" check and reach a response header.
+_HOSTNAME_RE = re.compile(r"\A[A-Za-z0-9](?:[A-Za-z0-9.-]{0,252}[A-Za-z0-9])?\Z")
+
+
+def _validated_redirect_host(value):
+    """Return `value` if it is a bare hostname safe to splice into a Location.
+
+    Anything else (scheme prefix, userinfo '@', port, path, ANY whitespace
+    including a trailing newline, CR/LF, empty) collapses to "" -> the redirect
+    fails OPEN.
+
+    Deliberately does NOT strip: APP_HOST is already stripped where it is read,
+    and being strict here means this layer still rejects "evil.net\\n" if that
+    outer strip is ever removed. Same posture as taste-twin's check.
+    """
+    return value if value and _HOSTNAME_RE.fullmatch(value) else ""
+
+
+# The validated host the redirect may point at. Invalid -> treated as blank
+# (fail open), matching the unset-APP_HOST posture. Host pinning (_expected_host,
+# the CSRF check) deliberately still uses raw APP_HOST and is unaffected.
+HTTPS_REDIRECT_HOST = _validated_redirect_host(APP_HOST)
+
+if APP_HOST and not HTTPS_REDIRECT_HOST:
+    app.logger.warning(
+        "APP_HOST=%r is not a bare hostname — the http->https redirect is "
+        "DISABLED (Host pinning is unaffected). Expected e.g. "
+        "'km.graham-williams.com', with no scheme, port, path or '@'.",
+        APP_HOST,
+    )
+elif not HTTPS_REDIRECT_HOST and APP_ENV == "production":
+    # Fail-open used to be completely silent: a deploy that drops APP_HOST turns
+    # enforcement off with zero signal, and HSTS keeps being sent so an external
+    # `curl -I` still LOOKS enforced. APP_HOST is a public hostname, so there is
+    # nothing sensitive about naming it in a log.
+    app.logger.warning(
+        "APP_HOST is not set — the http->https redirect is DISABLED. HSTS is "
+        "still sent, so this will not show up in `curl -I`. Prod/staging get "
+        "APP_HOST from docker-compose.access.yml / docker-compose.staging.yml; "
+        "a deploy without those overrides silently loses the redirect."
+    )
 
 # Characters that must never reach a Location header (response-splitting) or a
 # URL path. Anything with these falls back to the rebuilt-from-WSGI form.
@@ -217,22 +283,34 @@ _CTL_CHARS = frozenset(chr(c) for c in range(0x20)) | {"\x7f"}
 
 # Sub-delims + ':' and '@' are legal, unencoded path characters (RFC 3986
 # pchar). Keeping them in `safe` means the rebuilt path stays byte-identical to
-# a normal request line. '%' is deliberately NOT safe: PATH_INFO arrives already
-# percent-DECODED, so a literal '%' in the path must be re-encoded to '%25'.
+# a normal request line. '%' is deliberately NOT safe: in the FALLBACK branch
+# below PATH_INFO arrives already percent-DECODED, so a literal '%' has to be
+# re-encoded to '%25' there. (The RAW_URI passthrough — the branch that actually
+# runs in production — echoes the raw request line, so a literal '%' stays a
+# bare '%' on that path. That is correct: it is what the client sent.)
 _PATH_SAFE = "/:@!$&'()*+,;=~"
 
 
 def _forwarded_request_target():
     """Return the request target (path + query) to redirect to, byte-for-byte.
 
-    Preferred source is the raw request line the WSGI server recorded (gunicorn
-    sets RAW_URI; werkzeug sets both RAW_URI and REQUEST_URI), because it is the
-    ONLY exact copy of what the client sent. Flask's request.path / full_path
-    are already percent-DECODED, so building the target from them mangles
-    "%20", "%3F" and friends.
+    Preferred source is the raw request line the WSGI server recorded, because
+    it is the ONLY exact copy of what the client sent. Flask's request.path /
+    full_path are already percent-DECODED, so building the target from them
+    mangles "%20", "%3F" and friends.
+
+    ⚠️ The two environ keys are NOT equivalent, despite being tried in a loop:
+    gunicorn (production) sets RAW_URI only and never REQUEST_URI; werkzeug's
+    dev server and the Flask test client set both. REQUEST_URI therefore only
+    ever matters off-production.
 
     Falls back to re-encoding SCRIPT_NAME + PATH_INFO (+ QUERY_STRING) when no
-    raw target is available or it isn't an origin-form path.
+    raw target is available or it isn't a control-char-free origin-form path.
+    ⚠️ That fallback is near-dead under gunicorn: RAW_URI is always set, and
+    gunicorn itself rejects CR/LF/space in the request line with a 400 before
+    the app is ever called. In practice only a raw NUL byte or an absolute-form
+    /"*" request target reaches it, so treat its test coverage as documenting
+    intent rather than as production behaviour.
     """
     environ = request.environ
     for key in ("RAW_URI", "REQUEST_URI"):
@@ -256,12 +334,24 @@ def _forwarded_request_target():
 
 @app.before_request
 def https_redirect():
-    """301 plain-http requests to the https origin (registered FIRST, see above)."""
-    if request.headers.get("X-Forwarded-Proto") != "http":
+    """307 plain-http requests to the https origin (registered FIRST, see above)."""
+    # Schemes are case-insensitive, so normalise before comparing. Note this
+    # must still NOT match a multi-hop "http, https" value — only a lone "http".
+    proto = (request.headers.get("X-Forwarded-Proto") or "").strip().lower()
+    if proto != "http":
         return  # https, or no header at all (in-network probe / dev / tests)
-    if not APP_HOST:
-        return  # fail open — no pinned host means no safe target to build
-    return redirect(f"https://{APP_HOST}{_forwarded_request_target()}", code=301)
+    if not HTTPS_REDIRECT_HOST:
+        return  # fail open — no valid pinned host means no safe target to build
+    response = redirect(
+        f"https://{HTTPS_REDIRECT_HOST}{_forwarded_request_target()}",
+        code=HTTPS_REDIRECT_CODE,
+    )
+    # Never let this response be cached: with a misconfigured APP_HOST it would
+    # otherwise pin a wrong destination into the browser permanently, and the
+    # decision depends entirely on a request header shared caches don't key on.
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Vary"] = "X-Forwarded-Proto"
+    return response
 
 
 @app.after_request
