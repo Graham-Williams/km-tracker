@@ -296,6 +296,7 @@
       var value;
       if (fm.rec == null) value = el('div', { class: 'lf-tile-v lf-tile-v-na', text: 'n/a' });
       else if (fm.rec === 0) value = el('div', { class: 'lf-tile-v', text: 'Even' });
+      else if (fm.rec < 0) value = el('div', { class: 'lf-tile-v' }, [d.players.a + ' ', el('span', { text: fmtLine(-fm.rec) })]);
       else value = el('div', { class: 'lf-tile-v' }, [d.players.b + ' ', el('span', { text: fmtLine(fm.rec) })]);
       tile.appendChild(value);
       var sub = [];

@@ -286,15 +286,15 @@ def test_fmt_line_renders_even_and_halves():
 @pytest.mark.parametrize(
     "mean,se,expected",
     [
-        (-0.6, 3.5, (0, True)),  # inside the noise -> even
-        (2.9, 3.0, (0, True)),
+        (-0.6, 3.5, (-1, True)),  # inside the noise -> still the point estimate, flagged
+        (2.9, 3.0, (3, True)),
         (18.4, 2.2, (18, False)),  # clear edge -> round(mean)
         (-4.0, 3.5, (-4, False)),
         (3.0, 3.0, (3, False)),  # boundary: |mean| == se is NOT inside
         (0.0, 0.0, (0, False)),
     ],
 )
-def test_recommend_line_is_even_inside_the_noise(mean, se, expected):
+def test_recommend_line_is_the_point_estimate_and_flags_noise(mean, se, expected):
     assert lf.recommend_line({"mean": mean, "sd": 1.0, "se": se}) == expected
 
 
@@ -378,10 +378,10 @@ def test_compute_recommendations_and_shape():
     assert "changes" not in out["line_history"]
 
 
-def test_compute_recommends_even_when_the_edge_is_inside_the_noise():
+def test_compute_keeps_the_point_estimate_inside_the_noise_and_says_so():
     """Switch margins +1, +3, -2: mean +0.67 but SE ~1.2, so the fitted edge is
-    not distinguishable from zero -> recommend even (not +1), say why, and
-    keep the raw mean/SE in the JSON."""
+    not distinguishable from zero -> still recommend +1 (the point estimate),
+    flag it, add the 'inside the noise' note, keep the raw mean/SE."""
     cups = [
         cup(1, "2026-09-01", "mk8dx", 41, 40),
         cup(2, "2026-09-02", "mk8dx", 43, 40),
@@ -391,17 +391,18 @@ def test_compute_recommends_even_when_the_edge_is_inside_the_noise():
     sw = out["formats"]["mk8dx"]
     assert sw["model"]["mean"] == pytest.approx(2 / 3, abs=1e-3)
     assert sw["se"] > abs(sw["model"]["mean"])
-    assert sw["rec"] == 0
+    assert sw["rec"] == 1
     assert sw["rec_within_noise"] is True
-    assert sw["fitted_at_rec"] == pytest.approx(lf.fitted_pct(2 / 3, sw["model"]["sd"], 0), abs=0.05)
-    assert any("not distinguishable from even" in n for n in sw["notes"])
+    assert sw["fitted_at_rec"] == pytest.approx(lf.fitted_pct(2 / 3, sw["model"]["sd"], 1), abs=0.05)
+    assert any("inside the noise" in n for n in sw["notes"])
     assert any("Fitted +0.7 ± " in n for n in sw["notes"])
-    assert any("at even (fitted" in n for n in sw["notes"])
-    assert not any("rule out ties" in n for n in sw["notes"])
-    # The same edge with far less noise rounds normally.
+    assert any("at +1 (fitted" in n for n in sw["notes"])
+    assert any("Use +½ to rule out ties" in n for n in sw["notes"])
+    # The same edge with far less noise: same line, no noise note.
     tight = lf.compute(cups * 40, half_life=None, today=TODAY)["formats"]["mk8dx"]
     assert tight["se"] < abs(tight["model"]["mean"])
     assert tight["rec"] == 1 and tight["rec_within_noise"] is False
+    assert not any("inside the noise" in n for n in tight["notes"])
     assert any("Use +½ to rule out ties" in n for n in tight["notes"])
 
 
@@ -528,20 +529,20 @@ def test_backtest_walks_chronologically_with_min_history():
     assert summary["mixed"]["n"] == 0 and summary["mixed"]["skipped"] == 0
 
 
-def test_backtest_recommends_even_inside_the_noise():
+def test_backtest_uses_the_point_estimate_inside_the_noise():
     """Prior Switch cups +1, +3, -2 -> mean +0.67 inside SE ~1.2 -> the walk
-    hands the 4th cup an 'even' line, not +1 (same rule as the tiles)."""
+    still hands the 4th cup +1 (the point estimate, same rule as the tiles)."""
     cups = [
         cup(1, "2026-09-01", "mk8dx", 41, 40),
         cup(2, "2026-09-02", "mk8dx", 43, 40),
         cup(3, "2026-09-03", "mk8dx", 38, 40),
-        cup(4, "2026-09-04", "mk8dx", 40, 40),  # margin 0 -> a tie at "even"
+        cup(4, "2026-09-04", "mk8dx", 40, 40),  # margin 0 -> B wins at +1
     ]
     out = lf.backtest(cups, half_life=None)
     row = out["rows"][3]
-    assert row["rec_line"] == 0
-    assert row["rec_outcome"] == "tie"
-    assert out["summary"]["mk8dx"]["rec"] == {"a": 0, "b": 0, "tie": 1}
+    assert row["rec_line"] == 1
+    assert row["rec_outcome"] == "b"
+    assert out["summary"]["mk8dx"]["rec"] == {"a": 0, "b": 1, "tie": 0}
 
 
 def test_backtest_line_used_is_net_of_the_favourites_line():

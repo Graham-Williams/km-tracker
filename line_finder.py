@@ -149,15 +149,15 @@ def recommend(mean):
 def recommend_line(model):
     """(recommended line, within_noise) for a format model.
 
-    The model mean rounded half away from zero — unless the mean is smaller
-    than its own standard error (|mean| < se), in which case the edge is not
-    distinguishable from zero and the recommendation is "even" (0), flagged
-    so the tile can say why. Every consumer (tiles, chart markers, shaded
-    table rows, the backtest walk) goes through this one function.
+    Always the point estimate: the model mean rounded half away from zero
+    (Graham's call, 2026-09-19 — an earlier rule zeroed it inside the noise,
+    which quietly favoured the stronger player on thin data). `within_noise`
+    (|mean| < se) is informational only: the tile flags it and the note says
+    even the sign is uncertain, but the line is never changed by it. Every
+    consumer (tiles, chart markers, shaded table rows, the backtest walk)
+    goes through this one function.
     """
-    if abs(model["mean"]) < model["se"]:
-        return 0, True
-    return recommend(model["mean"]), False
+    return recommend(model["mean"]), abs(model["mean"]) < model["se"]
 
 
 def half_line(mean, rec):
@@ -454,21 +454,18 @@ def _tile_notes(fmt, a, b, cups, all_cups, fm, stats, half_life, today, stored_l
             f"Not enough {label} cups to fit a line yet — each console needs at "
             f"least {MIN_SD_SAMPLES} samples."
         )
-    elif fm["rec_within_noise"]:
-        notes.append(
-            f"{a} wins about {round(fm['fitted_at_rec'])}% of {label} cups at even "
-            f"(fitted, ±{fm['se']:.1f})."
-        )
-        notes.append(
-            f"Fitted {fmt_signed(fm['model']['mean'])} ± {fm['se']:.1f} — not "
-            f"distinguishable from even, so play it straight."
-        )
     else:
         notes.append(
             f"{a} wins about {round(fm['fitted_at_rec'])}% of {label} cups at "
             f"{fmt_line(fm['rec'])} (fitted, ±{fm['se']:.1f}). "
             f"Use {fmt_line(half_line(fm['model']['mean'], fm['rec']))} to rule out ties."
         )
+        if fm["rec_within_noise"]:
+            notes.append(
+                f"Fitted {fmt_signed(fm['model']['mean'])} ± {fm['se']:.1f} — inside the "
+                f"noise: the edge is smaller than its own error bar, so even the sign is "
+                f"uncertain. The line is still the best estimate."
+            )
     own = [c for c in cups if c["game_edition"] == fmt]
     if fmt in BASE_EDITIONS and own:
         margins = [margin_of(c) for c in own]
