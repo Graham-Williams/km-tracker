@@ -181,8 +181,94 @@ get in — verify that others can't:
 
 ## Public access hardening
 
-Two app-side guards back up Cloudflare Access as defense-in-depth. Both are
+Three app-side guards back up Cloudflare Access as defense-in-depth. All are
 `before_request` hooks in `app.py`.
+
+### HTTPS enforcement at the origin (issue #85)
+
+Cloudflare's zone-wide **Always Use HTTPS** already 301s `http` → `https` at the
+edge, but that is one dashboard toggle away from regressing, so the app enforces
+it itself:
+
+- **Redirect.** `https_redirect()` **307**s to `https://$APP_HOST<path?query>`
+  when the request carries `X-Forwarded-Proto: http` (cloudflared forwards the
+  visitor's scheme in that header). It is registered **first**, so a plain-http
+  request is redirected before the CSRF, Access and password-gate hooks run — a
+  visitor never gets the login page in the clear.
+- **⚠️ 307, not 301, plus `Cache-Control: no-store` and
+  `Vary: X-Forwarded-Proto`.** A 301 is heuristically cacheable *indefinitely*
+  under RFC 9111 even with no `Cache-Control`, so a deploy with the wrong
+  `APP_HOST` (e.g. staging brought up without `docker-compose.staging.yml`,
+  inheriting prod's default) would burn a permanent staging → prod redirect into
+  every visitor's browser — **unfixable by any later deploy**. 307 also preserves
+  the method, so a plain-http POST is re-sent over https instead of being
+  silently downgraded to a bodiless GET. HSTS already gives the durable
+  client-side upgrade, so permanence buys nothing. **Don't "optimise" this to
+  301.**
+- **⚠️ It only fires when the header is present and, case-insensitively, exactly
+  `http`** (`HTTP` and `Http` count; the multi-hop `http, https` does **not**). A
+  request with **no** `X-Forwarded-Proto` is never redirected. That is deliberate
+  and load-bearing: the in-network health probe
+  (`docker exec km-tracker-app-1 python3 -c "...urlopen('http://localhost:8080/healthz')"`),
+  the CI docker-e2e job and the `break-staging` QA container all speak plain
+  HTTP without that header. **The header rule is the exemption — never add
+  per-path exemptions on top of it.**
+- **The target is built from `APP_HOST`, never from the request's `Host`.**
+  Reflecting the Host would be an open redirect. If `APP_HOST` is unset/empty
+  the app **fails open** and does not redirect (an empty host would produce a
+  broken `https:///…` loop, and local dev has no pinned host).
+- **`APP_HOST` is validated as a bare hostname before it can reach `Location`**
+  (`_validated_redirect_host()` — no scheme, no port, no path, no `@`, no
+  whitespace). A value that fails is treated exactly like blank: **fail open**,
+  no redirect. This blocks three real footguns — `km…com@evil.com` would send the
+  browser to `evil.com` (userinfo trick), `https://km…com` (a plausible typo,
+  since the sibling `APP_ORIGIN` var *does* take a scheme) would emit
+  `https://https://…`, and an interior CR/LF would 500 every request.
+- **Fail-open is now LOUD.** With `APP_ENV=production` and a blank or invalid
+  `APP_HOST`, the app logs a startup warning. Check it after a deploy:
+  `docker logs km-tracker-app-1 2>&1 | grep -i "http->https redirect is DISABLED"`
+  — **an external `curl -I` cannot tell you this**, because HSTS is still sent
+  and the response still *looks* enforced.
+  → **`APP_HOST` is therefore load-bearing in production.** Prod gets it from
+  `docker-compose.access.yml` (defaults to `km.graham-williams.com`) and staging
+  from `docker-compose.staging.yml` (`staging-km.graham-williams.com`), so a
+  normal deploy is already covered; a deploy that omits those override files
+  silently loses the redirect.
+- **HSTS.** `hsts_header()` (an `after_request` hook) adds
+  `Strict-Transport-Security: max-age=31536000` to every response — no
+  `includeSubDomains`, no `preload`, because each host under
+  `graham-williams.com` owns its own policy. Browsers ignore HSTS delivered
+  over plain http, so it is inert in local dev.
+- **Session cookies** are `Secure` + `HttpOnly` + `SameSite=Lax`. `Secure` is on
+  by default and only an explicit falsey `SESSION_COOKIE_SECURE`
+  (`0`/`false`/`no`/`off`/empty) turns it off — the test suite and plain-http
+  local dev do that so the cookie round-trips.
+
+Verify after a deploy (from the box, inside the compose network):
+
+```bash
+# 307 to the https origin — note the explicit header; without it there is no redirect.
+# Expect: 307 https://km.graham-williams.com/ max-age=31536000 no-store
+docker exec -i km-tracker-app-1 python3 - <<'PY'
+import urllib.error
+import urllib.request
+req = urllib.request.Request("http://localhost:8080/", headers={"X-Forwarded-Proto": "http"})
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *a, **k): return None
+try:
+    urllib.request.build_opener(NoRedirect).open(req)
+except urllib.error.HTTPError as e:
+    print(e.code, e.headers.get("Location"),
+          e.headers.get("Strict-Transport-Security"), e.headers.get("Cache-Control"))
+PY
+
+# The health probe must still be 200 — it sends NO X-Forwarded-Proto.
+docker exec -i km-tracker-app-1 python3 -c \
+  "import urllib.request; print(urllib.request.urlopen('http://localhost:8080/healthz').status)"
+
+# And from outside:
+curl -sI https://km.graham-williams.com/ | grep -i strict-transport-security
+```
 
 ### CSRF (Origin/Referer check) — on by default
 

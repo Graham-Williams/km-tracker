@@ -51,23 +51,32 @@ jobs:
           sudo chown -R 10001:10001 data
           docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d --build app
 
+      # NB: assert on the exact status code, NOT `curl -f`. `-f` only fails on
+      # >= 400, so a 3xx (e.g. a misconfigured http->https redirect firing on
+      # the in-network probe) would sail through both of these checks and they
+      # would pass vacuously — which is precisely what the CSS guard exists to
+      # catch.
       - name: Wait for app readiness
         run: |
           for i in $(seq 1 30); do
-            if curl -sf http://localhost:8080 > /dev/null 2>&1; then
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080 || echo 000)
+            if [ "$code" = "200" ]; then
               echo "App is ready"
               exit 0
             fi
             sleep 2
           done
-          echo "App failed to start"
+          echo "App failed to start (last status: ${code:-none})"
           docker compose logs
           exit 1
 
       - name: Verify static CSS is served
         run: |
-          curl -sf http://localhost:8080/static/css/app.css > /dev/null \
-            || (echo "app.css not served"; exit 1)
+          code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/static/css/app.css || echo 000)
+          if [ "$code" != "200" ]; then
+            echo "app.css not served (status $code)"
+            exit 1
+          fi
 
       - name: Allow host access to DB volume
         run: sudo chmod -R a+rw data
