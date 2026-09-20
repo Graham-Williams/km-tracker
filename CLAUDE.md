@@ -211,7 +211,14 @@ hardening" and "Sign-in"):
   bodiless GET. Every response carries
   `Strict-Transport-Security: max-age=31536000` (no `includeSubDomains`, no
   `preload` — each host under `graham-williams.com` owns its own policy; matches
-  the apex landing page's `snippets/security-headers.conf`). Three rules that
+  the apex landing page's `snippets/security-headers.conf`). **`Vary:
+  X-Forwarded-Proto` goes on EVERY response, not just the 307** (issue #95, B2):
+  the 200s/302s the redirect gates are equally scheme-dependent, so a shared
+  cache could otherwise store an https-served 200 and later hand it to a
+  plain-http request. It is stamped in `hsts_header` with **`response.vary.add()`,
+  never `headers["Vary"] = …`** — Flask appends `Cookie` to `Vary` itself when
+  the session is touched, and assignment would silently clobber it. `.vary.add()`
+  is idempotent, so the 307 (which sets it too) is not doubled. Three rules that
   future changes must not break:
   - **⚠️ Redirect ONLY when `X-Forwarded-Proto` is present and, *lowercased*,
     exactly `http`.** Schemes are case-insensitive (RFC 9110) — an exact
@@ -232,7 +239,16 @@ hardening" and "Sign-in"):
     (`_validated_redirect_host()`, `\A…\Z` + `fullmatch` — *not* `^…$`, which in
     Python also matches before a trailing newline) before it can reach a
     `Location`: `host@evil.com`, `https://host`, a port, a path or any whitespace
-    all collapse to blank → fail open. Fail-open **logs a startup warning**; an
+    all collapse to blank → fail open. **It must also contain at least one DOT,
+    and its final label may not be all-digits** (issue #95, B1) — a public origin
+    pin always has a dot, and without that rule `APP_HOST=localhost` (or a bare
+    IPv4 literal, or the compose service name `app`) *validated*, so every
+    plain-http visitor was handed a live `Location: https://localhost/…`: broken
+    for everyone, and silent precisely BECAUSE the value passed validation, so
+    the loud fail-open branch never fired. Those values now fail open + warn,
+    which is the diagnosable outcome. Strictly a tightening — every real host
+    (`km.` / `staging-km.graham-williams.com`, the apex, the 253-char boundary)
+    still passes. Fail-open **logs a startup warning**; an
     external `curl -I` can't detect it, because HSTS is still sent either way.
     The two fail-open cases warn under **different** conditions on purpose: an
     *invalid* `APP_HOST` warns **unconditionally** (a typo is always worth

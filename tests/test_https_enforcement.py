@@ -77,7 +77,52 @@ def test_redirect_is_not_cacheable(client, pinned):
     assert resp.headers["Cache-Control"] == "no-store"
     # The decision depends entirely on a request header shared caches don't key
     # on by default, so say so explicitly.
-    assert resp.headers["Vary"] == "X-Forwarded-Proto"
+    assert "X-Forwarded-Proto" in resp.headers["Vary"]
+
+
+# --- B2: Vary is two-sided ------------------------------------------------
+#
+# `Vary: X-Forwarded-Proto` used to be on the 307 ONLY. The 200s/302s whose
+# content the redirect decision gates are equally scheme-dependent, so a shared
+# cache could store an https-served 200 and later hand it to a plain-http
+# request. Behind Cloudflare that is theoretical today -- but "the edge is one
+# dashboard toggle from regressing" is this feature's whole threat model.
+
+
+def _vary_tokens(resp):
+    return {t.strip().lower() for t in resp.headers.get("Vary", "").split(",") if t.strip()}
+
+
+@pytest.mark.parametrize("headers", [
+    {},                                     # in-network probe: no XFP at all
+    {"X-Forwarded-Proto": "https"},         # the normal tunnel case
+])
+def test_vary_is_on_non_redirect_responses_too(client, pinned, headers):
+    resp = client.get("/healthz", headers=headers)
+    assert resp.status_code == 200
+    assert "x-forwarded-proto" in _vary_tokens(resp)
+
+
+def test_vary_is_on_the_redirect_as_well(client, pinned):
+    assert "x-forwarded-proto" in _vary_tokens(_http(client, "/cups"))
+
+
+def test_vary_append_does_not_clobber_an_existing_value(client, pinned):
+    # ⚠️ The regression this guards: `headers["Vary"] = "X-Forwarded-Proto"`
+    # DROPS a Vary already on the response. Flask adds "Cookie" itself whenever
+    # the session is touched, so assignment here would break session caching.
+    # `.vary.add()` appends instead. Both values must survive together.
+    resp = client.get("/")
+    resp.headers["Vary"] = "Cookie"          # simulate a pre-existing value
+    app_module.hsts_header(resp)
+    assert _vary_tokens(resp) == {"cookie", "x-forwarded-proto"}
+
+
+def test_vary_add_is_idempotent(client, pinned):
+    resp = client.get("/")
+    app_module.hsts_header(resp)
+    app_module.hsts_header(resp)
+    assert list(_vary_tokens(resp)).count("x-forwarded-proto") == 1
 
 
 def test_post_over_http_keeps_its_method(client, pinned):
@@ -203,7 +248,8 @@ assert (len(_MAX_LEN_HOST), len(_OVERLONG_HOST)) == (253, 254)
     [
         "km.graham-williams.com",
         "staging-km.graham-williams.com",
-        "localhost",
+        "graham-williams.com",   # apex: two labels is the minimum
+        "a.b",                   # shortest possible two-label host
         _MAX_LEN_HOST,           # exactly at the DNS maximum
     ],
 )
@@ -228,6 +274,18 @@ def test_valid_app_host_values_are_accepted(value):
         "km-.graham-williams.com",          # TRAILING-hyphen label
         _OVERLONG_HOST,                     # 254 chars: one over the DNS max
         "km..graham-williams.com",          # empty label
+        # --- B1: a public origin pin always has a dot -------------------
+        # These USED TO VALIDATE, which is exactly why the bug was silent:
+        # APP_HOST=localhost produced a live `Location: https://localhost/...`
+        # for every plain-http visitor instead of tripping the fail-open warning.
+        "localhost",                        # single label
+        "x",                                # single label
+        "app",                              # a compose service name
+        "127.0.0.1",                        # bare IPv4 literal
+        "192.168.1.1",
+        "0.0.0.0",
+        "::1",                              # IPv6 (never matched: ':' not in class)
+        "[::1]",
         "",
         None,
     ],
@@ -244,6 +302,8 @@ def test_hostile_or_malformed_app_host_is_rejected(value):
         "km.graham-williams.com@evil.com",
         "https://km.graham-williams.com",
         "km.graham-williams.com\n",
+        "localhost",        # B1: measured on staging -- used to emit a live
+        "127.0.0.1",        #     `Location: https://localhost/...` to everyone
     ],
 )
 def test_invalid_app_host_disables_the_redirect_rather_than_emitting_it(
