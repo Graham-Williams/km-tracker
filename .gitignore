@@ -35,6 +35,14 @@ data/
 *.db-journal
 *.db-wal
 *.db-shm
+# A test that hands the literal string ":memory:" to a FILE-opening path
+# (rather than straight to sqlite3.connect) creates a real file named
+# ":memory:" in the repo root, plus its -wal/-shm siblings. They are
+# throwaway, and the *.db rules above do not match them.
+:memory:
+:memory:-wal
+:memory:-shm
+:memory:-journal
 # Backup runtime state (checksums, last-push timestamp) on the host
 .backup-state/
 
