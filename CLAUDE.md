@@ -25,6 +25,55 @@ This is a public GitHub repo — keep all committed content professional and gen
 - **Deployment:** Docker container with gunicorn (see `Dockerfile`, `docker-compose.yml`). The `app` container runs as a **non-root user (UID 10001)** and publishes **no host port** — the `cloudflared` connector reaches it over the compose network at `http://app:8080`. Because `./data` is bind-mounted, the host dir must be `chown`'d to UID 10001 before first launch (see `DEPLOY.md`). Local dev still uses `python app.py` directly (debug off by default; set `FLASK_DEBUG=1` to enable). Can be self-hosted on a headless Linux box via Docker + a Cloudflare named tunnel (`cloudflared` service in compose, image pinned to a released tag), gated behind Cloudflare Access. `SECRET_KEY` and `TUNNEL_TOKEN` come from a gitignored `.env` (`cloudflared` reads `TUNNEL_TOKEN` from env, not the command line; see `.env.example`). Full runbook in `DEPLOY.md`
 - **Dependencies:** `requirements.txt` = prod (flask, python-dotenv, gunicorn, PyJWT, anthropic); `requirements-dev.txt` = prod + test deps (pytest, playwright)
 
+
+### Dependabot auto-merge — what merges itself, what stops for Graham
+
+`ci.yml` has a `dependabot-auto-merge` job. **Merges itself**, with no review,
+only when ALL of these hold:
+
+1. The PR author is `dependabot[bot]`, and `dependabot/fetch-metadata` confirms
+   the head commit was authored by Dependabot **and carries a verified
+   signature**. Nobody can hand-craft a PR into this path.
+2. **Every other job in the same workflow run succeeded** — that is literally
+   the `needs:` list, which names every sibling job.
+3. The update is **semver-minor**, **semver-patch**, or a **Docker digest
+   refresh** (same image tag, rebuilt digest).
+
+**Always stops for Graham:**
+
+- Any **major** version bump — *including a security update*. A security fix
+  that crosses a major still waits for him.
+- Any PR where no semver level could be derived and it is not a digest refresh.
+  An unknown update type is an absence of signal, never a pass.
+- Anything whose tests failed, errored, or did not run. **A run with no checks
+  can never merge**, because the merge step is unreachable unless the jobs it
+  needs actually reported success.
+
+**The gate is `needs:`, not branch protection — do not "simplify" it to
+`gh pr merge --auto`.** GitHub's native auto-merge only waits for checks that
+branch protection marks as *required*, and none of these repos define required
+status checks (baby-pool is private, where the plan offers no branch protection
+or rulesets at all). On such a repo `--auto` silently degrades to "merge now",
+which would merge a PR whose tests never ran. Depending on the sibling jobs
+behaves identically on every repo, protected or not. For the same reason
+`allow_auto_merge` is deliberately left **off** — the design does not use it.
+
+The trigger is `pull_request`, **not** `pull_request_target`. The auto-merge
+job checks out nothing and runs no PR code; the only job that runs repository
+code is `test`, which holds a read-only token. A `pull_request` run from a fork
+gets a read-only token regardless of the `permissions:` block, so the write
+scopes are unreachable from a fork.
+
+Each run writes its decision and reasoning to the job summary, so the reason a
+particular PR did or did not merge is always on the run page.
+
+**Known false negative (safe):** for a bounded requirement range —
+`Update X requirement from <4.0,>=3.0 to >=3.1.3,<4.0` — `fetch-metadata`'s
+regex reads the bounds as the versions and reports **semver-major**, so these
+stop for Graham even though they are minor floor bumps. That is the fail-closed
+direction, and it is left alone on purpose: overriding a "major" verdict with
+home-grown parsing would turn a safe stop into a possible unsafe merge.
+
 ## Self-Hosted Deployment & Backups
 
 The app is self-hosted on a headless Ubuntu Server box ("personalserver"), running
