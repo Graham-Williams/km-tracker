@@ -582,14 +582,6 @@ Graham is a senior software engineer with ~10 years of experience. Don't simplif
 
 Significant design decisions belong in the README, not buried in code comments or local notes. If a decision is worth remembering, it's worth putting where anyone reading the repo can find it.
 
-## Feature Context (Local)
-
-Per-feature Claude context lives in `.claude/features/` — gitignored, personal, not committed. Each feature gets a subdirectory with markdown covering: overview, design decisions, gotchas, related files, and verification steps (automated + manual).
-
-The format is: one `context.md` per feature directory, using `.claude/features/TEMPLATE.md` as a starting point. Read the relevant feature context before working on a feature.
-
-Note: `.claude/` is gitignored **except `.claude/skills/`** (shared, committed tooling — see below). Personal per-feature context under `.claude/features/` stays local; recreate it on a new machine as needed — the convention is described here.
-
 ## Claude Code Skills
 
 Reusable agent skills live in `.claude/skills/` and **are committed** (a `.gitignore` negation re-includes that path while the rest of `.claude/` stays personal/local). They're shared tooling any session can invoke.
@@ -615,7 +607,7 @@ After any UI change, run autonomous visual testing before asking for manual veri
 | Phone (iPhone 16 Pro) | 393 x 852 |
 | Phone (Pixel 9 Pro) | 412 x 915 |
 
-Save screenshots to `.claude/features/<feature-name>/screenshots/` (e.g. `desktop_index.png`, `iphone_cup_session.png`). Include all screenshots in the PR description when opening the PR.
+Save screenshots outside the repo, in the session's scratch directory (e.g. `desktop_index.png`, `iphone_cup_session.png`). Include all screenshots in the PR description when opening the PR.
 
 ## Game Editions
 
