@@ -3,7 +3,7 @@
 # comment there. These versions are the ones the suite is verified against.
 -r requirements.txt
 pytest==8.4.2
-pytest-playwright==0.7.1
+pytest-playwright==0.9.0
 # Pinned alongside pytest-playwright because the browser binaries are
 # version-matched to this package: an unpinned playwright silently moves and
 # every e2e test then errors out until `playwright install chromium` is re-run
