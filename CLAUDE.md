@@ -23,8 +23,49 @@ This is a public GitHub repo — keep all committed content professional and gen
 - **Port:** 8080 (5000 conflicts with macOS AirPlay Receiver)
 - **Network access:** Binds to `0.0.0.0` so other devices on the local network can reach it
 - **Deployment:** Docker container with gunicorn (see `Dockerfile`, `docker-compose.yml`). The `app` container runs as a **non-root user (UID 10001)** and publishes **no host port** — the `cloudflared` connector reaches it over the compose network at `http://app:8080`. Because `./data` is bind-mounted, the host dir must be `chown`'d to UID 10001 before first launch (see `DEPLOY.md`). Local dev still uses `python app.py` directly (debug off by default; set `FLASK_DEBUG=1` to enable). Can be self-hosted on a headless Linux box via Docker + a Cloudflare named tunnel (`cloudflared` service in compose, image pinned to a released tag), gated behind Cloudflare Access. `SECRET_KEY` and `TUNNEL_TOKEN` come from a gitignored `.env` (`cloudflared` reads `TUNNEL_TOKEN` from env, not the command line; see `.env.example`). Full runbook in `DEPLOY.md`
-- **Dependencies:** `requirements.txt` = prod (flask, python-dotenv, gunicorn, PyJWT, anthropic); `requirements-dev.txt` = prod + test deps (pytest, playwright)
+- **Dependencies:** `requirements.txt` = prod (flask, python-dotenv, gunicorn, PyJWT, anthropic); `requirements-dev.txt` = prod + test deps (pytest, pytest-playwright, playwright, requests). **All of them are pinned exactly (`==`) — see "Dependency pinning" below before changing that.**
 
+
+### Dependency pinning — exact `==`, never a bounded range
+
+`requirements.txt` / `requirements-dev.txt` pin **every** direct dependency to an
+exact version. This is a deliberate convention (adopted 2026-09-27, matching
+baby-pool); do not "tidy" it back into `>=`/`<` ranges. Two reasons:
+
+1. **Reproducibility.** The Dockerfile runs `pip install -r requirements.txt`, so
+   a `>=` floor installs whatever is newest at *image-build* time — the deployed
+   versions are decided by the clock, not by the repo. Under the old ranges this
+   file said `flask>=3.0,<4.0` / `anthropic>=0.116,<1.0` while prod ran Flask
+   3.1.3 and anthropic 0.125.0, so "what is deployed?" could not be answered
+   from the repo at all. An upper bound is *not* an adequate substitute: it
+   prevents a surprise major but still leaves every minor/patch floating.
+2. **Dependabot classifies exact pins correctly and bounded ranges incorrectly.**
+   `dependabot/fetch-metadata` misparses a two-sided range. `flask>=3.0,<4.0`
+   produced the PR title `Update flask requirement from <4.0,>=3.0 to
+   >=3.1.3,<4.0` and `update-type: version-update:semver-major` for what was a
+   **minor** bump, so `ci.yml`'s auto-merge gate (correctly) refused it and the
+   PR stuck forever. The correlation was exact: every bounded entry misparsed,
+   every exact-pinned entry parsed fine. With `==` the title is `Bump X from A to
+   B` and minor/patch bumps auto-merge on green CI as intended.
+
+Rules when touching these files:
+
+- Pin to the version **actually deployed**, verified rather than recalled:
+  `ssh graham@100.101.1.28 'docker exec km-tracker-app-1 python3 -m pip freeze'`.
+  Never let a pin land *below* what prod runs — that is a silent downgrade on the
+  next deploy.
+- Let a Dependabot PR do the upgrading. Don't fold a version bump into an
+  unrelated change; a correctly-titled bump now auto-merges on its own.
+- **Transitive** deps (Werkzeug, cryptography, ...) are intentionally left to the
+  resolver — pin one only for a specific reason, stated in a comment next to it
+  (baby-pool's `Werkzeug>=3.0.6  # CVE-...` floor is the model). Same for a floor
+  that exists for a CVE: keep the explanatory comment, pin at or above the floor.
+- **The pinned set requires Python >= 3.10** (`python-dotenv` 1.2.2+ and
+  `gunicorn` 25+ both dropped 3.9). The Dockerfile and CI are on 3.12; the Mac's
+  system `python3` is 3.9, so a `.venv` built from it cannot install
+  `requirements-dev.txt` — build the dev venv on 3.12
+  (`uv venv --python 3.12 .venv`) or the install fails with a confusing
+  "no matching distribution" for a version that definitely exists.
 
 ### Dependabot auto-merge — what merges itself, what stops for Graham
 
