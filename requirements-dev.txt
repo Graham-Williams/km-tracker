@@ -2,7 +2,7 @@
 # Pinned exactly for the same two reasons as requirements.txt — see the header
 # comment there. These versions are the ones the suite is verified against.
 -r requirements.txt
-pytest==8.4.2
+pytest==9.1.1
 pytest-playwright==0.9.0
 # Pinned alongside pytest-playwright because the browser binaries are
 # version-matched to this package: an unpinned playwright silently moves and
