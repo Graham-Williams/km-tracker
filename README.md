@@ -18,8 +18,12 @@ A tracker and suite of tools for Kario Mart game nights.
 ### Setup
 
 ```bash
-python3 -m venv .venv
+# Python 3.12, NOT the Mac's system python3 (3.9) — the pinned dependency set
+# requires >= 3.10, and a 3.9 venv fails the install with a confusing
+# "no matching distribution" for versions that definitely exist.
+uv venv --python 3.12 .venv
 .venv/bin/pip install -r requirements-dev.txt
+.venv/bin/playwright install chromium   # for the e2e suite
 ```
 
 ### Running the App

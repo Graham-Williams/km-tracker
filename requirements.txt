@@ -1,5 +1,24 @@
-flask>=3.0,<4.0
-python-dotenv>=1.0,<2.0
-gunicorn>=23.0,<24.0
-PyJWT[crypto]>=2.10.1,<3.0
-anthropic>=0.116,<1.0
+# Runtime dependencies, pinned EXACTLY on purpose. Two reasons, both learned
+# the hard way — see CLAUDE.md "Dependency pinning" before loosening anything:
+#
+#   1. Reproducibility. The Dockerfile runs `pip install -r requirements.txt`,
+#      so a `>=` floor installs whatever is latest at image-build time. This
+#      file used to carry ranges and had drifted far from what prod actually
+#      ran, which made "what is deployed?" unanswerable from the repo.
+#   2. Dependabot. GitHub's `dependabot/fetch-metadata` misparses a *bounded*
+#      range: `flask>=3.0,<4.0` produced the PR title "Update flask requirement
+#      from <4.0,>=3.0 to >=3.1.3,<4.0" and was reported as
+#      `version-update:semver-major`, so ci.yml's auto-merge gate (correctly)
+#      refused a minor bump and the PR stuck forever. An exact pin produces
+#      "Bump X from A to B", which parses correctly.
+#
+# Every version below is the version running in production. Transitive deps
+# (Werkzeug, cryptography, httpx, ...) are left to the resolver; pin one here
+# only when there is a specific reason, with the reason in a comment.
+flask==3.1.3
+python-dotenv==1.2.3
+gunicorn==23.0.0
+PyJWT[crypto]==2.14.0
+# Photo score extraction. Staying on the 0.x line deliberately: 0.x -> 1.x is a
+# real SDK migration, not a chore (also encoded in .github/dependabot.yml).
+anthropic==0.125.0
