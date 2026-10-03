@@ -470,7 +470,7 @@ is generated in-process and the JWKS fetch is monkeypatched):
 - `tests/test_data_integrity.py` — regression tests for the data-integrity
   batch (issues #36/#39/#40/#41/#45); see "Data-integrity guards" below.
 
-### Data-integrity guards (issues #36, #39, #40, #41, #45, #78)
+### Data-integrity guards (issues #36, #39, #40, #41, #45, #78, #116)
 
 Stat-corrupting / crash holes found by `break-staging`, now guarded. These are
 validation/atomicity fixes only — no data migration. Contracts a future agent
@@ -503,9 +503,11 @@ must not regress:
   exceed `MAX_VOTOES` / `MAX_HALF_VETOES`. Routes use these helpers.
 - **Player/score pairing (#45):** `parse_scores_from_form` rejects a request
   where `len(player_ids[]) != len(scores[])` (ambiguous positional pairing that
-  would misattribute scores). Client side, `cup_new.html` disables ALL of a
-  removed row's inputs together (`player_ids[]` + `lines[]` + score inputs), so
-  a removed player submits nothing and the arrays stay aligned.
+  would misattribute scores). Client side, both `cup_new.html` and
+  `cup_edit.html` (#116) disable ALL of a removed row's inputs together
+  (`player_ids[]` + `lines[]` + score inputs), so a removed player submits
+  nothing and the arrays stay aligned; re-adding that player re-enables them
+  all. Covered end to end by `tests/e2e/test_cup_edit.py`.
 - **Empty cup edit (#78):** `save_scores` DELETEs every row before re-inserting,
   so `update_cup` rejects a submission with no scores (every score box cleared)
   with the same flash as `create_cup`, writing nothing (not even date/notes).
