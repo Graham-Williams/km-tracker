@@ -470,7 +470,7 @@ is generated in-process and the JWKS fetch is monkeypatched):
 - `tests/test_data_integrity.py` — regression tests for the data-integrity
   batch (issues #36/#39/#40/#41/#45); see "Data-integrity guards" below.
 
-### Data-integrity guards (issues #36, #39, #40, #41, #45)
+### Data-integrity guards (issues #36, #39, #40, #41, #45, #78)
 
 Stat-corrupting / crash holes found by `break-staging`, now guarded. These are
 validation/atomicity fixes only — no data migration. Contracts a future agent
@@ -506,6 +506,13 @@ must not regress:
   would misattribute scores). Client side, `cup_new.html` disables ALL of a
   removed row's inputs together (`player_ids[]` + `lines[]` + score inputs), so
   a removed player submits nothing and the arrays stay aligned.
+- **Empty cup edit (#78):** `save_scores` DELETEs every row before re-inserting,
+  so `update_cup` rejects a submission with no scores (every score box cleared)
+  with the same flash as `create_cup`, writing nothing (not even date/notes).
+  The guard applies only when the cup currently has score rows, so an
+  already-scoreless cup can still take a date/notes-only edit — and that edit
+  skips `save_scores` entirely, so its DELETE can't wipe scores a concurrent
+  request saved after the guard's check.
 
 ## UI / Design System
 

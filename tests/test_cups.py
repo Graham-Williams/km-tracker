@@ -1,6 +1,8 @@
 from datetime import datetime, timezone
 from unittest.mock import patch
 
+import pytest
+
 from db import get_connection
 from helpers import create_cup, create_player
 
@@ -446,34 +448,121 @@ def test_update_cup_with_scores(client):
     assert scores[1]["score"] == 150
 
 
-def test_update_cup_removes_all_scores(client):
-    """Updating a cup with no scores clears existing scores."""
+def _create_two_player_cup(client, notes="Original notes"):
     create_player(client, "Alice")
     create_player(client, "Bob")
     client.post(
         "/cups",
         data={
             "date": "2026-03-15T20:00",
-            "notes": "",
+            "notes": notes,
             "tz_offset": "",
             "player_ids[]": ["1", "2"],
             "scores[]": ["100", "80"],
+            "lines[]": ["0", "0"],
         },
     )
-    # Update with no score data
-    client.post(
+
+
+def _cup_snapshot(cup_id=1):
+    conn = get_connection()
+    cup = conn.execute(
+        "SELECT date, notes, status FROM cups WHERE id = ?", (cup_id,)
+    ).fetchone()
+    scores = conn.execute(
+        "SELECT player_id, score, line, line_score, won_tiebreaker FROM scores "
+        "WHERE cup_id = ? ORDER BY player_id",
+        (cup_id,),
+    ).fetchall()
+    conn.close()
+    return dict(cup), [tuple(r) for r in scores]
+
+
+@pytest.mark.parametrize(
+    "score_fields",
+    [
+        {},  # every row removed: no player_ids[] / scores[] at all
+        # every score box cleared: rows still submit, scores blank
+        {"player_ids[]": ["1", "2"], "scores[]": ["", ""], "lines[]": ["0", "0"]},
+    ],
+    ids=["no-rows", "cleared-boxes"],
+)
+def test_update_cup_with_no_scores_rejected(client, score_fields):
+    """Issue #78: an edit that submits no scores must not wipe the cup's
+    scoreboard. It's rejected like create_cup, and nothing is written —
+    including the date/notes that came with it."""
+    _create_two_player_cup(client)
+    before = _cup_snapshot()
+    assert len(before[1]) == 2
+
+    response = client.post(
         "/cups/1/edit",
         data={
-            "date": "2026-03-15T20:00",
+            "date": "2026-04-01T18:00",
             "notes": "Updated",
             "tz_offset": "",
+            **score_fields,
         },
         follow_redirects=True,
     )
+
+    assert b"at least one player with a score" in response.data
+    assert b"Edit Cup" in response.data  # sent back to the edit form
+    after = _cup_snapshot()
+    assert after == before
+    assert after[0]["date"] == "2026-03-15 20:00:00"
+    assert after[0]["notes"] == "Original notes"
+    assert after[1] == [(1, 100, 0, 100, None), (2, 80, 0, 80, None)]
+
+
+def test_update_scoreless_cup_notes_still_allowed(client):
+    """A cup that already has zero score rows (e.g. one emptied by the #78
+    bug before the guard existed) has nothing to lose, so a date/notes-only
+    edit on it must still save."""
+    _create_two_player_cup(client)
     conn = get_connection()
-    scores = conn.execute("SELECT * FROM scores WHERE cup_id = 1").fetchall()
+    conn.execute("DELETE FROM scores WHERE cup_id = 1")
+    conn.commit()
     conn.close()
-    assert len(scores) == 0
+
+    response = client.post(
+        "/cups/1/edit",
+        data={"date": "2026-04-01T18:00", "notes": "Fixed up", "tz_offset": ""},
+        follow_redirects=True,
+    )
+
+    assert b"at least one player with a score" not in response.data
+    cup, scores = _cup_snapshot()
+    assert cup["date"] == "2026-04-01 18:00:00"
+    assert cup["notes"] == "Fixed up"
+    assert scores == []
+
+
+def test_update_scoreless_cup_keeps_scores_saved_after_guard(client):
+    """If another request saves scores to a scoreless cup between the #78
+    guard's check and this edit's write, the empty edit must not wipe them."""
+    _create_two_player_cup(client)
+    conn = get_connection()
+    conn.execute("DELETE FROM scores WHERE cup_id = 1")
+    conn.commit()
+    conn.close()
+
+    def concurrent_save(conn, cup_id, scores_data):
+        # Runs after the guard and before the write: stands in for a
+        # concurrent request that has just saved a score to this cup.
+        conn.execute(
+            "INSERT INTO scores (cup_id, player_id, score, line, line_score) "
+            "VALUES (1, 1, 90, 0, 90)"
+        )
+
+    with patch("app.preserve_block_scores", side_effect=concurrent_save):
+        client.post(
+            "/cups/1/edit",
+            data={"date": "2026-04-01T18:00", "notes": "Fixed up", "tz_offset": ""},
+        )
+
+    _, scores = _cup_snapshot()
+    assert [(s[0], s[1]) for s in scores] == [(1, 90)]
 
 
 def test_update_cup_tiebreaker_validation(client):
