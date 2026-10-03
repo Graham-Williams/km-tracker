@@ -538,6 +538,33 @@ def test_update_scoreless_cup_notes_still_allowed(client):
     assert scores == []
 
 
+def test_update_scoreless_cup_keeps_scores_saved_after_guard(client):
+    """If another request saves scores to a scoreless cup between the #78
+    guard's check and this edit's write, the empty edit must not wipe them."""
+    _create_two_player_cup(client)
+    conn = get_connection()
+    conn.execute("DELETE FROM scores WHERE cup_id = 1")
+    conn.commit()
+    conn.close()
+
+    def concurrent_save(conn, cup_id, scores_data):
+        # Runs after the guard and before the write: stands in for a
+        # concurrent request that has just saved a score to this cup.
+        conn.execute(
+            "INSERT INTO scores (cup_id, player_id, score, line, line_score) "
+            "VALUES (1, 1, 90, 0, 90)"
+        )
+
+    with patch("app.preserve_block_scores", side_effect=concurrent_save):
+        client.post(
+            "/cups/1/edit",
+            data={"date": "2026-04-01T18:00", "notes": "Fixed up", "tz_offset": ""},
+        )
+
+    _, scores = _cup_snapshot()
+    assert [(s[0], s[1]) for s in scores] == [(1, 90)]
+
+
 def test_update_cup_tiebreaker_validation(client):
     create_player(client, "Alice")
     create_player(client, "Bob")

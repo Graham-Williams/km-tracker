@@ -1323,7 +1323,10 @@ def update_cup(cup_id):
             "UPDATE cups SET date = ?, notes = ? WHERE id = ?",
             (date_utc, notes, cup_id),
         )
-        save_scores(conn, cup_id, scores_data)
+        # Empty here means the cup had no scores at the guard above; skip the
+        # DELETE so scores a concurrent request saved since then survive.
+        if scores_data:
+            save_scores(conn, cup_id, scores_data)
         conn.commit()
     except sqlite3.IntegrityError:
         flash("A cup already exists at that time.")

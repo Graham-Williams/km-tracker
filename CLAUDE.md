@@ -507,10 +507,12 @@ must not regress:
   removed row's inputs together (`player_ids[]` + `lines[]` + score inputs), so
   a removed player submits nothing and the arrays stay aligned.
 - **Empty cup edit (#78):** `save_scores` DELETEs every row before re-inserting,
-  so `update_cup` rejects a submission with no scores (all boxes cleared / all
-  rows removed) with the same flash as `create_cup`, writing nothing (not even
-  date/notes). The guard applies only when the cup currently has score rows, so
-  an already-scoreless cup can still take a date/notes-only edit.
+  so `update_cup` rejects a submission with no scores (every score box cleared)
+  with the same flash as `create_cup`, writing nothing (not even date/notes).
+  The guard applies only when the cup currently has score rows, so an
+  already-scoreless cup can still take a date/notes-only edit — and that edit
+  skips `save_scores` entirely, so its DELETE can't wipe scores a concurrent
+  request saved after the guard's check.
 
 ## UI / Design System
 
