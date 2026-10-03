@@ -1283,6 +1283,18 @@ def update_cup(cup_id):
         conn.close()
         flash(str(e))
         return redirect(url_for("edit_cup", cup_id=cup_id))
+    if not scores_data and conn.execute(
+        "SELECT 1 FROM scores WHERE cup_id = ? LIMIT 1", (cup_id,)
+    ).fetchone():
+        # save_scores DELETEs every row before re-inserting, so an empty
+        # submission (every score box cleared, or every row removed) would
+        # silently wipe the scoreboard and leave a completed cup with nothing
+        # in it (issue #78). Reject it the way create_cup does, writing
+        # nothing — not even the date/notes. A cup that already has no scores
+        # (e.g. one emptied by that old bug) can still take a date/notes edit.
+        conn.close()
+        flash("A cup must have at least one player with a score.")
+        return redirect(url_for("edit_cup", cup_id=cup_id))
     if scores_data:
         # Switch (mk8dx) cups are lineless — drop any submitted line (incl. from
         # the add-player path) before validation or storage.
