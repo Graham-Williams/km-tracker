@@ -702,7 +702,8 @@ world/group-readable:
 chmod 600 ~/.config/rclone/rclone.conf
 ```
 
-The destination folder (`km-tracker-backups`) is **auto-created on the first
+The destination folder (`Hopper/km-tracker-backups`; `Hopper/` holds every
+script-written Drive folder) is **auto-created on the first
 copy** — you don't need to make it manually.
 
 ### 3. Configure the backup
@@ -710,7 +711,7 @@ copy** — you don't need to make it manually.
 ```bash
 cd /home/<user>/km-tracker
 cp .env.backup.example .env.backup
-# Edit .env.backup — at minimum confirm RCLONE_DEST=gdrive:km-tracker-backups
+# Edit .env.backup — at minimum confirm RCLONE_DEST=gdrive:Hopper/km-tracker-backups
 chmod 600 .env.backup   # the script refuses to source it if group/other-writable
 ```
 
@@ -793,7 +794,7 @@ journalctl -u km-backup.service --no-pager -n 50
 ls -1 ~/km-backups/snapshots/
 
 # And the file should appear in Drive:
-rclone lsf gdrive:km-tracker-backups
+rclone lsf gdrive:Hopper/km-tracker-backups
 ```
 
 ### Restore from a snapshot
@@ -835,10 +836,10 @@ cd /home/<user>/km-tracker
 # 1. Pick the snapshot to restore — a local one:
 ls -1 ~/km-backups/snapshots/
 #    ...or pull one down from Drive (recent ring, or the daily/ long-tail tier):
-rclone lsf gdrive:km-tracker-backups
-rclone lsf gdrive:km-tracker-backups/daily
+rclone lsf gdrive:Hopper/km-tracker-backups
+rclone lsf gdrive:Hopper/km-tracker-backups/daily
 mkdir -p ~/km-backups/restore
-rclone copy gdrive:km-tracker-backups/km_tracker_<TS>.db ~/km-backups/restore/
+rclone copy gdrive:Hopper/km-tracker-backups/km_tracker_<TS>.db ~/km-backups/restore/
 #    Then pin it to a variable so every step below uses the same file:
 SNAP=~/km-backups/snapshots/km_tracker_<TS>.db     # or ~/km-backups/restore/...
 

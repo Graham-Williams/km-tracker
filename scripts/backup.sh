@@ -129,7 +129,7 @@ CONTAINER_DB_PATH="${CONTAINER_DB_PATH:-/data/km_tracker.db}"  # DB path INSIDE 
 # data/ because that's the live DB the container writes; only our OUTPUT dirs move.
 LOCAL_BACKUP_DIR="${LOCAL_BACKUP_DIR:-${HOME}/km-backups/snapshots}"
 STATE_DIR="${STATE_DIR:-${HOME}/km-backups/state}"
-RCLONE_DEST="${RCLONE_DEST:-}"                       # e.g. gdrive:km-tracker-backups
+RCLONE_DEST="${RCLONE_DEST:-}"                       # e.g. gdrive:Hopper/km-tracker-backups
 LOCAL_RETENTION="${LOCAL_RETENTION:-100}"            # keep newest N local snapshots
 DRIVE_RETENTION="${DRIVE_RETENTION:-50}"             # keep newest N recent on Drive
 DAILY_RETENTION="${DAILY_RETENTION:-30}"             # keep newest N in Drive daily/ tier
