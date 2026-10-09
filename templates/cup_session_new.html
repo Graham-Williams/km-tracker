@@ -15,6 +15,8 @@
     .player-item:last-child { border-bottom: none; }
     .player-item label {
         flex: 1; display: flex; align-items: center; gap: var(--space-2); margin: 0;
+        /* A long unbroken name wraps instead of widening the page. */
+        min-width: 0; overflow-wrap: anywhere;
     }
     .player-line { font-size: 0.85rem; color: var(--color-muted); }
     .edition-hint { font-size: 0.8rem; margin-top: var(--space-1); }
