@@ -744,6 +744,9 @@ input[type="checkbox"] {
 .photo-map-name {
   flex: 1;
   font-size: 0.9rem;
+  /* A long unbroken name wraps inside the panel instead of widening the page. */
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .photo-map-select {
@@ -770,6 +773,14 @@ input[type="checkbox"] {
   background: var(--color-danger-soft);
   color: var(--color-danger);
   border: 1px solid var(--color-danger);
+}
+
+/* These lines echo player names; a long unbroken one wraps instead of
+   widening the page. */
+.photo-notes,
+.photo-map-warning,
+.photo-map-unassigned {
+  overflow-wrap: anywhere;
 }
 
 .photo-map-warning[hidden],
