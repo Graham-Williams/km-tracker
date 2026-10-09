@@ -936,21 +936,78 @@ def test_submit_cup_line_adjustment_flash(client):
     assert b"Lines adjusted" in response.data
 
 
+def _cup_status_and_score_count(cup_id=1):
+    conn = get_connection()
+    status = conn.execute("SELECT status FROM cups WHERE id = ?", (cup_id,)).fetchone()["status"]
+    n = conn.execute("SELECT COUNT(*) AS n FROM scores WHERE cup_id = ?", (cup_id,)).fetchone()["n"]
+    conn.close()
+    return status, n
+
+
 def test_submit_cup_no_scores_rejected(client):
     _setup_players(client)
     _create_session(client, ["1", "2"])
     _play_four_races(client)
-    response = client.post(
-        "/cup-session/1/complete",
-        data={"notes": "", "tz_offset": ""},
-        follow_redirects=True,
-    )
-    assert b"At least one player must have a score" in response.data
+    response = _submit_scores(client, player_ids=["1", "2"], scores=["", ""])
+    assert b"Enter a score for Alice and Bob." in response.data
     # Cup should still be in_progress
-    conn = get_connection()
-    cup = conn.execute("SELECT status FROM cups WHERE id = 1").fetchone()
-    conn.close()
-    assert cup["status"] == "in_progress"
+    assert _cup_status_and_score_count() == ("in_progress", 0)
+
+
+def test_submit_cup_names_every_player_when_all_scores_blank(client):
+    """Issue #73: the rejection says WHOSE score is missing, in form order."""
+    _setup_players(client)
+    _create_session(client, ["1", "2", "3"])
+    _play_four_races(client)
+    response = _submit_scores(client, player_ids=["3", "1", "2"], scores=["", "", ""])
+    assert b"Enter a score for Carol, Alice and Bob." in response.data
+    assert _cup_status_and_score_count() == ("in_progress", 0)
+
+
+def test_submit_cup_names_only_the_player_whose_score_is_blank(client):
+    """A partial submit used to be accepted silently, completing the cup
+    without the third player. Now it names exactly the missing one and writes
+    nothing — the other two scores are not kept either."""
+    _setup_players(client)
+    _create_session(client, ["1", "2", "3"])
+    _play_four_races(client)
+    response = _submit_scores(client, player_ids=["1", "2", "3"], scores=["100", "", "60"])
+    page = response.get_data(as_text=True)
+    assert "Enter a score for Bob." in page
+    assert _cup_status_and_score_count() == ("in_progress", 0)
+
+
+def test_submit_cup_with_every_score_completes(client):
+    """Positive control for the missing-score guard."""
+    _setup_players(client)
+    _create_session(client, ["1", "2", "3"])
+    _play_four_races(client)
+    response = _submit_scores(client, player_ids=["1", "2", "3"], scores=["100", "80", "60"])
+    assert b"Enter a score for" not in response.data
+    assert _cup_status_and_score_count() == ("completed", 3)
+
+
+def test_missing_scores_message_wording():
+    from app import MISSING_SCORES_MSG_PREFIX, missing_scores_message
+
+    assert missing_scores_message(["Alice"]) == "Enter a score for Alice."
+    assert missing_scores_message(["Alice", "Bob"]) == "Enter a score for Alice and Bob."
+    assert (
+        missing_scores_message(["Alice", "Bob", "Carol"])
+        == "Enter a score for Alice, Bob and Carol."
+    )
+    assert missing_scores_message(["Alice"]).startswith(MISSING_SCORES_MSG_PREFIX)
+
+
+def test_complete_page_injects_the_missing_scores_prefix(client):
+    """The client-side guard builds the server's own sentence from this prefix;
+    retyping it in the template would let the two wordings drift."""
+    _setup_players(client)
+    _create_session(client, ["1", "2"])
+    _play_four_races(client)
+    page = client.get("/cup-session/1/complete").get_data(as_text=True)
+    assert json.dumps("Enter a score for ") in page
+    assert 'id="submit-warning"' in page
 
 
 def test_submit_cup_tiebreaker_validation(client):

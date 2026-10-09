@@ -215,24 +215,28 @@ def test_a_mix_of_blocked_and_blank_rows_keeps_positional_alignment(client, monk
     ]
 
 
-def test_a_player_who_sat_out_does_not_shift_the_rows(client, monkeypatch):
+def test_a_player_who_sat_out_does_not_shift_the_rows():
     """The cursor that walks scores_data must be the SKIPPED-ROW cursor, not the
     raw form index. The pairing only diverges when a row is dropped BEFORE a
     block-scored one — a player who sat the cup out, blank total and blank
     halves — so `scores_data[i]` passes every other alignment test here while
-    silently writing Bob's halves onto Carol."""
-    _start_mixed(client, monkeypatch, player_ids=("1", "2", "3"))
-    _complete(
-        client,
-        player_ids=("1", "2", "3"),
-        scores=["", "50", "10"],
-        b1=["", "20", "4"],
-        b2=["", "30", "6"],
-    )
-    rows = _score_rows()
+    silently writing Bob's halves onto Carol.
+
+    Exercised on the parser directly: the completion route itself now rejects
+    a blank row (issue #73 — every rostered player needs a score), so the
+    cursor can only be reached this way, and it must still pair correctly."""
+    from werkzeug.datastructures import MultiDict
+
+    form = MultiDict()
+    for pid, total, b1, b2 in [("1", "", "", ""), ("2", "50", "20", "30"), ("3", "10", "4", "6")]:
+        form.add("player_ids[]", pid)
+        form.add("scores[]", total)
+        form.add("block1_scores[]", b1)
+        form.add("block2_scores[]", b2)
+    scores_data = appmod.parse_scores_from_form(form)
+    appmod.parse_block_scores_from_form(form, scores_data)
     assert [
-        (r["player_id"], r["score"], r["block1_score"], r["block2_score"])
-        for r in rows
+        (s["player_id"], s["score"], s["block1"], s["block2"]) for s in scores_data
     ] == [
         (2, 50, 20, 30),
         (3, 10, 4, 6),
@@ -286,7 +290,7 @@ def test_the_client_guard_shows_the_servers_own_wording(client, monkeypatch):
 def test_blocks_with_no_total_and_no_blocks_anywhere_is_still_rejected(client, monkeypatch):
     _start_mixed(client, monkeypatch)
     response = _complete(client, scores=["", ""], b1=["", ""], b2=["", ""])
-    assert "At least one player must have a score" in response.get_data(as_text=True)
+    assert "Enter a score for Alice and Bob." in response.get_data(as_text=True)
     assert _cup_status() == "in_progress"
 
 
