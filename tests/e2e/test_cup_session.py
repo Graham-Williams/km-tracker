@@ -220,6 +220,44 @@ def test_blank_score_warning_fits_a_phone(page, base_url):
     assert page.evaluate("document.documentElement.scrollWidth") <= 390
 
 
+def test_line_score_keystroke_that_leaves_the_score_blank_keeps_the_mark(page, base_url):
+    """A Wii row with a line has a Line score column that fills the raw score
+    (syncRawScore). A keystroke there that leaves the score blank must not
+    clear the row's mark or hide the warning; a real line score, which does
+    fill the raw score, clears them like typing the score itself."""
+    _create_player(page, base_url, "Alice", has_line=True)
+    _create_player(page, base_url, "Bob")
+    page.goto(f"{base_url}/cup-session/new")
+    page.click('button[type="submit"]')
+    page.wait_for_url("**/cup-session/*")
+    _play_to_completion(page)
+
+    alice = page.locator(".score-row").nth(0)
+    raw = alice.locator(".score-input")
+    line_score = alice.locator(".line-score-input")
+    assert line_score.count() == 1 and not line_score.first.get_attribute("readonly")
+
+    _submit_cup(page)
+    warning = _warning(page)
+    assert warning.is_visible()
+    assert raw.get_attribute("aria-invalid") == "true"
+
+    # A lone "-" is valid intermediate input for a number field: the input
+    # event fires but the value sanitises to "", so the raw score stays blank.
+    line_score.focus()
+    page.keyboard.type("-")
+    assert raw.input_value() == ""
+    assert raw.get_attribute("aria-invalid") == "true"
+    assert warning.is_visible()
+
+    # A real line score fills the raw score, so the mark goes.
+    line_score.fill("90")
+    assert raw.input_value() != ""
+    assert raw.get_attribute("aria-invalid") is None
+    # Bob is still blank and marked, so the warning stays.
+    assert warning.is_visible()
+
+
 def test_server_rejects_blank_scores_when_the_guard_is_bypassed(page, base_url):
     """HTMLFormElement.submit() skips every submit listener, so this reaches
     the route with blank scores: it flashes the same sentence, writes nothing

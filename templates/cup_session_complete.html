@@ -678,11 +678,17 @@
             hideWarning();
         });
 
-        // Typing in a row clears its marks; the warning goes once no row is
-        // marked, so the message tracks what is still missing.
+        // Entering a score clears the row's marks; the warning goes once no
+        // row is marked, so the message tracks what is still missing. A Wii
+        // row can be scored through its Line score column too (syncRawScore
+        // fills the raw score from it, and runs before this listener), so
+        // that field counts — but only once the row actually holds a score:
+        // a keystroke that leaves it blank (a lone "-" in a number field)
+        // must not clear the mark.
         form.querySelectorAll(".score-row").forEach(function (row) {
             row.querySelectorAll(".score-input, .block-score-input, .line-score-input").forEach(function (input) {
                 input.addEventListener("input", function () {
+                    if (rowIsBlank(row)) return;
                     unmarkRow(row);
                     if (!form.querySelector(".is-invalid")) hideWarning();
                 });
