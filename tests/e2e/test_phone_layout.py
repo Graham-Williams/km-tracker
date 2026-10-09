@@ -1,4 +1,4 @@
-"""End-to-end: pages fit a 390px phone without scrolling sideways (#83, #119).
+"""End-to-end: pages fit a phone without scrolling sideways (#83, #119).
 
 Scores are entered on a phone, so a page that is wider than the viewport, or an
 input whose typed value is clipped, is a functional bug rather than a cosmetic
@@ -7,12 +7,18 @@ one. Everything here is a real browser measurement:
 - the document is no wider than the viewport (`scrollWidth <= innerWidth`);
 - every text-entry control is at least 16px, because iOS Safari zooms the page
   when a smaller input takes focus;
-- a filled score or line box shows its whole value (`scrollWidth <= clientWidth`).
+- a filled score or line box shows its whole value (`scrollWidth <= clientWidth`);
+- the remove button and the tiebreaker label are big enough, and far enough
+  apart, to tap without hitting the other.
 
 Data is seeded straight into the DB with the widest realistic content: names
 at the 30-character form limit (one unbroken, one spaced), line players, and
 double-digit negative lines.
 """
+
+import base64
+import json
+import os
 
 import pytest
 
@@ -22,9 +28,32 @@ from maps import courses_for
 PHONE = {"width": 390, "height": 844}
 DESKTOP = {"width": 1280, "height": 900}
 
+# Widths the two cup forms are measured at: common phones, the 520px content
+# column, a tablet and a desktop.
+FORM_WIDTHS = [360, 375, 390, 414, 430, 520, 768, 1280]
+# At 320px the forms still fit and no box clips its value, but a line row's
+# remove button drops to a third line (below 3.5rem a box could not show
+# "-12"), so only the fit is asserted there.
+NARROWEST = 320
+
+# 1x1 red PNG: any decodable image works; the client re-encodes to JPEG.
+TINY_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ"
+    "AAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+)
+
+# Monkeypatching the API key only works when Flask shares this process.
+requires_in_process_server = pytest.mark.skipif(
+    bool(os.environ.get("E2E_BASE_URL")),
+    reason="needs the in-process e2e server (env-var monkeypatch)",
+)
+
 NAME_LIMIT = 30  # maxlength on the player name inputs
 UNBROKEN = "W" * NAME_LIMIT
 SPACED = ("Long Spaced Player Name " * 2)[:NAME_LIMIT]
+ELEVEN = "Christopher"
+TWELVE = "Bartholomeus"
+assert (len(ELEVEN), len(TWELVE)) == (11, 12)
 
 # (name, has_line, line). Long names carry lines and so do short ones, so the
 # widest row (long name + line inputs) is always on the page.
@@ -32,6 +61,8 @@ ROSTER = [
     (UNBROKEN, True, -12),
     (SPACED, True, 18),
     ("M" * NAME_LIMIT, False, 0),
+    (ELEVEN, True, 5),
+    (TWELVE, True, -3),
     ("Alice", True, -12),
     ("Bob", False, 0),
     ("Carol", True, 5),
@@ -194,7 +225,7 @@ def _assert_rows_stay_inside_their_card(page):
 
 
 def _assert_line_rows_use_two_lines(page):
-    """Phone layout for a line player's row: the name and placement share the
+    """A line player's row, at every width: the name and placement share the
     first line; the three boxes, the tiebreaker and the remove button share the
     second. Nothing spills onto a third."""
     bad = page.evaluate(
@@ -218,24 +249,63 @@ def _assert_line_rows_use_two_lines(page):
     assert bad == [], f"line rows not laid out as name line + controls line: {bad}"
 
 
+def _tap_targets(page):
+    """Per visible row: [name, has_line, remove w, remove h, TB label w,
+    TB label h, gap between the TB label and the remove button, distance from
+    the remove button's right edge to the row's right edge]."""
+    return page.evaluate(
+        """() => Array.from(document.querySelectorAll('.score-row:not(.removed)')).map(row => {
+            const rm = row.querySelector('.remove-btn').getBoundingClientRect();
+            const tb = row.querySelector('.tb-wrapper').getBoundingClientRect();
+            const r = row.getBoundingClientRect();
+            return [row.querySelector('.score-name').textContent,
+                    !!row.querySelector('.line-input'),
+                    rm.width, rm.height, tb.width, tb.height,
+                    rm.left - tb.right, r.right - rm.right];
+        })"""
+    )
+
+
+def _assert_tap_targets(page):
+    """Remove clears a score, so it must be hard to hit by accident: the remove
+    button and the TB label are each at least 24x24px, at least 12px apart, and
+    the remove button sits at the row's right edge on every kind of row."""
+    rows = _tap_targets(page)
+    assert rows
+    bad = [
+        r for r in rows
+        if min(r[2], r[3]) < 24 or min(r[4], r[5]) < 24 or r[6] < 12 or r[7] > 1
+    ]
+    assert bad == [], (
+        "rows with a small or crowded tap target "
+        f"[name, line, rm w, rm h, tb w, tb h, gap, rm inset]: {bad}"
+    )
+
+
 def _check_cup_form(page, what):
     _assert_fits(page, what)
     _assert_text_controls_at_least_16px(page)
     _assert_score_boxes_show_their_values(page)
     _assert_rows_stay_inside_their_card(page)
+    _assert_tap_targets(page)
     # Filling the rows fills in placements ("T-12th") and enables the
     # tiebreakers; the page must still fit afterwards.
     _assert_fits(page, f"{what} (rows filled)")
 
 
-def test_cup_new_fits_390px(page, base_url, _server):
+def _viewport(width):
+    return {"width": width, "height": 844}
+
+
+@pytest.mark.parametrize("width", FORM_WIDTHS)
+def test_cup_new_fits(page, base_url, _server, width):
     """/cups/new with a full roster: long names, line and lineless players (#83).
 
     The form has no console picker (a direct cup is always Wii), so there is one
     layout to cover; line players get the three-box row.
     """
     _seed_players(_server["db_path"])
-    page.set_viewport_size(PHONE)
+    page.set_viewport_size(_viewport(width))
     page.goto(f"{base_url}/cups/new")
     assert page.locator(".score-row").count() == len(ROSTER)
     assert page.locator(".line-input").count() > 0
@@ -246,33 +316,46 @@ def test_cup_new_fits_390px(page, base_url, _server):
 def test_cup_new_added_row_fits_390px(page, base_url, _server):
     """A row built client-side by "Add a player" fits like a server-rendered one."""
     _seed_players(_server["db_path"])
-    page.set_viewport_size(PHONE)
-    page.goto(f"{base_url}/cups/new")
-    # Removing hides the server-rendered row; add a fresh line player instead.
+    extra = "X" * NAME_LIMIT
     conn = get_connection(_server["db_path"])
     conn.execute(
         "INSERT INTO players (name, has_line, line, default_cup) VALUES (?, 1, -12, 0)",
-        ("X" * NAME_LIMIT,),
+        (extra,),
     )
     conn.commit()
     conn.close()
-    page.reload()
-    page.select_option("#add-player-select", label="X" * NAME_LIMIT)
+    page.set_viewport_size(PHONE)
+    page.goto(f"{base_url}/cups/new")
+    page.select_option("#add-player-select", label=extra)
     page.click("#add-player-btn")
     assert page.locator(".score-row").count() == len(ROSTER) + 1
     _check_cup_form(page, "/cups/new with an added line player")
     _assert_line_rows_use_two_lines(page)
 
 
-def test_cup_edit_line_row_fits_390px(page, base_url, _server):
+@pytest.mark.parametrize("width", FORM_WIDTHS)
+def test_cup_edit_line_row_fits(page, base_url, _server, width):
     """/cups/<id>/edit on a Wii cup with line players (#119)."""
     players = _seed_players(_server["db_path"])
     cup_id, _ = _seed_completed_cup(_server["db_path"], players, "wii")
-    page.set_viewport_size(PHONE)
+    page.set_viewport_size(_viewport(width))
     page.goto(f"{base_url}/cups/{cup_id}/edit")
     assert page.locator(".line-input").count() > 0
     _check_cup_form(page, "Wii cup edit page")
     _assert_line_rows_use_two_lines(page)
+
+
+def test_cup_forms_fit_320px(page, base_url, _server):
+    """The narrowest phone: no sideways scroll and no clipped box on either form."""
+    players = _seed_players(_server["db_path"])
+    cup_id, _ = _seed_completed_cup(_server["db_path"], players, "wii")
+    page.set_viewport_size(_viewport(NARROWEST))
+    for path in ("/cups/new", f"/cups/{cup_id}/edit"):
+        page.goto(f"{base_url}{path}")
+        _assert_fits(page, path)
+        _assert_score_boxes_show_their_values(page)
+        _assert_rows_stay_inside_their_card(page)
+        _assert_fits(page, f"{path} (rows filled)")
 
 
 @pytest.mark.parametrize("edition,first_edition", [("mk8dx", None), ("mixed", "wii")])
@@ -288,25 +371,124 @@ def test_cup_edit_lineless_fits_390px(page, base_url, _server, edition, first_ed
     _check_cup_form(page, f"{edition} cup edit page")
 
 
-def test_cup_forms_keep_one_line_rows_on_desktop(page, base_url, _server):
-    """At desktop width a short-named line row is still a single line, on both
-    forms, and long names stay inside the card."""
+@pytest.mark.parametrize("viewport", [PHONE, DESKTOP], ids=["390px", "1280px"])
+def test_line_row_names_are_not_broken_mid_word(page, base_url, _server, viewport):
+    """In a line row the name owns the first line, so an 11- or 12-letter name
+    renders on a single line and a spaced 30-character name breaks only at its
+    spaces, on both forms, on a phone and on a desktop."""
     players = _seed_players(_server["db_path"])
     cup_id, _ = _seed_completed_cup(_server["db_path"], players, "wii")
-    page.set_viewport_size(DESKTOP)
+    page.set_viewport_size(viewport)
     for path in ("/cups/new", f"/cups/{cup_id}/edit"):
         page.goto(f"{base_url}{path}")
-        tops = page.evaluate(
+        found = page.evaluate(
+            """names => {
+                const out = {};
+                document.querySelectorAll('.score-row').forEach(row => {
+                    const el = row.querySelector('.score-name');
+                    const name = el.textContent;
+                    if (!names.includes(name)) return;
+                    const node = el.firstChild;
+                    // A word split across two lines has two client rects.
+                    let splitWords = 0, re = /\\S+/g, m;
+                    while ((m = re.exec(name)) !== null) {
+                        const range = document.createRange();
+                        range.setStart(node, m.index);
+                        range.setEnd(node, m.index + m[0].length);
+                        if (range.getClientRects().length !== 1) splitWords += 1;
+                    }
+                    out[name] = {
+                        hasLine: !!row.querySelector('.line-input'),
+                        height: el.getBoundingClientRect().height,
+                        lineHeight: parseFloat(getComputedStyle(el).lineHeight),
+                        splitWords: splitWords,
+                    };
+                });
+                return out;
+            }""",
+            [ELEVEN, TWELVE, SPACED],
+        )
+        assert set(found) == {ELEVEN, TWELVE, SPACED}, path
+        for name, m in found.items():
+            assert m["hasLine"], f"{path}: {name} should be a line row"
+            assert m["splitWords"] == 0, f"{path}: {name!r} broke inside a word: {m}"
+        for name in (ELEVEN, TWELVE):
+            m = found[name]
+            assert m["height"] <= m["lineHeight"] + 1, (
+                f"{path}: {name!r} takes more than one line: {m}"
+            )
+
+
+@pytest.mark.parametrize("viewport", [PHONE, DESKTOP], ids=["390px", "1280px"])
+def test_lineless_rows_stay_on_one_line(page, base_url, _server, viewport):
+    """A lineless row has a single box and keeps everything on one line."""
+    players = _seed_players(_server["db_path"])
+    cup_id, _ = _seed_completed_cup(_server["db_path"], players, "wii")
+    page.set_viewport_size(viewport)
+    for path in ("/cups/new", f"/cups/{cup_id}/edit"):
+        page.goto(f"{base_url}{path}")
+        mids = page.evaluate(
             """() => {
                 const row = Array.from(document.querySelectorAll('.score-row'))
-                    .find(r => r.querySelector('.score-name').textContent === 'Alice');
-                return Array.from(row.querySelectorAll('input[type=number], .tb-wrapper, .remove-btn, .score-name'))
+                    .find(r => r.querySelector('.score-name').textContent === 'Bob');
+                return Array.from(row.querySelectorAll(
+                    '.score-name, input[type=number], .tb-wrapper, .remove-btn'))
                     .map(el => { const b = el.getBoundingClientRect();
                                  return Math.round(b.top + b.height / 2); });
             }"""
         )
-        assert max(tops) - min(tops) <= 2, f"{path}: row wrapped on desktop: {tops}"
-        _check_cup_form(page, f"{path} at desktop width")
+        assert len(mids) == 4 and max(mids) - min(mids) <= 2, (
+            f"{path}: lineless row wrapped: {mids}"
+        )
+
+
+@requires_in_process_server
+def test_cup_new_photo_mapping_panel_fits_390px(page, base_url, _server, monkeypatch):
+    """The photo mix-and-match panel lists every player by name next to a
+    dropdown; a long unbroken name must wrap inside the panel.
+
+    The extraction call is intercepted in the browser (as in
+    test_photo_attach.py), so nothing reaches the server or a real API."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "e2e-fake-key")
+    players = _seed_players(_server["db_path"])
+    page.set_viewport_size(PHONE)
+    page.goto(f"{base_url}/cups/new")
+    page.route(
+        "**/extract-scores",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({
+                "scores": {str(players[0][0]): 60},
+                "ambiguous": [],
+                "unmatched_players": [p[1] for p in players[1:]],
+                "raw_rows": [
+                    {"position": 1, "character": "Funky Kong", "points": 60,
+                     "is_highlighted": True},
+                    {"position": 2, "character": "Dry Bowser", "points": 54,
+                     "is_highlighted": True},
+                    {"position": 5, "character": "Bowser", "points": 40,
+                     "is_highlighted": False},
+                ],
+            }),
+        ),
+    )
+    page.set_input_files(
+        "#photo-pick",
+        {"name": "standings.png", "mimeType": "image/png", "buffer": TINY_PNG},
+    )
+    page.locator(".photo-mapping").wait_for(state="visible")
+    assert page.locator(".photo-map-name").count() == len(ROSTER)
+    _assert_fits(page, "/cups/new with the photo mapping panel open")
+    spill = page.evaluate(
+        """() => {
+            const panel = document.querySelector('.photo-mapping').getBoundingClientRect();
+            return Array.from(document.querySelectorAll('.photo-map-row > *'))
+                .map(el => [el.className, Math.round(el.getBoundingClientRect().right)])
+                .filter(pair => pair[1] > Math.round(panel.right));
+        }"""
+    )
+    assert spill == [], f"mapping rows past the panel edge: {spill}"
 
 
 # --- Every other page ---------------------------------------------------------
