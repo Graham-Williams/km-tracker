@@ -35,7 +35,10 @@
  *     extract fetch is in flight is blocked WITHOUT auto-resume (the user
  *     must see and review the model-filled scores — never auto-submit them);
  *     submit with every score empty is blocked client-side (the server would
- *     reject it anyway, and the redirect would wipe the attached photo);
+ *     reject it anyway, and the redirect would wipe the attached photo) —
+ *     unless the page passes `ownsEmptyGuard: false`, meaning its own submit
+ *     guard reports blank scores (the cup completion page names each player
+ *     whose score is missing; two messages for one submit would compete);
  *     submit after a failed attach requires an explicit confirm() to proceed
  *     photoless.
  *   - Busy UX while the extract fetch is in flight: a spinner shows beside
@@ -46,7 +49,8 @@
  * Usage (per page):
  *   initPhotoScore({
  *     extractUrl: "/extract-scores" or null,   // null = attach-only mode
- *     getPayload: function () { return {cup_id: 7}; }  // merged into the POST
+ *     getPayload: function () { return {cup_id: 7}; },  // merged into the POST
+ *     ownsEmptyGuard: false  // optional; default true (see above)
  *   });
  */
 // Shared canvas downscale (max 1200px long edge, JPEG ~0.8). Hoisted to module
@@ -546,6 +550,10 @@ window.initPhotoScore = function (opts) {
     }
 
     // Submit guard: never let the form race or silently drop the photo.
+    // A page whose own guard reports blank scores opts out of the empty
+    // check here (ownsEmptyGuard: false); the pending/extracting checks and
+    // the failed-attach confirm always run.
+    var ownsEmptyGuard = opts.ownsEmptyGuard !== false;
     if (form) {
         form.addEventListener("submit", function (e) {
             if (pending) {
@@ -571,7 +579,7 @@ window.initPhotoScore = function (opts) {
                 );
                 return;
             }
-            if (!hasAnyScore()) {
+            if (ownsEmptyGuard && !hasAnyScore()) {
                 // The server rejects an all-empty submit with a flash +
                 // redirect that would wipe the attached photo and all form
                 // state — fail fast client-side instead.

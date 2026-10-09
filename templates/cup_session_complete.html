@@ -290,7 +290,9 @@
     </div>
     {% endif %}
 
-    {% if is_mixed %}<p class="photo-attach-status" id="submit-warning" hidden></p>{% endif %}
+    {# Client-side submit rejections land here, right above the button, so the
+       reason is visible on a phone without scrolling back to the rows. #}
+    <p class="photo-attach-status" id="submit-warning" role="alert" hidden></p>
     <div class="field-row">
         <button type="submit" class="btn btn-primary">Submit Cup</button>
         {% if cup.status == 'in_progress' %}
@@ -339,7 +341,11 @@
         extractUrl: {% if photo_extraction_enabled %}"{{ url_for('extract_scores') }}"{% else %}null{% endif %},
         getPayload: function () {
             return { cup_id: {{ cup.id }} };
-        }
+        },
+        // The guard at the bottom of this page names each player whose score
+        // is blank; photo_score.js's all-empty check would show a second,
+        // vaguer message for the same submit.
+        ownsEmptyGuard: false
     });
     {% endif %}
 
@@ -558,29 +564,98 @@
             input.addEventListener("input", function () { syncBlockTotal(row); });
         });
     });
+    {% endif %}
 
-    // The mixed form carries no photo payload, so photo_score.js's submit guard
-    // never mounts here. This guard mirrors the two server-side rejections that
-    // would otherwise bounce the form — and a bounce REDIRECTS, so every number
-    // typed on the page is lost. The server stays authoritative; this only
-    // saves the user from retyping.
+    // --- Submit guard: every rostered player needs a score (issue #73) ---
+    // Mirrors the server-side rejections that would otherwise bounce the form
+    // — and a bounce REDIRECTS, so every number typed on the page is lost. The
+    // server stays authoritative; this names the blank rows, marks their
+    // inputs, and keeps the page. On a pure cup photo_score.js's own submit
+    // guard still runs first (pending photo, extraction in flight); it is told
+    // not to handle the empty case so exactly one message shows per submit.
     (function () {
         var form = document.getElementById("cup-form");
         var warning = document.getElementById("submit-warning");
-        // Same sentence the server raises, injected from BLOCK_HALF_MISSING_MSG
-        // so the two wordings can't drift.
+        // The server's own prefix (MISSING_SCORES_MSG_PREFIX), injected so the
+        // two wordings can't drift; the names come from the rows.
+        var MISSING_PREFIX = {{ missing_scores_msg_prefix|tojson }};
+        {% if is_mixed %}
+        // Same sentence the server raises, injected from BLOCK_HALF_MISSING_MSG.
         var HALF_ROW_MSG = {{ block_half_missing_msg|tojson }};
+        {% endif %}
+
         function reject(e, msg) {
             e.preventDefault();
             warning.textContent = msg;
             warning.classList.add("is-error");
             warning.hidden = false;
         }
+        function hideWarning() {
+            warning.hidden = true;
+            warning.textContent = "";
+            warning.classList.remove("is-error");
+        }
+        // "Alice", "Alice and Bob", "Alice, Bob and Carol" — the server's
+        // missing_scores_message, built from the same names it would use.
+        function joinNames(names) {
+            if (names.length === 1) return names[0];
+            return names.slice(0, -1).join(", ") + " and " + names[names.length - 1];
+        }
+        // The inputs a blank row gets marked on: the two halves on a mixed
+        // row (its total is readonly, so marking it would point at a field
+        // the user can't type into), otherwise the score input itself.
+        function markableInputs(row) {
+            var halves = row.querySelectorAll(".block-score-input");
+            return halves.length ? halves : row.querySelectorAll(".score-input");
+        }
+        function markRow(row) {
+            markableInputs(row).forEach(function (input) {
+                input.classList.add("is-invalid");
+                input.setAttribute("aria-invalid", "true");
+            });
+        }
+        function unmarkRow(row) {
+            row.querySelectorAll(".is-invalid").forEach(function (input) {
+                input.classList.remove("is-invalid");
+                input.removeAttribute("aria-invalid");
+            });
+        }
+        // A row counts as blank when nothing has been entered for the player:
+        // on a mixed row that means both halves, since a half-filled row gets
+        // the more specific half-row message below (as it does on the server,
+        // which rejects a half row before it checks for missing players).
+        function rowIsBlank(row) {
+            var total = row.querySelector(".score-input");
+            if (!total || total.disabled || total.value.trim() !== "") return false;
+            var halves = row.querySelectorAll(".block-score-input");
+            for (var h = 0; h < halves.length; h++) {
+                if (halves[h].value.trim() !== "") return false;
+            }
+            return true;
+        }
+
         form.addEventListener("submit", function (e) {
-            // (1) A row with exactly ONE half filled: the server rejects it, and
-            // the total input stays blank so the all-empty check below can't see
-            // it. Without this a single mistyped half discards the whole form.
+            // Another guard (photo_score.js: downscale pending, extraction in
+            // flight) already blocked this submit with its own message.
+            if (e.defaultPrevented) return;
             var rows = form.querySelectorAll(".score-row");
+            var missing = [];
+            var firstMarked = null;
+            rows.forEach(function (row) {
+                if (!rowIsBlank(row)) return;
+                missing.push(row.querySelector(".score-name").textContent.trim());
+                markRow(row);
+                if (!firstMarked) firstMarked = markableInputs(row)[0];
+            });
+            if (missing.length) {
+                reject(e, MISSING_PREFIX + joinNames(missing) + ".");
+                firstMarked.focus();
+                return;
+            }
+            {% if is_mixed %}
+            // A row with exactly ONE half filled: the server rejects it, and
+            // the total input stays blank. Without this a single mistyped
+            // half discards the whole form.
             for (var r = 0; r < rows.length; r++) {
                 var halves = rows[r].querySelectorAll(".block-score-input");
                 var filled = 0;
@@ -593,25 +668,27 @@
                     return reject(e, HALF_ROW_MSG);
                 }
                 // Typed, but not a whole number the server will take (e.g.
-                // "1e3", "2.5"). Its total is blank, so the all-empty check
-                // below would let the form through to a redirect that throws
-                // the page away.
+                // "1e3", "2.5"). Its total is blank, so the server would
+                // bounce it to a redirect that throws the page away.
                 if (filled > 0 && whole < filled) {
                     return reject(e, "Console scores must be whole numbers.");
                 }
             }
-            // (2) Nothing scored at all — also a server-side reject + redirect.
-            var inputs = form.querySelectorAll(".score-input");
-            for (var i = 0; i < inputs.length; i++) {
-                if (!inputs[i].disabled && inputs[i].value.trim() !== "") {
-                    warning.hidden = true;
-                    return;
-                }
-            }
-            reject(e, "Enter each player's two console scores (or at least one player's) before submitting.");
+            {% endif %}
+            hideWarning();
+        });
+
+        // Typing in a row clears its marks; the warning goes once no row is
+        // marked, so the message tracks what is still missing.
+        form.querySelectorAll(".score-row").forEach(function (row) {
+            row.querySelectorAll(".score-input, .block-score-input, .line-score-input").forEach(function (input) {
+                input.addEventListener("input", function () {
+                    unmarkRow(row);
+                    if (!form.querySelector(".is-invalid")) hideWarning();
+                });
+            });
         });
     })();
-    {% endif %}
 
     updatePlacements();
 </script>
