@@ -186,8 +186,11 @@ def test_blank_scores_are_named_inline_before_the_form_is_lost(page, base_url):
     # The first blank input gets focus so a phone keyboard opens on it.
     assert page.evaluate("document.activeElement.name") == "scores[]"
 
-    # One score in: only the other player is named and marked.
+    # One score in: the sentence drops Alice straight away, before any
+    # resubmit, and a resubmit names and marks only the other player.
     scores.nth(0).fill("100")
+    assert warning.is_visible()
+    assert warning.text_content().strip() == "Enter a score for Bob."
     _submit_cup(page)
     assert warning.is_visible()
     assert warning.text_content().strip() == "Enter a score for Bob."

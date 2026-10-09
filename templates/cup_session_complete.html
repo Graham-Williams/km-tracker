@@ -690,7 +690,18 @@
                 input.addEventListener("input", function () {
                     if (rowIsBlank(row)) return;
                     unmarkRow(row);
-                    if (!form.querySelector(".is-invalid")) hideWarning();
+                    // Rows are only ever marked by the missing-scores path,
+                    // so while any remain the warning holds that sentence:
+                    // rebuild it from the rows still marked (the half-row
+                    // message marks nothing and is left alone).
+                    var still = [];
+                    form.querySelectorAll(".score-row").forEach(function (r) {
+                        if (r.querySelector(".is-invalid")) {
+                            still.push(r.querySelector(".score-name").textContent.trim());
+                        }
+                    });
+                    if (!still.length) { hideWarning(); return; }
+                    warning.textContent = MISSING_PREFIX + joinNames(still) + ".";
                 });
             });
         });
