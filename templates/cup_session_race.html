@@ -17,7 +17,8 @@
     .completed-races { list-style: none; margin-bottom: var(--space-3); padding: 0; }
     .completed-races li { font-size: 0.9rem; color: var(--color-text); padding: 0.15rem 0; }
     .completed-races .race-num { color: var(--color-faint); min-width: 4rem; display: inline-block; }
-    .veto-status { font-size: 0.85rem; color: var(--color-muted); margin-bottom: var(--space-1); }
+    /* overflow-wrap: a long unbroken player name wraps instead of widening the page. */
+    .veto-status { font-size: 0.85rem; color: var(--color-muted); margin-bottom: var(--space-1); overflow-wrap: anywhere; }
 
     /* The swap modal's two capture buttons measure 125 + 8 + 139 = 272px inside
        272px of modal content — flush to the sub-pixel. It doesn't overflow
@@ -170,6 +171,9 @@
     .roster-editor > summary:hover { color: var(--color-text); }
     .roster-editor .roster-list { list-style: none; margin: var(--space-2) 0; padding: 0; }
     .roster-editor .roster-list li { display: flex; align-items: center; justify-content: space-between; padding: 0.2rem 0; }
+    /* A long unbroken name wraps instead of widening the page (the list is
+       laid out even while the <details> is closed). */
+    .roster-editor .roster-list li > span { min-width: 0; overflow-wrap: anywhere; }
     .roster-editor .roster-remove {
         background: none; border: none; color: var(--color-danger); cursor: pointer;
         font-size: 1rem; line-height: 1; padding: 0 0.35rem; margin: 0;

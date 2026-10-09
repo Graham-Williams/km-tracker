@@ -15,7 +15,9 @@
         border-bottom: 1px solid var(--color-border);
     }
     .score-row.removed { display: none; }
-    .score-name { flex: 1; color: var(--color-text); }
+    /* A name wraps inside its own box (even one long unbroken word) instead of
+       pushing the row wider than the card. */
+    .score-name { flex: 1; min-width: 0; overflow-wrap: anywhere; color: var(--color-text); }
     .score-place {
         font-size: 0.85rem;
         color: var(--color-muted);
@@ -51,6 +53,23 @@
         align-items: center;
     }
     .add-player select { flex: 1; }
+    /* Phone layout. A line player's row carries three number boxes plus the
+       name, placement, tiebreaker and remove button: about 400px before the
+       name, against roughly 318px of card at a 390px viewport. Below the width
+       where the content column stops growing (--content-width, 520px) such a
+       row wraps onto two lines: name + placement, then the boxes, TB and
+       remove. The boxes narrow to 4.5rem and the column gap tightens so the
+       whole second line fits; the font stays 1rem (under 16px iOS Safari zooms
+       the page on focus). A lineless row has one box and stays on one line.
+       At 520px and wider nothing here applies, so the desktop row is unchanged.
+       Keep this block identical in cup_new.html and cup_edit.html. */
+    @media (max-width: 519px) {
+        .score-row[data-has-line="1"] { flex-wrap: wrap; column-gap: var(--space-1); }
+        /* Wide enough that the first box cannot join the name's line, narrow
+           enough that the placement always can. */
+        .score-row[data-has-line="1"] .score-name { flex-basis: calc(100% - 6rem); }
+        .score-row[data-has-line="1"] input[type="number"] { flex: 0 0 auto; width: 4.5rem; }
+    }
     .info-note {
         font-size: 0.85rem;
         color: var(--color-info);
