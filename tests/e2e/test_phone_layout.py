@@ -36,6 +36,15 @@ FORM_WIDTHS = [360, 375, 390, 414, 430, 520, 768, 1280]
 # "-12"), so only the fit is asserted there.
 NARROWEST = 320
 
+# The layout must not depend on the host's fonts: the Mac's system font is
+# narrower than the fallbacks a Linux or Android browser uses, and a page that
+# fits by a few pixels here overflowed there. This widens every glyph on any
+# host (letter-spacing) and picks a wide face where one is installed.
+WIDE_FONT_CSS = (
+    '* { font-family: Verdana, "DejaVu Sans", sans-serif !important; '
+    "letter-spacing: 0.05em !important; }"
+)
+
 # 1x1 red PNG: any decodable image works; the client re-encodes to JPEG.
 TINY_PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ"
@@ -345,17 +354,38 @@ def test_cup_edit_line_row_fits(page, base_url, _server, width):
     _assert_line_rows_use_two_lines(page)
 
 
-def test_cup_forms_fit_320px(page, base_url, _server):
+def _form_paths(db_path):
+    """Both cup forms, the edit one on a Wii cup with line players."""
+    players = _seed_players(db_path)
+    cup_id, _ = _seed_completed_cup(db_path, players, "wii")
+    return ("/cups/new", f"/cups/{cup_id}/edit")
+
+
+@pytest.mark.parametrize("font_css", [None, WIDE_FONT_CSS], ids=["host-font", "wide-font"])
+def test_cup_forms_fit_320px(page, base_url, _server, font_css):
     """The narrowest phone: no sideways scroll and no clipped box on either form."""
-    players = _seed_players(_server["db_path"])
-    cup_id, _ = _seed_completed_cup(_server["db_path"], players, "wii")
     page.set_viewport_size(_viewport(NARROWEST))
-    for path in ("/cups/new", f"/cups/{cup_id}/edit"):
+    for path in _form_paths(_server["db_path"]):
         page.goto(f"{base_url}{path}")
+        if font_css:
+            page.add_style_tag(content=font_css)
         _assert_fits(page, path)
         _assert_score_boxes_show_their_values(page)
         _assert_rows_stay_inside_their_card(page)
         _assert_fits(page, f"{path} (rows filled)")
+
+
+@pytest.mark.parametrize("width", [360, 390])
+def test_cup_forms_fit_with_a_wider_font(page, base_url, _server, width):
+    """The full fit checks on both forms with every glyph widened, so a layout
+    that only fits under the host's font fails here rather than in CI."""
+    page.set_viewport_size(_viewport(width))
+    for path in _form_paths(_server["db_path"]):
+        page.goto(f"{base_url}{path}")
+        page.add_style_tag(content=WIDE_FONT_CSS)
+        assert page.locator(".line-input").count() > 0
+        _check_cup_form(page, f"{path} with a wider font")
+        _assert_line_rows_use_two_lines(page)
 
 
 @pytest.mark.parametrize("edition,first_edition", [("mk8dx", None), ("mixed", "wii")])
