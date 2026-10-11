@@ -862,6 +862,16 @@ def cup_edition_label_filter(cup):
     return edition_order_label(cup["game_edition"], row_value(cup, "first_edition"))
 
 
+def format_cup_date(dt):
+    """A cup date as stored: 'YYYY-MM-DD HH:MM:SS', the year always four digits.
+
+    cups.date is compared and sorted as text, and strftime('%Y') does not
+    zero-pad on every platform, so a mistyped year such as 0026 would be stored
+    as '26-...' and sort after every real date.
+    """
+    return f"{dt.year:04d}-{dt:%m-%d %H:%M:%S}"
+
+
 def default_roster_players(conn):
     """Players preselected on the new-cup forms: the roster of the last cup.
 
@@ -1156,7 +1166,7 @@ def create_cup():
                 utc_dt = local_dt + timedelta(minutes=offset_minutes)
             else:
                 utc_dt = local_dt
-            date_utc = utc_dt.strftime("%Y-%m-%d %H:%M:%S")
+            date_utc = format_cup_date(utc_dt)
         except (ValueError, OverflowError):
             flash("Invalid date format.")
             return redirect(url_for("cups"))
@@ -1305,7 +1315,7 @@ def update_cup(cup_id):
             utc_dt = local_dt + timedelta(minutes=offset_minutes)
         else:
             utc_dt = local_dt
-        date_utc = utc_dt.strftime("%Y-%m-%d %H:%M:%S")
+        date_utc = format_cup_date(utc_dt)
     except (ValueError, OverflowError):
         conn.close()
         flash("Invalid date format.")
@@ -2744,7 +2754,7 @@ def cup_session_submit(cup_id):
                 utc_dt = local_dt + timedelta(minutes=offset_minutes)
             else:
                 utc_dt = local_dt
-            date_utc = utc_dt.strftime("%Y-%m-%d %H:%M:%S")
+            date_utc = format_cup_date(utc_dt)
         except (ValueError, OverflowError):
             date_utc = None
     else:

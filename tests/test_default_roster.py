@@ -274,3 +274,43 @@ def test_preselected_players_are_listed_by_name(client, path):
     parser.feed(html)
     # Abe (3), Mia (2), Zed (1)
     assert [int(a["value"]) for a in parser.inputs] == [3, 2, 1]
+
+
+# --- A mistyped year must not outrank real dates ---
+
+
+def _stored_date(cup_id):
+    conn = get_connection()
+    row = conn.execute("SELECT date FROM cups WHERE id = ?", (cup_id,)).fetchone()
+    conn.close()
+    return row["date"]
+
+
+@pytest.mark.parametrize("path", FORMS)
+def test_cup_created_with_a_mistyped_year_is_not_the_last_cup(client, path):
+    """cups.date sorts as text, so year 0026 must be stored zero-padded."""
+    _setup_players(client)
+    create_cup_with_scores(client, "0026-10-11T20:00", [(3, 9)])
+    create_cup_with_scores(client, "2026-10-11T20:00", [(1, 50), (2, 40)])
+    assert _stored_date(1) == "0026-10-11 20:00:00"
+    assert _preselected(client, path) == {1, 2}
+
+
+@pytest.mark.parametrize("path", FORMS)
+def test_cup_edited_to_a_mistyped_year_is_not_the_last_cup(client, path):
+    _setup_players(client)
+    create_cup_with_scores(client, "2026-03-15T20:00", [(3, 9)])
+    create_cup_with_scores(client, "2026-03-16T20:00", [(1, 50), (2, 40)])
+    client.post(
+        "/cups/1/edit",
+        data={
+            "date": "0300-01-01T10:00",
+            "notes": "",
+            "tz_offset": "",
+            "player_ids[]": ["3"],
+            "scores[]": ["9"],
+            "lines[]": ["0"],
+        },
+    )
+    assert _stored_date(1) == "0300-01-01 10:00:00"
+    assert _preselected(client, path) == {1, 2}
