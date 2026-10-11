@@ -106,33 +106,56 @@ def test_delete_cup(page, base_url):
     assert page.locator("text=No cups yet").is_visible()
 
 
-def test_new_cup_shows_default_players(page, base_url):
-    _create_player(page, base_url, "Alice")
-    # Create Bob as non-default
-    page.goto(f"{base_url}/players")
-    page.fill('input[name="name"]', "Bob")
-    page.uncheck('input[name="default_cup"]')
-    page.click('button[type="submit"]')
+def _enter_cup_with_alice_only(page, base_url):
+    """Create Alice and Bob, then enter a cup Bob sat out."""
+    _setup_players(page, base_url)
     page.goto(f"{base_url}/cups/new")
-    # Only Alice should appear in the score rows
+    page.locator(".score-row", has_text="Bob").locator(".remove-btn").click()
+    page.locator('.score-row:not(.removed) input[name="scores[]"]').fill("100")
+    page.click('button[type="submit"]')
+    page.wait_for_url(f"{base_url}/cups")
+
+
+def test_new_cup_shows_every_player_before_the_first_cup(page, base_url):
+    _setup_players(page, base_url)
+    page.goto(f"{base_url}/cups/new")
     score_names = page.locator('.score-row:not(.removed) .score-name').all_text_contents()
-    assert "Alice" in score_names
-    assert "Bob" not in score_names
+    assert score_names == ["Alice", "Bob"]
+
+
+def test_new_cup_shows_the_last_cups_players(page, base_url):
+    _enter_cup_with_alice_only(page, base_url)
+    page.goto(f"{base_url}/cups/new")
+    # Only Alice, who played the last cup, should appear in the score rows
+    score_names = page.locator('.score-row:not(.removed) .score-name').all_text_contents()
+    assert score_names == ["Alice"]
 
 
 def test_new_cup_add_player(page, base_url):
-    _create_player(page, base_url, "Alice")
-    # Create Bob as non-default
-    page.goto(f"{base_url}/players")
-    page.fill('input[name="name"]', "Bob")
-    page.uncheck('input[name="default_cup"]')
-    page.click('button[type="submit"]')
+    _enter_cup_with_alice_only(page, base_url)
     page.goto(f"{base_url}/cups/new")
     # Add Bob via dropdown
     page.select_option("#add-player-select", label="Bob")
     page.click("#add-player-btn")
     score_names = page.locator('.score-row:not(.removed) .score-name').all_text_contents()
     assert "Bob" in score_names
+
+
+def _checked_session_players(page):
+    """Names beside the ticked player checkboxes on the new-session form."""
+    return page.locator('#player-list input[name="player_ids[]"]:checked').evaluate_all(
+        "els => els.map(el => el.closest('label').textContent.trim())"
+    )
+
+
+def test_new_cup_session_checks_the_last_cups_players(page, base_url):
+    _enter_cup_with_alice_only(page, base_url)
+    page.goto(f"{base_url}/cup-session/new")
+    assert _checked_session_players(page) == ["Alice"]
+    # Bob sat the last cup out, so he waits in the dropdown and can be added back.
+    page.select_option("#add-player-select", label="Bob")
+    page.click("#add-player-btn")
+    assert _checked_session_players(page) == ["Alice", "Bob"]
 
 
 def test_new_cup_remove_player(page, base_url):

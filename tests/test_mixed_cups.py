@@ -1091,7 +1091,6 @@ def _setup_character_players(client):
             "/players",
             data={
                 "name": name,
-                "default_cup": "on",
                 "default_character_wii": wii_char,
                 "default_character_switch": switch_char,
             },

@@ -924,7 +924,7 @@ def parse_default_character(form, field, edition):
 def players():
     conn = get_connection()
     rows = conn.execute(
-        "SELECT id, name, default_cup, line, has_line FROM players ORDER BY name"
+        "SELECT id, name, line, has_line FROM players ORDER BY name"
     ).fetchall()
     conn.close()
     return render_template(
@@ -941,7 +941,6 @@ def create_player():
     if not name:
         flash("Name cannot be empty.")
         return redirect(url_for("players"))
-    default_cup = request.form.get("default_cup") == "on"
     has_line = request.form.get("has_line") == "on"
     try:
         character_wii = parse_default_character(request.form, "default_character_wii", "wii")
@@ -954,9 +953,9 @@ def create_player():
     conn = get_connection()
     try:
         conn.execute(
-            "INSERT INTO players (name, default_cup, has_line, default_character_wii, default_character_switch) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (name, default_cup, has_line, character_wii, character_switch),
+            "INSERT INTO players (name, has_line, default_character_wii, default_character_switch) "
+            "VALUES (?, ?, ?, ?)",
+            (name, has_line, character_wii, character_switch),
         )
         conn.commit()
     except sqlite3.IntegrityError:
@@ -970,7 +969,7 @@ def create_player():
 def edit_player(player_id):
     conn = get_connection()
     player = conn.execute(
-        "SELECT id, name, default_cup, line, has_line, default_character_wii, default_character_switch "
+        "SELECT id, name, line, has_line, default_character_wii, default_character_switch "
         "FROM players WHERE id = ?",
         (player_id,),
     ).fetchone()
@@ -999,7 +998,6 @@ def update_player(player_id):
         conn.close()
         flash("Name cannot be empty.")
         return redirect(url_for("edit_player", player_id=player_id))
-    default_cup = request.form.get("default_cup") == "on"
     has_line = request.form.get("has_line") == "on"
     line = request.form.get("line", "0").strip()
     try:
@@ -1021,9 +1019,9 @@ def update_player(player_id):
         return redirect(url_for("edit_player", player_id=player_id))
     try:
         conn.execute(
-            "UPDATE players SET name = ?, default_cup = ?, line = ?, has_line = ?, "
+            "UPDATE players SET name = ?, line = ?, has_line = ?, "
             "default_character_wii = ?, default_character_switch = ? WHERE id = ?",
-            (name, default_cup, line, has_line, character_wii, character_switch, player_id),
+            (name, line, has_line, character_wii, character_switch, player_id),
         )
         conn.commit()
     except sqlite3.IntegrityError:

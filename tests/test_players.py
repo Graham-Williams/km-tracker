@@ -111,38 +111,53 @@ def test_delete_nonexistent_player(client):
     assert response.status_code == 200
 
 
-# --- Default cup ---
+# --- Retired "Default on new cups" flag ---
+# New cups preselect the last cup's roster (tests/test_default_roster.py), so
+# the per-player flag is gone from the forms and a stale page that still posts
+# it changes nothing.
 
 
-def test_create_player_default_cup_on(client):
-    create_player(client, "Alice", default_cup=True)
-    response = client.get("/players")
-    assert b"(default)" in response.data
+def _preselected_on_new_cup(client):
+    return 'class="score-name">Alice' in client.get("/cups/new").data.decode()
 
 
-def test_create_player_default_cup_off(client):
-    create_player(client, "Alice", default_cup=False)
-    response = client.get("/players")
-    assert b"(default)" not in response.data
+def test_player_forms_have_no_default_cup_option(client):
+    create_player(client, "Alice")
+    for path in ("/players", "/players/1/edit"):
+        response = client.get(path)
+        assert b'name="default_cup"' not in response.data
+        assert b"Default on new cups" not in response.data
+    assert b"(default)" not in client.get("/players").data
 
 
-def test_edit_player_default_cup(client):
-    create_player(client, "Alice", default_cup=True)
+def test_create_player_ignores_a_posted_default_cup_field(client):
+    client.post("/players", data={"name": "Alice", "default_cup": "on"})
+    conn = get_connection()
+    names = [r["name"] for r in conn.execute("SELECT name FROM players")]
+    conn.close()
+    assert names == ["Alice"]
+    assert _preselected_on_new_cup(client)
+
+
+def test_edit_player_without_default_cup_field_keeps_them_on_new_cups(client):
+    """Saving the edit form used to clear the flag when its checkbox was unticked."""
+    create_player(client, "Alice")
     response = client.post(
-        "/players/1/edit", data={"name": "Alice"}, follow_redirects=True
+        "/players/1/edit", data={"name": "Alicia"}, follow_redirects=True
     )
-    # No default_cup field sent = unchecked = false
-    assert b"(default)" not in response.data
+    assert b"Alicia" in response.data
+    assert 'class="score-name">Alicia' in client.get("/cups/new").data.decode()
 
 
-def test_edit_player_set_default_cup(client):
-    create_player(client, "Alice", default_cup=False)
+def test_edit_player_ignores_a_posted_default_cup_field(client):
+    create_player(client, "Alice")
     response = client.post(
         "/players/1/edit",
-        data={"name": "Alice", "default_cup": "on"},
+        data={"name": "Alice", "default_cup": "on", "has_line": "on", "line": "4"},
         follow_redirects=True,
     )
-    assert b"(default)" in response.data
+    assert b"(+4)" in response.data
+    assert _preselected_on_new_cup(client)
 
 
 def test_delete_player_with_scores_blocked(client):
@@ -238,7 +253,7 @@ def test_edit_player_line(client):
     create_player(client, "Alice")
     client.post(
         "/players/1/edit",
-        data={"name": "Alice", "default_cup": "on", "has_line": "on", "line": "6"},
+        data={"name": "Alice", "has_line": "on", "line": "6"},
         follow_redirects=True,
     )
     conn = get_connection()
@@ -251,7 +266,7 @@ def test_edit_player_negative_line(client):
     create_player(client, "Alice")
     client.post(
         "/players/1/edit",
-        data={"name": "Alice", "default_cup": "on", "has_line": "on", "line": "-5"},
+        data={"name": "Alice", "has_line": "on", "line": "-5"},
         follow_redirects=True,
     )
     conn = get_connection()
@@ -269,7 +284,7 @@ def test_edit_player_line_resets_without_has_line(client):
     conn.close()
     client.post(
         "/players/1/edit",
-        data={"name": "Alice", "default_cup": "on", "line": "5"},
+        data={"name": "Alice", "line": "5"},
         follow_redirects=True,
     )
     conn = get_connection()

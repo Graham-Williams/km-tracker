@@ -11,7 +11,6 @@
         <button type="submit" class="btn btn-primary" style="flex:0 0 auto;">Add</button>
     </div>
     <label class="check"><input type="checkbox" name="has_line"> Plays with a line</label>
-    <label class="check"><input type="checkbox" name="default_cup" checked> Default on new cups</label>
     <div class="field-row">
         <div class="field">
             <label for="character-wii">Default character — Wii</label>
@@ -43,9 +42,6 @@
                 <span class="player-name">{{ player.name }}</span>
                 {% if player.has_line %}
                 <span class="badge badge-line">({{ player.line|format_line }})</span>
-                {% endif %}
-                {% if player.default_cup %}
-                <span class="badge">(default)</span>
                 {% endif %}
             </span>
         </div>
