@@ -117,8 +117,20 @@ def test_delete_nonexistent_player(client):
 # it changes nothing.
 
 
-def _preselected_on_new_cup(client):
-    return 'class="score-name">Alice' in client.get("/cups/new").data.decode()
+def _stored_default_cup(player_id=1):
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT default_cup FROM players WHERE id = ?", (player_id,)
+    ).fetchone()
+    conn.close()
+    return row["default_cup"]
+
+
+def _set_stored_default_cup(value, player_id=1):
+    conn = get_connection()
+    conn.execute("UPDATE players SET default_cup = ? WHERE id = ?", (value, player_id))
+    conn.commit()
+    conn.close()
 
 
 def test_player_forms_have_no_default_cup_option(client):
@@ -130,34 +142,34 @@ def test_player_forms_have_no_default_cup_option(client):
     assert b"(default)" not in client.get("/players").data
 
 
-def test_create_player_ignores_a_posted_default_cup_field(client):
-    client.post("/players", data={"name": "Alice", "default_cup": "on"})
-    conn = get_connection()
-    names = [r["name"] for r in conn.execute("SELECT name FROM players")]
-    conn.close()
-    assert names == ["Alice"]
-    assert _preselected_on_new_cup(client)
+def test_create_player_leaves_the_legacy_column_at_its_default(client):
+    """The form no longer sends the field; its absence used to store 0."""
+    response = client.post("/players", data={"name": "Alice"})
+    assert response.status_code == 302
+    assert _stored_default_cup() == 1
 
 
-def test_edit_player_without_default_cup_field_keeps_them_on_new_cups(client):
+def test_edit_player_without_default_cup_field_leaves_the_column_alone(client):
     """Saving the edit form used to clear the flag when its checkbox was unticked."""
     create_player(client, "Alice")
-    response = client.post(
-        "/players/1/edit", data={"name": "Alicia"}, follow_redirects=True
-    )
-    assert b"Alicia" in response.data
-    assert 'class="score-name">Alicia' in client.get("/cups/new").data.decode()
+    response = client.post("/players/1/edit", data={"name": "Alicia"})
+    assert response.status_code == 302
+    assert _stored_default_cup() == 1
+    assert b"Alicia" in client.get("/players").data
 
 
 def test_edit_player_ignores_a_posted_default_cup_field(client):
+    """A stale edit page that still posts the checkbox no longer writes the column."""
     create_player(client, "Alice")
+    _set_stored_default_cup(0)
     response = client.post(
         "/players/1/edit",
         data={"name": "Alice", "default_cup": "on", "has_line": "on", "line": "4"},
         follow_redirects=True,
     )
+    assert response.status_code == 200
     assert b"(+4)" in response.data
-    assert _preselected_on_new_cup(client)
+    assert _stored_default_cup() == 0
 
 
 def test_delete_player_with_scores_blocked(client):

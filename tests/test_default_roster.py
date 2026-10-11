@@ -2,8 +2,9 @@
 
 Both forms (GET /cup-session/new and GET /cups/new) share
 app.default_roster_players: the most recent cup that is neither soft-deleted
-nor cancelled supplies the preselected players, and with no such cup every
-player is preselected. The assertions read the rendered player_ids[] inputs
+nor cancelled supplies the preselected players (its live cup_players roster
+while in progress, its scored players once finished), and with no such cup,
+or one with nobody on it, every player is preselected. The assertions read the rendered player_ids[] inputs
 (a checked checkbox per player on the session form, a hidden input per score
 row on the manual form) and the allPlayers list that feeds the "Add a
 player" select.
@@ -174,6 +175,70 @@ def test_mid_cup_roster_edits_are_reflected(client):
     _complete_session(client, 1, [2, 3])
     for path in FORMS:
         assert _preselected(client, path) == {2, 3}
+
+
+def _score_id(cup_id, player_id):
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT id FROM scores WHERE cup_id = ? AND player_id = ?", (cup_id, player_id)
+    ).fetchone()
+    conn.close()
+    return row["id"]
+
+
+@pytest.mark.parametrize("path", FORMS)
+def test_player_edited_out_of_a_finished_session_cup_is_dropped(client, path):
+    """Editing a finished cup rewrites its scores but leaves cup_players as it was."""
+    _setup_players(client)
+    _play_session(client, 1, [1, 2, 3])
+    response = client.post(
+        "/cups/1/edit",
+        data={
+            "date": "2026-03-15T20:00",
+            "notes": "",
+            "tz_offset": "",
+            "player_ids[]": ["1", "2"],
+            "scores[]": ["100", "80"],
+            "lines[]": ["0", "0"],
+        },
+    )
+    assert response.headers["Location"].endswith("/cups")
+    assert _preselected(client, path) == {1, 2}
+
+
+@pytest.mark.parametrize("path", FORMS)
+def test_player_whose_score_was_deleted_from_a_finished_session_cup_is_dropped(client, path):
+    _setup_players(client)
+    _play_session(client, 1, [1, 2, 3])
+    client.post(f"/scores/{_score_id(1, 3)}/delete")
+    assert _preselected(client, path) == {1, 2}
+
+
+@pytest.mark.parametrize("path", FORMS)
+def test_finished_session_cup_with_no_scores_left_uses_its_session_roster(client, path):
+    _setup_players(client)
+    _play_session(client, 1, [1, 2])
+    for player_id in (1, 2):
+        client.post(f"/scores/{_score_id(1, player_id)}/delete")
+    assert _preselected(client, path) == {1, 2}
+
+
+def test_stray_score_on_an_in_progress_cup_does_not_widen_the_roster(client):
+    """A standalone score for someone outside the live roster does not add them to it."""
+    _setup_players(client)
+    _start_session(client, [1, 2])
+    client.post("/scores", data={"cup_id": "1", "player_id": "3", "score": "99"})
+    assert _score_id(1, 3)
+    assert _preselected(client, "/cups/new") == {1, 2}
+
+
+@pytest.mark.parametrize("path", FORMS)
+def test_last_cup_with_nobody_on_it_preselects_every_player(client, path):
+    """A manual cup whose only score was deleted has no roster to copy."""
+    _setup_players(client)
+    create_cup_with_scores(client, "2026-03-15T20:00", [(2, 100)])
+    client.post(f"/scores/{_score_id(1, 2)}/delete")
+    assert _preselected(client, path) == {1, 2, 3, 4}
 
 
 @pytest.mark.parametrize("path", FORMS)

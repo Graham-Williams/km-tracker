@@ -865,27 +865,34 @@ def cup_edition_label_filter(cup):
 def default_roster_players(conn):
     """Players preselected on the new-cup forms: the roster of the last cup.
 
-    The last cup is the most recent one by date (id breaks a tie) that is
-    neither soft-deleted nor cancelled, so a cup still in progress counts. Its
-    roster is everyone in cup_players plus everyone with a score: a live
-    session writes cup_players, while a manually entered cup (POST /cups)
-    writes only scores. With no such cup, or one with nobody on it, every
-    player is preselected.
+    The last cup is the most recent one by date that is neither soft-deleted
+    nor cancelled, so a cup still in progress counts. (cups.date is UNIQUE; the
+    id in the ORDER BY only keeps the pick deterministic.)
+
+    Who was on it depends on its state. A cup in progress has its live
+    cup_players roster. A finished cup has the players with a score, which is
+    the only record a manually entered cup (POST /cups) writes and the one that
+    later score edits keep current; cup_players is used only if it has no
+    scores at all. With no such cup, or one with nobody on it, every player is
+    preselected.
     """
     last_cup = conn.execute(
-        "SELECT id FROM cups WHERE deleted_at IS NULL AND status != 'cancelled' "
+        "SELECT id, status FROM cups WHERE deleted_at IS NULL AND status != 'cancelled' "
         "ORDER BY date DESC, id DESC LIMIT 1"
     ).fetchone()
     if last_cup is not None:
-        roster = conn.execute(
-            "SELECT id, name, line, has_line FROM players WHERE id IN ("
-            "SELECT player_id FROM cup_players WHERE cup_id = ? "
-            "UNION SELECT player_id FROM scores WHERE cup_id = ?"
-            ") ORDER BY name",
-            (last_cup["id"], last_cup["id"]),
-        ).fetchall()
-        if roster:
-            return roster
+        sources = ["cup_players"]
+        if last_cup["status"] != "in_progress":
+            sources.insert(0, "scores")
+        for source in sources:
+            roster = conn.execute(
+                "SELECT id, name, line, has_line FROM players WHERE id IN ("
+                f"SELECT player_id FROM {source} WHERE cup_id = ?"
+                ") ORDER BY name",
+                (last_cup["id"],),
+            ).fetchall()
+            if roster:
+                return roster
     return conn.execute(
         "SELECT id, name, line, has_line FROM players ORDER BY name"
     ).fetchall()
