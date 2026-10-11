@@ -2916,9 +2916,9 @@ def cup_session_cancel(cup_id):
 # --- Mid-cup roster editing (add / remove a player on an in-progress cup) ---
 #
 # The roster is otherwise fixed at cup creation. These two routes let the user
-# adjust it while a cup is in progress. No scores exist mid-cup (scores are only
-# written at completion), so there is nothing to reconcile here — only the
-# cup_players join table changes. Both guards mirror create_score / PR #58:
+# adjust it while a cup is in progress. The session flow writes no scores mid-cup
+# (it only writes them at completion), so there is nothing to reconcile here —
+# only the cup_players join table changes. Both guards mirror create_score / PR #58:
 # the cup must be status='in_progress' AND deleted_at IS NULL, verified inside
 # the write itself so a completed/cancelled/deleted/nonexistent cup is rejected
 # with a friendly flash (never a 500). The <int:cup_id> path uses the bounded

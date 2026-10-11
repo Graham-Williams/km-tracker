@@ -4,10 +4,10 @@ Both forms (GET /cup-session/new and GET /cups/new) share
 app.default_roster_players: the most recent cup that is neither soft-deleted
 nor cancelled supplies the preselected players (its live cup_players roster
 while in progress, its scored players once finished), and with no such cup,
-or one with nobody on it, every player is preselected. The assertions read the rendered player_ids[] inputs
-(a checked checkbox per player on the session form, a hidden input per score
-row on the manual form) and the allPlayers list that feeds the "Add a
-player" select.
+or one with nobody on it, every player is preselected. The assertions read
+the rendered player_ids[] inputs (a checked checkbox per player on the session
+form, a hidden input per score row on the manual form) and the allPlayers list
+that feeds the "Add a player" select.
 """
 
 import re
