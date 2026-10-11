@@ -192,6 +192,62 @@ def test_submit_with_empty_scores_blocked_client_side(page, base_url):
     assert page.locator(".flash-success", has_text="photo saved").is_visible()
 
 
+def _play_four_races(page, base_url, cup_id):
+    for m in ["Coconut Mall", "Rainbow Road", "Moo Moo Meadows", "Koopa Cape"]:
+        page.request.post(
+            f"{base_url}/cup-session/{cup_id}/next-race",
+            data=json.dumps({"map": m}),
+            headers={"Content-Type": "application/json"},
+        )
+
+
+def test_failed_attach_confirm_waits_for_the_scores_on_the_completion_page(page, base_url):
+    """The completion page's own guard rejects blank scores, so a submit with
+    a failed photo and blank scores must not ask "submit without it?" first —
+    the answer is moot and the question would be asked again once the scores
+    are in. The confirm fires exactly once, when the submit can go through."""
+    _create_player(page, base_url, "Alice")
+    _create_player(page, base_url, "Bob")
+    page.goto(f"{base_url}/cup-session/new")
+    page.click('button[type="submit"]')
+    page.wait_for_url("**/cup-session/*")
+    cup_id = page.url.rstrip("/").split("/")[-1]
+    _play_four_races(page, base_url, cup_id)
+    page.goto(f"{base_url}/cup-session/{cup_id}/complete")
+    page.locator("#cup-form").wait_for()
+    url = page.url
+
+    dialogs = []
+
+    def on_dialog(dialog):
+        dialogs.append(dialog.message)
+        dialog.accept()
+
+    page.on("dialog", on_dialog)
+
+    # An undecodable "image": the attach fails and photo_data stays empty.
+    page.set_input_files(
+        "#photo-pick",
+        {"name": "standings.png", "mimeType": "image/png", "buffer": b"not an image"},
+    )
+    page.locator(".photo-attach-status.is-error").wait_for(state="visible")
+    assert page.input_value("#photo-data") == ""
+
+    page.locator('#cup-form button[type="submit"]').click()
+    warning = page.locator("#submit-warning")
+    assert warning.is_visible()
+    assert warning.text_content().strip() == "Enter a score for Alice and Bob."
+    assert dialogs == []
+    assert page.url == url
+
+    scores = page.locator('input[name="scores[]"]')
+    scores.nth(0).fill("100")
+    scores.nth(1).fill("80")
+    page.locator('#cup-form button[type="submit"]').click()
+    page.wait_for_url(f"{base_url}/cups")
+    assert dialogs == ["Your photo didn't attach — submit without it?"]
+
+
 @requires_in_process_server
 def test_mapping_panel_mix_and_match(page, base_url, monkeypatch):
     """The mix-and-match panel: one dropdown per player over the highlighted

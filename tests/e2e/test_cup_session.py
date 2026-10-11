@@ -139,6 +139,142 @@ def test_full_session_flow(page, base_url):
     assert page.locator("text=Alice").is_visible()
 
 
+# --- Completion form: every player needs a score (issue #73) ---
+
+
+def _play_to_completion(page):
+    """Four races, then the redirect to the completion page."""
+    for i in range(4):
+        page.click("#spin-btn")
+        page.locator("#wheel-label.visible").wait_for(timeout=10000)
+        page.locator("#next-race-btn, #complete-btn").first.click()
+        page.locator("#next-race-confirm-btn").click()
+        if i < 3:
+            page.locator(f"text=Race {i + 2} of 4").wait_for(timeout=10000)
+        else:
+            page.wait_for_url("**/complete", timeout=10000)
+    page.locator("#cup-form").wait_for(timeout=10000)
+
+
+def _warning(page):
+    return page.locator("#submit-warning")
+
+
+def _submit_cup(page):
+    page.locator('#cup-form button[type="submit"]').click()
+
+
+def test_blank_scores_are_named_inline_before_the_form_is_lost(page, base_url):
+    """Submitting with scores missing names the players and marks their
+    inputs, without a round trip — the server's rejection would redirect and
+    wipe the form. One message per submit: the photo panel's status line
+    stays empty."""
+    _start_session(page, base_url)
+    _play_to_completion(page)
+    url = page.url
+    scores = page.locator('input[name="scores[]"]')
+
+    _submit_cup(page)
+    warning = _warning(page)
+    assert warning.is_visible()
+    assert warning.text_content().strip() == "Enter a score for Alice and Bob."
+    assert scores.nth(0).get_attribute("aria-invalid") == "true"
+    assert scores.nth(1).get_attribute("aria-invalid") == "true"
+    assert page.url == url
+    assert page.locator(".flash").count() == 0
+    assert page.locator(".photo-status").text_content().strip() == ""
+    # The first blank input gets focus so a phone keyboard opens on it.
+    assert page.evaluate("document.activeElement.name") == "scores[]"
+
+    # One score in: the sentence drops Alice straight away, before any
+    # resubmit, and a resubmit names and marks only the other player.
+    scores.nth(0).fill("100")
+    assert warning.is_visible()
+    assert warning.text_content().strip() == "Enter a score for Bob."
+    _submit_cup(page)
+    assert warning.is_visible()
+    assert warning.text_content().strip() == "Enter a score for Bob."
+    assert scores.nth(0).get_attribute("aria-invalid") is None
+    assert scores.nth(1).get_attribute("aria-invalid") == "true"
+    assert page.url == url
+
+    # Typing in the marked row clears its mark and the warning.
+    scores.nth(1).fill("8")
+    assert scores.nth(1).get_attribute("aria-invalid") is None
+    assert not warning.is_visible()
+
+    scores.nth(1).fill("80")
+    _submit_cup(page)
+    page.wait_for_url("**/cups", timeout=10000)
+    assert page.locator("text=Alice").is_visible()
+
+
+def test_blank_score_warning_fits_a_phone(page, base_url):
+    """The inline message and marks must not widen the rows at phone width
+    (the overflow class of issue #83 / #119)."""
+    page.set_viewport_size({"width": 390, "height": 844})
+    _start_session(page, base_url)
+    _play_to_completion(page)
+
+    _submit_cup(page)
+    warning = _warning(page)
+    assert warning.is_visible()
+    assert "Alice and Bob" in warning.text_content()
+    assert page.evaluate("document.documentElement.scrollWidth") <= 390
+
+
+def test_line_score_keystroke_that_leaves_the_score_blank_keeps_the_mark(page, base_url):
+    """A Wii row with a line has a Line score column that fills the raw score
+    (syncRawScore). A keystroke there that leaves the score blank must not
+    clear the row's mark or hide the warning; a real line score, which does
+    fill the raw score, clears them like typing the score itself."""
+    _create_player(page, base_url, "Alice", has_line=True)
+    _create_player(page, base_url, "Bob")
+    page.goto(f"{base_url}/cup-session/new")
+    page.click('button[type="submit"]')
+    page.wait_for_url("**/cup-session/*")
+    _play_to_completion(page)
+
+    alice = page.locator(".score-row").nth(0)
+    raw = alice.locator(".score-input")
+    line_score = alice.locator(".line-score-input")
+    assert line_score.count() == 1 and not line_score.first.get_attribute("readonly")
+
+    _submit_cup(page)
+    warning = _warning(page)
+    assert warning.is_visible()
+    assert raw.get_attribute("aria-invalid") == "true"
+
+    # A lone "-" is valid intermediate input for a number field: the input
+    # event fires but the value sanitises to "", so the raw score stays blank.
+    line_score.focus()
+    page.keyboard.type("-")
+    assert raw.input_value() == ""
+    assert raw.get_attribute("aria-invalid") == "true"
+    assert warning.is_visible()
+
+    # A real line score fills the raw score, so the mark goes.
+    line_score.fill("90")
+    assert raw.input_value() != ""
+    assert raw.get_attribute("aria-invalid") is None
+    # Bob is still blank and marked, so the warning stays.
+    assert warning.is_visible()
+
+
+def test_server_rejects_blank_scores_when_the_guard_is_bypassed(page, base_url):
+    """HTMLFormElement.submit() skips every submit listener, so this reaches
+    the route with blank scores: it flashes the same sentence, writes nothing
+    and comes back to the completion page."""
+    _start_session(page, base_url)
+    _play_to_completion(page)
+
+    page.evaluate("document.getElementById('cup-form').submit()")
+    flash = page.locator(".flash", has_text="Enter a score for Alice and Bob.")
+    flash.wait_for(timeout=10000)
+    assert "/complete" in page.url
+    assert page.locator("#cup-form").is_visible()
+
+
 # --- Cancel ---
 
 

@@ -591,3 +591,56 @@ def test_a_half_filled_row_is_caught_before_the_form_is_lost(page, base_url):
     block2.nth(1).fill("40")
     page.click('button[type="submit"]')
     page.wait_for_url("**/cups", timeout=15000)
+
+
+def test_a_blank_row_names_that_player_on_a_mixed_cup(page, base_url):
+    """Issue #73 on a mixed row: the total is readonly, so the two console
+    halves are what get marked, and the warning names the player."""
+    _create_player(page, base_url, "Alice")
+    _create_player(page, base_url, "Bob")
+    page.goto(f"{base_url}/cup-session/new")
+    page.select_option('select[name="game_edition"]', "mixed")
+    page.click('button[type="submit"]')
+    page.wait_for_url("**/cup-session/*")
+    cup_id = page.url.rstrip("/").split("/")[-1]
+    page.goto(f"{base_url}/cup-session/{cup_id}/complete")
+    expect(page.locator("#cup-form")).to_be_visible(timeout=15000)
+    url = page.url
+
+    block1 = page.locator('input[name="block1_scores[]"]')
+    block2 = page.locator('input[name="block2_scores[]"]')
+    totals = page.locator('input[name="scores[]"]')
+
+    # Alice is complete; Bob's row is untouched.
+    block1.nth(0).fill("46")
+    block2.nth(0).fill("42")
+    expect(totals.nth(0)).to_have_value("88")
+
+    page.locator('#cup-form button[type="submit"]').click()
+    warning = page.locator("#submit-warning")
+    expect(warning).to_be_visible()
+    assert warning.text_content().strip() == "Enter a score for Bob."
+    assert block1.nth(1).get_attribute("aria-invalid") == "true"
+    assert block2.nth(1).get_attribute("aria-invalid") == "true"
+    assert block1.nth(0).get_attribute("aria-invalid") is None
+    assert block2.nth(0).get_attribute("aria-invalid") is None
+    assert totals.nth(1).get_attribute("aria-invalid") is None
+    assert page.url == url
+    assert page.locator(".flash").count() == 0
+    expect(block1.nth(0)).to_have_value("46")
+    expect(block2.nth(0)).to_have_value("42")
+
+    # Typing one half clears the row's marks; the submit then gets the more
+    # specific half-row message instead of a missing-player one.
+    block1.nth(1).fill("30")
+    assert block1.nth(1).get_attribute("aria-invalid") is None
+    assert block2.nth(1).get_attribute("aria-invalid") is None
+    assert not warning.is_visible()
+    page.locator('#cup-form button[type="submit"]').click()
+    expect(warning).to_be_visible()
+    assert "0" in warning.text_content()
+    assert "Enter a score for" not in warning.text_content()
+
+    block2.nth(1).fill("40")
+    page.locator('#cup-form button[type="submit"]').click()
+    page.wait_for_url("**/cups", timeout=15000)

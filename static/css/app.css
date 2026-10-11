@@ -678,6 +678,13 @@ input[type="checkbox"] {
   display: none;
 }
 
+/* Cup completion form: a rostered player whose score was left blank. Border
+   only — no width or layout change, so the phone-width rows stay put. */
+.score-input.is-invalid,
+.block-score-input.is-invalid {
+  border-color: var(--color-danger);
+}
+
 /* Extraction-in-flight spinner — sits inline beside the .photo-status text
    while the /extract-scores fetch is running (photo_score.js toggles the
    hidden attribute). Pure CSS animation; static ring under reduced motion. */

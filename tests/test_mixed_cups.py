@@ -798,6 +798,36 @@ def test_mixed_roster_freshness_guard_rejects_a_stale_completion(
     assert scores == 0
 
 
+def test_mixed_completion_names_the_player_with_a_blank_row(client, monkeypatch):
+    """Issue #73 on a mixed cup: Alice's halves are both filled (so her total
+    exists), Bob's row is entirely blank. The rejection names Bob only."""
+    _fix_flip(monkeypatch, "wii")
+    _setup_players(client)
+    _create_session(client, ["1", "2"], edition=MIXED_EDITION)
+    _play_half(client, 1, "wii")
+    _play_half(client, 1, "mk8dx")
+
+    response = client.post(
+        "/cup-session/1/complete",
+        data=_complete_form(
+            ["1", "2"],
+            ["", ""],
+            **{"block1_scores[]": ["46", ""], "block2_scores[]": ["42", ""]},
+        ),
+        follow_redirects=True,
+    )
+    page = response.get_data(as_text=True)
+    assert "Enter a score for Bob." in page
+    assert "Enter a score for Alice" not in page
+    conn = get_connection()
+    scores = conn.execute(
+        "SELECT COUNT(*) AS n FROM scores WHERE cup_id = 1"
+    ).fetchone()["n"]
+    conn.close()
+    assert _cup_row()["status"] == "in_progress"
+    assert scores == 0
+
+
 def test_stale_veto_forfeit_still_fires_at_the_swap(client, monkeypatch):
     # The forfeit lands on exactly the page load that shows the swap reminder.
     # No logical interaction, but both must render together.

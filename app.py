@@ -1496,6 +1496,22 @@ BLOCK_HALF_MISSING_MSG = (
     "on that console."
 )
 
+# Prefix of the completion form's "missing scores" rejection (issue #73). Same
+# one-constant rule as BLOCK_HALF_MISSING_MSG: cup_session_complete.html builds
+# the identical sentence client-side from the row names, so the prefix is
+# injected into the template rather than retyped there.
+MISSING_SCORES_MSG_PREFIX = "Enter a score for "
+
+
+def missing_scores_message(names):
+    """'Enter a score for Alice.' / '... Alice and Bob.' / '... Alice, Bob and Carol.'"""
+    names = list(names)
+    if len(names) == 1:
+        listed = names[0]
+    else:
+        listed = ", ".join(names[:-1]) + " and " + names[-1]
+    return MISSING_SCORES_MSG_PREFIX + listed + "."
+
 
 def parse_block_scores_from_form(form, scores_data):
     """Fold a MIXED cup's per-console block scores into `scores_data`.
@@ -2647,6 +2663,9 @@ def cup_session_complete(cup_id):
         # The client-side submit guard mirrors the server's half-row rejection;
         # it shows the SERVER's sentence so the two can never drift.
         block_half_missing_msg=BLOCK_HALF_MISSING_MSG,
+        # The every-player-needs-a-score guard builds its sentence from this
+        # prefix plus the row names, so its wording matches the server's flash.
+        missing_scores_msg_prefix=MISSING_SCORES_MSG_PREFIX,
         lines_on=lines_on,
         existing_scores=existing_scores,
     )
@@ -2721,11 +2740,6 @@ def cup_session_submit(cup_id):
             return redirect(url_for("cup_session_complete", cup_id=cup_id))
     clear_blocks_if_not_mixed(cup, scores_data)
 
-    if not scores_data:
-        flash("At least one player must have a score.")
-        conn.close()
-        return redirect(url_for("cup_session_complete", cup_id=cup_id))
-
     # Roster freshness guard (mid-cup roster editing). The completion form is
     # rendered from cup_players at page-load, but the roster can now be edited
     # mid-cup. A STALE form — submitted after a player was added/removed since it
@@ -2745,17 +2759,32 @@ def cup_session_submit(cup_id):
         flash("Invalid player selection.")
         return redirect(url_for("cup_session_complete", cup_id=cup_id))
     live_roster = {
-        r["player_id"]
+        r["player_id"]: r["name"]
         for r in conn.execute(
-            "SELECT player_id FROM cup_players WHERE cup_id = ?", (cup_id,)
+            "SELECT cp.player_id, p.name FROM cup_players cp "
+            "JOIN players p ON cp.player_id = p.id WHERE cp.cup_id = ?",
+            (cup_id,),
         ).fetchall()
     }
-    if len(submitted_ids) != len(set(submitted_ids)) or set(submitted_ids) != live_roster:
+    if len(submitted_ids) != len(set(submitted_ids)) or set(submitted_ids) != set(live_roster):
         conn.close()
         flash(
             "The player roster changed since this page loaded — here are the "
             "current players. Please re-enter the scores."
         )
+        return redirect(url_for("cup_session_complete", cup_id=cup_id))
+
+    # Every rostered player must have a score (issue #73). The live roster is
+    # exactly who played — mid-cup editing removes anyone who left — so a blank
+    # row is a mistake, not a choice, and parse_scores_from_form SKIPPING it
+    # would silently complete the cup without that player. Name the missing
+    # players in form order, write nothing, and leave the cup in_progress. (The
+    # manual history forms keep their blank-row-means-no-score behaviour.)
+    scored_ids = {s["player_id"] for s in scores_data}
+    missing = [live_roster[pid] for pid in submitted_ids if pid not in scored_ids]
+    if missing:
+        conn.close()
+        flash(missing_scores_message(missing))
         return redirect(url_for("cup_session_complete", cup_id=cup_id))
 
     # Switch (mk8dx) cups are lineless — drop any submitted line before it can

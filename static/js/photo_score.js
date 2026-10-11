@@ -35,9 +35,14 @@
  *     extract fetch is in flight is blocked WITHOUT auto-resume (the user
  *     must see and review the model-filled scores — never auto-submit them);
  *     submit with every score empty is blocked client-side (the server would
- *     reject it anyway, and the redirect would wipe the attached photo);
+ *     reject it anyway, and the redirect would wipe the attached photo) —
+ *     unless the page passes `ownsEmptyGuard: false`, meaning its own submit
+ *     guard reports blank scores (the cup completion page names each player
+ *     whose score is missing; two messages for one submit would compete);
  *     submit after a failed attach requires an explicit confirm() to proceed
- *     photoless.
+ *     photoless — skipped under `ownsEmptyGuard: false` while any score is
+ *     still blank, because the page's own guard will reject that submit and
+ *     the question would be moot.
  *   - Busy UX while the extract fetch is in flight: a spinner shows beside
  *     the status line and the form's submit button is visually disabled
  *     (re-enabled on completion, error, or a superseding new pick). That's
@@ -46,7 +51,8 @@
  * Usage (per page):
  *   initPhotoScore({
  *     extractUrl: "/extract-scores" or null,   // null = attach-only mode
- *     getPayload: function () { return {cup_id: 7}; }  // merged into the POST
+ *     getPayload: function () { return {cup_id: 7}; },  // merged into the POST
+ *     ownsEmptyGuard: false  // optional; default true (see above)
  *   });
  */
 // Shared canvas downscale (max 1200px long edge, JPEG ~0.8). Hoisted to module
@@ -545,7 +551,22 @@ window.initPhotoScore = function (opts) {
         return false;
     }
 
+    // True iff some submittable score field is still blank — exactly what the
+    // completion page's own guard rejects when it owns the empty case.
+    function hasBlankScore() {
+        var inputs = form.querySelectorAll(".score-input");
+        for (var i = 0; i < inputs.length; i++) {
+            if (!inputs[i].disabled && inputs[i].value.trim() === "") return true;
+        }
+        return false;
+    }
+
     // Submit guard: never let the form race or silently drop the photo.
+    // A page whose own guard reports blank scores opts out of the empty
+    // check here (ownsEmptyGuard: false); the pending/extracting checks
+    // always run, and the failed-attach confirm runs once that page's guard
+    // would let the submit through.
+    var ownsEmptyGuard = opts.ownsEmptyGuard !== false;
     if (form) {
         form.addEventListener("submit", function (e) {
             if (pending) {
@@ -571,7 +592,7 @@ window.initPhotoScore = function (opts) {
                 );
                 return;
             }
-            if (!hasAnyScore()) {
+            if (ownsEmptyGuard && !hasAnyScore()) {
                 // The server rejects an all-empty submit with a flash +
                 // redirect that would wipe the attached photo and all form
                 // state — fail fast client-side instead.
@@ -582,6 +603,11 @@ window.initPhotoScore = function (opts) {
                 return;
             }
             if (lastPickFailed && !dataField.value) {
+                // With ownsEmptyGuard off, the page's guard (registered after
+                // this one) rejects a blank score, so the submit isn't going
+                // through anyway — don't ask a question whose answer is moot,
+                // and then ask it again once the scores are in.
+                if (!ownsEmptyGuard && hasBlankScore()) return;
                 if (!confirm("Your photo didn't attach — submit without it?")) {
                     e.preventDefault();
                 }
