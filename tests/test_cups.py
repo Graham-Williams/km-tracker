@@ -254,9 +254,10 @@ def test_new_cup_page_loads(client):
     assert b"New Cup" in response.data
 
 
-def test_new_cup_shows_default_players_only(client):
-    create_player(client, "Alice", default_cup=True)
-    create_player(client, "Bob", default_cup=False)
+def test_new_cup_shows_only_the_last_cups_players(client):
+    create_player(client, "Alice")
+    create_player(client, "Bob")
+    create_cup(client, date="2026-03-15T20:00", player_id="1")
     response = client.get("/cups/new")
     data = response.data.decode()
     assert 'class="score-name">Alice' in data

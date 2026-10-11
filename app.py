@@ -862,6 +862,35 @@ def cup_edition_label_filter(cup):
     return edition_order_label(cup["game_edition"], row_value(cup, "first_edition"))
 
 
+def default_roster_players(conn):
+    """Players preselected on the new-cup forms: the roster of the last cup.
+
+    The last cup is the most recent one by date (id breaks a tie) that is
+    neither soft-deleted nor cancelled, so a cup still in progress counts. Its
+    roster is everyone in cup_players plus everyone with a score: a live
+    session writes cup_players, while a manually entered cup (POST /cups)
+    writes only scores. With no such cup, or one with nobody on it, every
+    player is preselected.
+    """
+    last_cup = conn.execute(
+        "SELECT id FROM cups WHERE deleted_at IS NULL AND status != 'cancelled' "
+        "ORDER BY date DESC, id DESC LIMIT 1"
+    ).fetchone()
+    if last_cup is not None:
+        roster = conn.execute(
+            "SELECT id, name, line, has_line FROM players WHERE id IN ("
+            "SELECT player_id FROM cup_players WHERE cup_id = ? "
+            "UNION SELECT player_id FROM scores WHERE cup_id = ?"
+            ") ORDER BY name",
+            (last_cup["id"], last_cup["id"]),
+        ).fetchall()
+        if roster:
+            return roster
+    return conn.execute(
+        "SELECT id, name, line, has_line FROM players ORDER BY name"
+    ).fetchall()
+
+
 def get_in_progress_cup():
     conn = get_connection()
     cup = conn.execute(
@@ -1818,9 +1847,7 @@ def apply_line_adjustments(conn, cup_id, scores_data):
 @app.route("/cups/new")
 def new_cup():
     conn = get_connection()
-    default_players = conn.execute(
-        "SELECT id, name, line, has_line FROM players WHERE default_cup = 1 ORDER BY name"
-    ).fetchall()
+    default_players = default_roster_players(conn)
     all_players = conn.execute(
         "SELECT id, name, line, has_line FROM players ORDER BY name"
     ).fetchall()
@@ -2210,9 +2237,7 @@ def cup_session_new():
     if in_progress:
         return redirect(url_for("cup_session_race", cup_id=in_progress["id"]))
     conn = get_connection()
-    default_players = conn.execute(
-        "SELECT id, name, line, has_line FROM players WHERE default_cup = 1 ORDER BY name"
-    ).fetchall()
+    default_players = default_roster_players(conn)
     all_players = conn.execute(
         "SELECT id, name, line, has_line FROM players ORDER BY name"
     ).fetchall()
