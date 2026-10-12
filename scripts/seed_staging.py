@@ -169,8 +169,8 @@ def _insert_players(conn):
     ids = []
     for p in FAKE_PLAYERS:
         cur = conn.execute(
-            "INSERT INTO players (name, default_cup, line, has_line) VALUES (?, ?, ?, ?)",
-            (p["name"], 1, p["line"], p["has_line"]),
+            "INSERT INTO players (name, line, has_line) VALUES (?, ?, ?)",
+            (p["name"], p["line"], p["has_line"]),
         )
         ids.append(cur.lastrowid)
     return ids

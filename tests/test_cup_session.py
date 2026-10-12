@@ -1,7 +1,7 @@
 import json
 
 from db import get_connection
-from helpers import create_player
+from helpers import create_cup, create_player
 
 
 def _create_session(client, player_ids=None, edition=None):
@@ -204,12 +204,13 @@ def test_cup_session_new_shows_default_players(client):
     assert b"Bob" in response.data
 
 
-def test_cup_session_new_only_shows_default_players_checked(client):
-    create_player(client, "Alice", default_cup=True)
-    create_player(client, "Bob", default_cup=False)
+def test_cup_session_new_only_checks_the_last_cups_players(client):
+    create_player(client, "Alice")
+    create_player(client, "Bob")
+    # The last cup had Alice only, so Bob is left for the "Add a player" dropdown.
+    create_cup(client, date="2026-03-15T20:00", player_id="1")
     response = client.get("/cup-session/new")
     data = response.data.decode()
-    # Alice should be in the player list (checked), Bob should be in the dropdown
     assert 'value="1" checked' in data
     assert 'value="2" checked' not in data
 

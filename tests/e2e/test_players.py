@@ -20,13 +20,19 @@ def test_create_player_with_line(page, base_url):
     assert page.locator("text=(+0)").is_visible()
 
 
-def test_create_player_without_default_cup(page, base_url):
+def test_player_forms_offer_only_the_line_checkbox(page, base_url):
+    """The "Default on new cups" checkbox is retired: new cups copy the last cup's roster."""
     page.goto(f"{base_url}/players")
+    assert page.locator('form.card input[type="checkbox"]').evaluate_all(
+        "els => els.map(el => el.name)"
+    ) == ["has_line"]
     page.fill('input[name="name"]', "Alice")
-    page.uncheck('input[name="default_cup"]')
     page.click('button[type="submit"]')
-    assert page.locator("text=Alice").is_visible()
-    assert not page.locator("text=(default)").is_visible()
+    assert page.locator(".player-item .badge").count() == 0
+    page.click("text=Edit")
+    assert page.locator('form.card input[type="checkbox"]').evaluate_all(
+        "els => els.map(el => el.name)"
+    ) == ["has_line"]
 
 
 def test_create_duplicate_player_shows_error(page, base_url):

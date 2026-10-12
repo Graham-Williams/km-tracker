@@ -33,7 +33,7 @@ def test_create_standalone_score(page, base_url):
     writing into a completed cup corrupts its finalized standings), so this test
     targets a live cup session rather than a completed direct cup.
     """
-    # Create players Alice and Bob (default_cup on), then Carol.
+    # Create players Alice, Bob and Carol.
     page.goto(f"{base_url}/players")
     page.fill('input[name="name"]', "Alice")
     page.click('button[type="submit"]')
@@ -41,7 +41,7 @@ def test_create_standalone_score(page, base_url):
     page.click('button[type="submit"]')
     page.fill('input[name="name"]', "Carol")
     page.click('button[type="submit"]')
-    # Start a live cup session (Alice & Bob are pre-checked default players).
+    # Start a live cup session (with no earlier cup, every player is pre-checked).
     page.goto(f"{base_url}/cup-session/new")
     page.click('button[type="submit"]')
     # Get the in-progress cup_id and Carol's player_id from the DB.

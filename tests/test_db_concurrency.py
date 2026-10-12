@@ -230,7 +230,7 @@ def test_concurrent_writes_never_500(live_server):
             try:
                 r = requests.post(
                     f"{base}/players",
-                    data={"name": f"add_{tid}_{i}", "default_cup": "on"},
+                    data={"name": f"add_{tid}_{i}"},
                     headers=html,
                     allow_redirects=False,
                     timeout=15,
@@ -262,7 +262,7 @@ def test_concurrent_writes_never_500(live_server):
         try:
             requests.post(
                 f"{base}/players",
-                data={"name": f"cupowner_{tid}", "default_cup": "on"},
+                data={"name": f"cupowner_{tid}"},
                 headers=html,
                 allow_redirects=False,
                 timeout=15,

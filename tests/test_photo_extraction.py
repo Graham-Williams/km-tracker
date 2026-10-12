@@ -55,7 +55,7 @@ def _setup_players(client, players):
     """players: list of (name, wii_char, switch_char). Returns ids in order."""
     ids = []
     for i, (name, wii_char, switch_char) in enumerate(players, start=1):
-        data = {"name": name, "default_cup": "on"}
+        data = {"name": name}
         if wii_char:
             data["default_character_wii"] = wii_char
         if switch_char:

@@ -323,12 +323,17 @@ def test_cup_new_fits(page, base_url, _server, width):
 
 
 def test_cup_new_added_row_fits_390px(page, base_url, _server):
-    """A row built client-side by "Add a player" fits like a server-rendered one."""
-    _seed_players(_server["db_path"])
+    """A row built client-side by "Add a player" fits like a server-rendered one.
+
+    The extra player joins after the last cup, so the form preselects the
+    roster and offers them in the "Add a player" select.
+    """
+    players = _seed_players(_server["db_path"])
+    _seed_completed_cup(_server["db_path"], players, "wii")
     extra = "X" * NAME_LIMIT
     conn = get_connection(_server["db_path"])
     conn.execute(
-        "INSERT INTO players (name, has_line, line, default_cup) VALUES (?, 1, -12, 0)",
+        "INSERT INTO players (name, has_line, line) VALUES (?, 1, -12)",
         (extra,),
     )
     conn.commit()

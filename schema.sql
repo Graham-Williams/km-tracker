@@ -1,7 +1,7 @@
 CREATE TABLE IF NOT EXISTS players (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL UNIQUE,
-    default_cup BOOLEAN NOT NULL DEFAULT 1,
+    default_cup BOOLEAN NOT NULL DEFAULT 1,  -- legacy, unused: new cups preselect the last cup's roster
     line INTEGER NOT NULL DEFAULT 0,
     has_line BOOLEAN NOT NULL DEFAULT 0,
     default_character_wii TEXT,     -- character this player mains in MK Wii (photo score matching)

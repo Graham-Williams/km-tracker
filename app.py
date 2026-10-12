@@ -862,6 +862,52 @@ def cup_edition_label_filter(cup):
     return edition_order_label(cup["game_edition"], row_value(cup, "first_edition"))
 
 
+def format_cup_date(dt):
+    """A cup date as stored: 'YYYY-MM-DD HH:MM:SS', the year always four digits.
+
+    cups.date is compared and sorted as text, and strftime('%Y') does not
+    zero-pad on every platform, so a mistyped year such as 0026 would be stored
+    as '26-...' and sort after every real date.
+    """
+    return f"{dt.year:04d}-{dt:%m-%d %H:%M:%S}"
+
+
+def default_roster_players(conn):
+    """Players preselected on the new-cup forms: the roster of the last cup.
+
+    The last cup is the most recent one by date that is neither soft-deleted
+    nor cancelled, so a cup still in progress counts. (cups.date is UNIQUE; the
+    id in the ORDER BY only keeps the pick deterministic.)
+
+    Who was on it depends on its state. A cup in progress has its live
+    cup_players roster. A finished cup has the players with a score, which is
+    the only record a manually entered cup (POST /cups) writes and the one that
+    later score edits keep current; cup_players is used only if it has no
+    scores at all. With no such cup, or one with nobody on it, every player is
+    preselected.
+    """
+    last_cup = conn.execute(
+        "SELECT id, status FROM cups WHERE deleted_at IS NULL AND status != 'cancelled' "
+        "ORDER BY date DESC, id DESC LIMIT 1"
+    ).fetchone()
+    if last_cup is not None:
+        sources = ["cup_players"]
+        if last_cup["status"] != "in_progress":
+            sources.insert(0, "scores")
+        for source in sources:
+            roster = conn.execute(
+                "SELECT id, name, line, has_line FROM players WHERE id IN ("
+                f"SELECT player_id FROM {source} WHERE cup_id = ?"
+                ") ORDER BY name",
+                (last_cup["id"],),
+            ).fetchall()
+            if roster:
+                return roster
+    return conn.execute(
+        "SELECT id, name, line, has_line FROM players ORDER BY name"
+    ).fetchall()
+
+
 def get_in_progress_cup():
     conn = get_connection()
     cup = conn.execute(
@@ -895,7 +941,7 @@ def parse_default_character(form, field, edition):
 def players():
     conn = get_connection()
     rows = conn.execute(
-        "SELECT id, name, default_cup, line, has_line FROM players ORDER BY name"
+        "SELECT id, name, line, has_line FROM players ORDER BY name"
     ).fetchall()
     conn.close()
     return render_template(
@@ -912,7 +958,6 @@ def create_player():
     if not name:
         flash("Name cannot be empty.")
         return redirect(url_for("players"))
-    default_cup = request.form.get("default_cup") == "on"
     has_line = request.form.get("has_line") == "on"
     try:
         character_wii = parse_default_character(request.form, "default_character_wii", "wii")
@@ -925,9 +970,9 @@ def create_player():
     conn = get_connection()
     try:
         conn.execute(
-            "INSERT INTO players (name, default_cup, has_line, default_character_wii, default_character_switch) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (name, default_cup, has_line, character_wii, character_switch),
+            "INSERT INTO players (name, has_line, default_character_wii, default_character_switch) "
+            "VALUES (?, ?, ?, ?)",
+            (name, has_line, character_wii, character_switch),
         )
         conn.commit()
     except sqlite3.IntegrityError:
@@ -941,7 +986,7 @@ def create_player():
 def edit_player(player_id):
     conn = get_connection()
     player = conn.execute(
-        "SELECT id, name, default_cup, line, has_line, default_character_wii, default_character_switch "
+        "SELECT id, name, line, has_line, default_character_wii, default_character_switch "
         "FROM players WHERE id = ?",
         (player_id,),
     ).fetchone()
@@ -970,7 +1015,6 @@ def update_player(player_id):
         conn.close()
         flash("Name cannot be empty.")
         return redirect(url_for("edit_player", player_id=player_id))
-    default_cup = request.form.get("default_cup") == "on"
     has_line = request.form.get("has_line") == "on"
     line = request.form.get("line", "0").strip()
     try:
@@ -992,9 +1036,9 @@ def update_player(player_id):
         return redirect(url_for("edit_player", player_id=player_id))
     try:
         conn.execute(
-            "UPDATE players SET name = ?, default_cup = ?, line = ?, has_line = ?, "
+            "UPDATE players SET name = ?, line = ?, has_line = ?, "
             "default_character_wii = ?, default_character_switch = ? WHERE id = ?",
-            (name, default_cup, line, has_line, character_wii, character_switch, player_id),
+            (name, line, has_line, character_wii, character_switch, player_id),
         )
         conn.commit()
     except sqlite3.IntegrityError:
@@ -1122,7 +1166,7 @@ def create_cup():
                 utc_dt = local_dt + timedelta(minutes=offset_minutes)
             else:
                 utc_dt = local_dt
-            date_utc = utc_dt.strftime("%Y-%m-%d %H:%M:%S")
+            date_utc = format_cup_date(utc_dt)
         except (ValueError, OverflowError):
             flash("Invalid date format.")
             return redirect(url_for("cups"))
@@ -1271,7 +1315,7 @@ def update_cup(cup_id):
             utc_dt = local_dt + timedelta(minutes=offset_minutes)
         else:
             utc_dt = local_dt
-        date_utc = utc_dt.strftime("%Y-%m-%d %H:%M:%S")
+        date_utc = format_cup_date(utc_dt)
     except (ValueError, OverflowError):
         conn.close()
         flash("Invalid date format.")
@@ -1818,9 +1862,7 @@ def apply_line_adjustments(conn, cup_id, scores_data):
 @app.route("/cups/new")
 def new_cup():
     conn = get_connection()
-    default_players = conn.execute(
-        "SELECT id, name, line, has_line FROM players WHERE default_cup = 1 ORDER BY name"
-    ).fetchall()
+    default_players = default_roster_players(conn)
     all_players = conn.execute(
         "SELECT id, name, line, has_line FROM players ORDER BY name"
     ).fetchall()
@@ -2210,9 +2252,7 @@ def cup_session_new():
     if in_progress:
         return redirect(url_for("cup_session_race", cup_id=in_progress["id"]))
     conn = get_connection()
-    default_players = conn.execute(
-        "SELECT id, name, line, has_line FROM players WHERE default_cup = 1 ORDER BY name"
-    ).fetchall()
+    default_players = default_roster_players(conn)
     all_players = conn.execute(
         "SELECT id, name, line, has_line FROM players ORDER BY name"
     ).fetchall()
@@ -2714,7 +2754,7 @@ def cup_session_submit(cup_id):
                 utc_dt = local_dt + timedelta(minutes=offset_minutes)
             else:
                 utc_dt = local_dt
-            date_utc = utc_dt.strftime("%Y-%m-%d %H:%M:%S")
+            date_utc = format_cup_date(utc_dt)
         except (ValueError, OverflowError):
             date_utc = None
     else:
@@ -2886,9 +2926,9 @@ def cup_session_cancel(cup_id):
 # --- Mid-cup roster editing (add / remove a player on an in-progress cup) ---
 #
 # The roster is otherwise fixed at cup creation. These two routes let the user
-# adjust it while a cup is in progress. No scores exist mid-cup (scores are only
-# written at completion), so there is nothing to reconcile here — only the
-# cup_players join table changes. Both guards mirror create_score / PR #58:
+# adjust it while a cup is in progress. The session flow writes no scores mid-cup
+# (it only writes them at completion), so there is nothing to reconcile here —
+# only the cup_players join table changes. Both guards mirror create_score / PR #58:
 # the cup must be status='in_progress' AND deleted_at IS NULL, verified inside
 # the write itself so a completed/cancelled/deleted/nonexistent cup is rejected
 # with a friendly flash (never a 500). The <int:cup_id> path uses the bounded

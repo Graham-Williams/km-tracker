@@ -342,7 +342,7 @@ def test_mixed_cup_with_blocks_stays_lineless(client, monkeypatch):
     conn.close()
     _fix_flip(monkeypatch, "wii")
     for name in ("Alice", "Bob", "Carol"):
-        client.post("/players", data={"name": name, "default_cup": "on", "has_line": "on"})
+        client.post("/players", data={"name": name, "has_line": "on"})
     client.post("/players/1", data={"name": "Alice", "line": "5", "has_line": "on"})
     _create_session(client, ["1", "2", "3"], edition=MIXED_EDITION)
     _complete(
@@ -965,7 +965,6 @@ def _two_console_players(client):
             "/players",
             data={
                 "name": name,
-                "default_cup": "on",
                 "default_character_wii": wii_char,
                 "default_character_switch": switch_char,
             },

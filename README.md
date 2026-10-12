@@ -4,8 +4,9 @@ A tracker and suite of tools for Kario Mart game nights.
 
 ## Features
 
-- **Player Management** — add, edit, and remove players; mark defaults for quick cup setup
+- **Player Management** — add, edit, and remove players
 - **Cup & Score Tracking** — record cups with per-player scores, placements, and tiebreaker results
+- **Last Roster Carried Forward** — a new cup starts with the players of the last cup already selected (everyone, before the first cup); add or drop players from there
 - **Lines (Handicaps)** — optional per-player handicap that adjusts scores and auto-adjusts after 3-player cups based on placement
 - **Cup Sessions** — guided race-by-race cup flow with a spinning wheel course picker, half-veto/voto mechanics, and score entry at the end
 - **Game Editions** — choose **Mario Kart Wii** (32 tracks), **Mario Kart 8 Deluxe** (96 tracks: 48 base + 48 Booster Course Pass), or a mixed **Wii + Switch** cup per session. On a pure cup only the track list differs — all house rules (race count, vetoes, votoes, line deltas) are identical across editions

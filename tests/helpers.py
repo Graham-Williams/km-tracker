@@ -1,10 +1,8 @@
 from db import get_connection
 
 
-def create_player(client, name, default_cup=True, has_line=False):
+def create_player(client, name, has_line=False):
     data = {"name": name}
-    if default_cup:
-        data["default_cup"] = "on"
     if has_line:
         data["has_line"] = "on"
     return client.post("/players", data=data, follow_redirects=True)

@@ -111,38 +111,65 @@ def test_delete_nonexistent_player(client):
     assert response.status_code == 200
 
 
-# --- Default cup ---
+# --- Retired "Default on new cups" flag ---
+# New cups preselect the last cup's roster (tests/test_default_roster.py), so
+# the per-player flag is gone from the forms and a stale page that still posts
+# it changes nothing.
 
 
-def test_create_player_default_cup_on(client):
-    create_player(client, "Alice", default_cup=True)
-    response = client.get("/players")
-    assert b"(default)" in response.data
+def _stored_default_cup(player_id=1):
+    conn = get_connection()
+    row = conn.execute(
+        "SELECT default_cup FROM players WHERE id = ?", (player_id,)
+    ).fetchone()
+    conn.close()
+    return row["default_cup"]
 
 
-def test_create_player_default_cup_off(client):
-    create_player(client, "Alice", default_cup=False)
-    response = client.get("/players")
-    assert b"(default)" not in response.data
+def _set_stored_default_cup(value, player_id=1):
+    conn = get_connection()
+    conn.execute("UPDATE players SET default_cup = ? WHERE id = ?", (value, player_id))
+    conn.commit()
+    conn.close()
 
 
-def test_edit_player_default_cup(client):
-    create_player(client, "Alice", default_cup=True)
-    response = client.post(
-        "/players/1/edit", data={"name": "Alice"}, follow_redirects=True
-    )
-    # No default_cup field sent = unchecked = false
-    assert b"(default)" not in response.data
+def test_player_forms_have_no_default_cup_option(client):
+    create_player(client, "Alice")
+    for path in ("/players", "/players/1/edit"):
+        response = client.get(path)
+        assert b'name="default_cup"' not in response.data
+        assert b"Default on new cups" not in response.data
+    assert b"(default)" not in client.get("/players").data
 
 
-def test_edit_player_set_default_cup(client):
-    create_player(client, "Alice", default_cup=False)
+def test_create_player_leaves_the_legacy_column_at_its_default(client):
+    """The form no longer sends the field; its absence used to store 0."""
+    response = client.post("/players", data={"name": "Alice"})
+    assert response.status_code == 302
+    assert _stored_default_cup() == 1
+
+
+def test_edit_player_without_default_cup_field_leaves_the_column_alone(client):
+    """Saving the edit form used to clear the flag when its checkbox was unticked."""
+    create_player(client, "Alice")
+    response = client.post("/players/1/edit", data={"name": "Alicia"})
+    assert response.status_code == 302
+    assert _stored_default_cup() == 1
+    assert b"Alicia" in client.get("/players").data
+
+
+def test_edit_player_ignores_a_posted_default_cup_field(client):
+    """A stale edit page that still posts the checkbox no longer writes the column."""
+    create_player(client, "Alice")
+    _set_stored_default_cup(0)
     response = client.post(
         "/players/1/edit",
-        data={"name": "Alice", "default_cup": "on"},
+        data={"name": "Alice", "default_cup": "on", "has_line": "on", "line": "4"},
         follow_redirects=True,
     )
-    assert b"(default)" in response.data
+    assert response.status_code == 200
+    assert b"(+4)" in response.data
+    assert _stored_default_cup() == 0
 
 
 def test_delete_player_with_scores_blocked(client):
@@ -238,7 +265,7 @@ def test_edit_player_line(client):
     create_player(client, "Alice")
     client.post(
         "/players/1/edit",
-        data={"name": "Alice", "default_cup": "on", "has_line": "on", "line": "6"},
+        data={"name": "Alice", "has_line": "on", "line": "6"},
         follow_redirects=True,
     )
     conn = get_connection()
@@ -251,7 +278,7 @@ def test_edit_player_negative_line(client):
     create_player(client, "Alice")
     client.post(
         "/players/1/edit",
-        data={"name": "Alice", "default_cup": "on", "has_line": "on", "line": "-5"},
+        data={"name": "Alice", "has_line": "on", "line": "-5"},
         follow_redirects=True,
     )
     conn = get_connection()
@@ -269,7 +296,7 @@ def test_edit_player_line_resets_without_has_line(client):
     conn.close()
     client.post(
         "/players/1/edit",
-        data={"name": "Alice", "default_cup": "on", "line": "5"},
+        data={"name": "Alice", "line": "5"},
         follow_redirects=True,
     )
     conn = get_connection()
