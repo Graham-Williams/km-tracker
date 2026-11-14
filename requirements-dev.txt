@@ -9,7 +9,7 @@ pytest-playwright==0.10.0
 # every e2e test then errors out until `playwright install chromium` is re-run
 # against the new version. CI already runs that step; the pin makes which
 # browser build the suite was verified against reproducible.
-playwright==1.64.1
+playwright==1.65.0
 # Threaded live-server concurrency test. Must stay >= 2.31, which is the
 # version that fixed CVE-2023-32681 — never pin below that floor.
 requests==2.34.2
